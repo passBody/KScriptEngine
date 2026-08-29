@@ -1,0 +1,187 @@
+# -*- coding: utf-8 -*-
+"""
+图片遮罩预览（可复用控件）
+========================
+
+:class:`ImageOverlay` 在父窗口上盖一层半透明黑色遮罩，居中显示一张可滚轮缩放、
+拖拽平移、双击关闭的图片。资源树预览、image 变量预览共用本控件。
+
+基本用法
+--------
+::
+
+    from widgets import ImageOverlay
+    ov = ImageOverlay(pixmap, parent_window)
+    ov.show_overlay()      # 盖到 parent 上
+    # 用户：滚轮缩放/拖拽/双击关闭；Esc 或点击空白处关闭
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+from PyQt5.QtCore import QEvent, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QPainter, QPixmap
+from PyQt5.QtWidgets import (
+    QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QHBoxLayout,
+    QLabel, QVBoxLayout, QWidget,
+)
+
+__all__ = ["ImageOverlay"]
+
+
+class _ZoomGraphicsView(QGraphicsView):
+    """滚轮缩放 + 拖拽平移的图片视图；双击关闭遮罩。"""
+
+    doubleClicked = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setDragMode(QGraphicsView.ScrollHandDrag)   # 鼠标拖拽平移
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setBackgroundBrush(QColor("#1e1e1e"))
+        self._zoom = 1.0
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        factor = 1.25 if event.angleDelta().y() > 0 else 1 / 1.25
+        new = self._zoom * factor
+        if 0.05 < new < 50:
+            self._zoom = new
+            self.scale(factor, factor)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        self.doubleClicked.emit()      # 双击 → 关闭遮罩（由 ImageOverlay 连接）
+
+    def fit_view(self) -> None:
+        self._zoom = 1.0
+        self.resetTransform()
+        if self.scene() is not None:
+            self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
+
+
+class ImageOverlay(QWidget):
+    """半透明黑色遮罩 + 居中可缩放拖拽图片（可复用）。"""
+
+    def __init__(self, pixmap: QPixmap, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._pixmap = pixmap
+        self.setWindowFlags(Qt.SubWindow)        # 仍属父窗口，但能盖在兄弟控件之上
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        self._view = _ZoomGraphicsView(self)
+        self._scene = QGraphicsScene(self)
+        self._item = QGraphicsPixmapItem(pixmap)
+        self._scene.addItem(self._item)
+        self._view.setScene(self._scene)
+        self._view.doubleClicked.connect(self.close_overlay)   # 双击图片 → 关闭遮罩
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        bar = QHBoxLayout()
+        bar.setContentsMargins(6, 4, 6, 4)
+        self._hint = QLabel("滚轮缩放 · 拖拽平移 · 双击关闭 · Esc/点击空白 关闭")
+        self._hint.setAlignment(Qt.AlignCenter)
+        self._hint.setStyleSheet("color:#aaa; background:#1e1e1e; padding:3px;")
+        bar.addWidget(self._hint)
+        lay.addLayout(bar)
+        lay.addWidget(self._view, 1)
+
+    def show_overlay(self) -> None:
+        """盖到父窗口全屏并显示、聚焦；父窗口 resize 时跟随（事件过滤器）。"""
+        p = self.parentWidget()
+        if p is not None:
+            self.setGeometry(p.rect())
+            p.installEventFilter(self)     # 宿主拖动窗口/面板 → 遮罩同步拉伸，避免割裂
+        self.raise_()
+        self.show()
+        self.setFocus()
+        self._view.fit_view()
+
+    def close_overlay(self) -> None:
+        p = self.parentWidget()
+        if p is not None:
+            p.removeEventFilter(self)
+        self.hide()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt 命名)
+        # 宿主 resize → 遮罩跟随；只响应父窗口自身，事件不吞掉
+        if (obj is self.parentWidget() and event.type() == QEvent.Resize
+                and not self.isHidden()):
+            self.setGeometry(self.parentWidget().rect())
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        if event.key() == Qt.Key_Escape:
+            self.close_overlay()
+        else:
+            super().keyPressEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        # 半透明黑色遮罩底色（_view 自有不透明背景盖住中心，四周呈遮罩色）
+        from PyQt5.QtGui import QPainter
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 160))
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        # 点击遮罩空白（_view 之外）→ 关闭；_view 内部点击由其自行处理不冒泡
+        if event.button() == Qt.LeftButton:
+            self.close_overlay()
+        super().mousePressEvent(event)
+
+
+if __name__ == "__main__":
+    import sys
+    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtGui import QColor, QImage
+    from PyQt5.QtCore import QBuffer
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    img = QImage(120, 80, QImage.Format_RGB32)
+    img.fill(QColor("#3a7bd5"))
+    buf = QBuffer(); buf.open(QBuffer.ReadWrite)
+    img.save(buf, "PNG")
+    pix = QPixmap()
+    pix.loadFromData(bytes(buf.data()))
+
+    host = QWidget()
+    host.resize(400, 300)
+    host.setStyleSheet("background:#fff;")
+    host.show()                        # 遮罩跟随依赖宿主已显示（未显示 widget 不发 resize 事件）
+    app.processEvents()
+    ov = ImageOverlay(pix, host)
+    assert ov._item in ov._scene.items()
+    assert not ov._item.pixmap().isNull()
+    ov.show_overlay()        # 不抛错（父窗口未 show，实际可见需运行时父窗口可见）
+    assert not ov.isHidden()
+    ov.close_overlay()
+    assert ov.isHidden()     # close_overlay 后置隐藏
+    # 双击图片 → doubleClicked 信号 → close_overlay（连线验证，绕过真实鼠标事件）
+    ov.show_overlay()
+    assert not ov.isHidden()
+    got = []
+    ov._view.doubleClicked.connect(lambda: got.append(1))
+    ov._view.doubleClicked.emit()
+    assert got == [1]
+    assert ov.isHidden()     # doubleClicked → close_overlay → 隐藏
+
+    # ---- 14e：宿主 resize → 遮罩跟随（修复「拉动窗口预览窗口不变、画面割裂」） ----
+    ov.show_overlay()
+    assert ov.geometry() == host.rect()
+    host.resize(500, 400)
+    app.processEvents()
+    assert ov.geometry() == host.rect()          # 宿主变宽 → 遮罩同步拉伸
+    ov.close_overlay()
+    assert ov.isHidden()
+    host.resize(600, 450)                        # 已关闭 → 不再跟随、无副作用
+    app.processEvents()
+    assert ov.isHidden()
+    ov.show_overlay()                            # 再开后仍跟随
+    host.resize(420, 330)
+    app.processEvents()
+    assert ov.geometry() == host.rect()
+    ov.close_overlay()
+
+    print("ImageOverlay smoke OK")

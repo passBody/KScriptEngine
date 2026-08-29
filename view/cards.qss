@@ -1,0 +1,79 @@
+/* KScript 步骤卡片样式
+   毛玻璃质感：半透明白底 + 柔和状态色 + 圆角；阴影由代码提供
+   （Qt QSS 不支持 box-shadow → step_card.py 用 QGraphicsDropShadowEffect）。
+   动态状态经属性选择器切换（valid / state / active / selected），
+   由 step_card.py 的 _update_style 设置属性并 unpolish/polish 刷新。
+   注意：激活态属性名必须避开 QWidget 内置 Q_PROPERTY（如 "enabled" 会
+   经 setProperty 走内置 setter = setEnabled，把卡片真正禁用）→ 用 "active"。 */
+
+StepCard {
+    background: rgba(255, 255, 255, 0.68);
+    border: 1px solid rgba(128, 148, 178, 0.55);
+    border-radius: 14px;
+}
+
+/* 状态色（柔和，不太鲜艳）：只改边框色，背景保持毛玻璃半透明 */
+StepCard[state="pending"]  { border-color: rgba(198, 160, 90, 0.85); }
+StepCard[state="running"]  { border-color: rgba(90, 155, 115, 0.9); }
+StepCard[state="finished"] { border-color: rgba(152, 158, 168, 0.8); }
+StepCard[state="error"]    { border-color: rgba(196, 92, 80, 0.9); }
+
+/* 未激活：虚线边框 + 更淡的背景 */
+StepCard[active="false"] {
+    background: rgba(243, 245, 248, 0.55);
+    border-style: dashed;
+}
+
+/* io 非法：红优先（放在 state/enabled 之后，级联覆盖边框色与背景） */
+StepCard[valid="false"] {
+    background: rgba(232, 128, 118, 0.28);
+    border-color: rgba(198, 86, 76, 0.85);
+}
+
+/* 选中高亮：蓝边框（放最后，覆盖状态/非法边框色；背景色不变） */
+StepCard[selected="true"] {
+    border-width: 2px;
+    border-color: rgba(72, 128, 220, 0.95);
+}
+
+#cardName {
+    font-weight: bold;
+    font-size: 13px;
+    color: #333;
+    background: transparent;
+    border: none;
+}
+
+#cardName[active="false"] { color: #999; }
+
+/* 签名框（卡片顶部，编辑步骤标签属性）：未聚焦时融入卡片，聚焦时明显 */
+/* 字号用 pt（「14号」= 14pt）：14px ≈ 10.5pt，比 12px 视觉只大 2px，用户反馈
+   几乎看不出变化 → 改 14pt（≈19px，行高翻倍）才有「放大一号」的明显效果 */
+#cardTag {
+    font-family: "SimSun";
+    font-size: 14pt;
+    color: #555;
+    background: rgba(255, 255, 255, 0.35);
+    border: 1px solid rgba(128, 148, 178, 0.35);
+    border-radius: 8px;
+    padding: 2px 6px;
+    selection-background-color: rgba(72, 128, 220, 0.85);
+}
+
+#cardTag:focus {
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid rgba(72, 128, 220, 0.7);
+}
+
+#cardTag[active="false"] { color: #999; }
+
+#btnActive {
+    border: none;
+    border-radius: 13px;
+    color: #fff;
+    font-weight: bold;
+    font-size: 15px;
+}
+
+#btnActive[active="true"]  { background: rgba(84, 165, 120, 0.92); }
+#btnActive[active="false"] { background: rgba(160, 166, 176, 0.9); }
