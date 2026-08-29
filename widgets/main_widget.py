@@ -27,7 +27,7 @@ import platform
 import sys
 from typing import Callable, List, Optional, Tuple
 
-from PyQt5.QtCore import Qt, QSize, QTimer, pyqtSignal
+from PyQt5.QtCore import QObject, Qt, QSize, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QAction, QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel,
@@ -44,6 +44,9 @@ from model.step_list import StepList
 from model.step_list_store import StepListStore
 from model.step_manager import StepManager
 from model.variable_tree import VariableTree
+from model.hotkey import HotkeyListener
+from model.settings import Settings
+from model.step_runner import StepRunner, StepRunnerState
 from widgets.step_list_view import StepClipboard, StepListView
 from widgets.step_list_tree_widget import StepListTreeWidget
 from widgets.step_tree_widget import StepTreeWidget
@@ -257,6 +260,11 @@ class StepListManagementTree(ManagementTree):
         self._sl_tree: Optional[StepListTreeWidget] = None
         self._host: Optional[_StepListHost] = None
         self._current: Optional[str] = None
+
+    @property
+    def store(self) -> StepListStore:
+        """步骤列表存储（执行器数据源）。"""
+        return self._store
 
     def icon(self) -> QIcon:
         return _make_icon("step")
@@ -571,6 +579,21 @@ class _ActivityBar(QWidget):
             self._buttons[row].setChecked(True)
 
 
+class _ExecBridge(QObject):
+    """执行器跨线程桥：工作线程 emit → Qt queued 到 GUI 线程刷新。"""
+    runner_state = pyqtSignal(object)     # StepRunnerState
+    hotkey_toggle = pyqtSignal()
+
+
+# 模拟注入点：冒烟测试替换以避开真实热键/线程（与 picker 包装同思路）
+def _make_step_runner(store):
+    return StepRunner(store)
+
+
+def _make_hotkey_listener(hotkey, on_toggle):
+    return HotkeyListener(hotkey, on_toggle)
+
+
 # ================================================================
 # 主窗口
 # ================================================================
@@ -591,6 +614,14 @@ class MainWindow(QMainWindow):
         self._status_python: Optional[QLabel] = None
         self._manage_btn: Optional[QToolButton] = None
         self._step_mgr: Optional[StepManagementTree] = None
+        self._runner: Optional[StepRunner] = None
+        self._hotkey_listener: Optional[HotkeyListener] = None
+        self._exec_btn: Optional[QToolButton] = None
+        self._exec_status: Optional[QLabel] = None
+        self._exec_bridge = _ExecBridge()
+        self._exec_bridge.runner_state.connect(self._on_runner_state)
+        self._exec_bridge.hotkey_toggle.connect(self._handle_hotkey_toggle)
+        self._exec_locked = False
 
         self._central = QStackedWidget()
         self.setCentralWidget(self._central)
@@ -656,6 +687,16 @@ class MainWindow(QMainWindow):
         win_btn.setMenu(win_menu)
         tb.addWidget(win_btn)
 
+        tb.addSeparator()
+        self._exec_btn = QToolButton(self)
+        self._exec_btn.setText("执行")
+        self._exec_btn.setToolTip(
+            "点击进入待命：按下热键开始执行全部列表，再按停止（当前步骤完成后停）。\n"
+            "热键勿与步骤按键冲突（模拟按键也会被监听）；模拟输入到游戏窗口需管理员运行。")
+        self._exec_btn.clicked.connect(self._on_exec_clicked)
+        self._exec_btn.setEnabled(False)          # 未开包不可用
+        tb.addWidget(self._exec_btn)
+
     def _on_toggle_log(self, checked: bool) -> None:
         if self._log_widget is not None:
             self._log_widget.setVisible(checked)
@@ -689,6 +730,8 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._status_python)            # 右：Python 版本
         LogModel.instance().add_listener(self._update_status_counts)
         self._update_status_counts()
+        self._exec_status = QLabel("")
+        sb.addPermanentWidget(self._exec_status)
 
     def _update_status_counts(self) -> None:
         assert self._status_counts is not None
@@ -697,6 +740,75 @@ class MainWindow(QMainWindow):
                   if e.level in (LogLevel.ERROR, LogLevel.CRITICAL))
         warn = sum(1 for e in m.entries if e.level == LogLevel.WARNING)
         self._status_counts.setText("错误: %d  警告: %d" % (err, warn))
+
+    # ---- 执行器接线 ----
+    def _on_exec_clicked(self) -> None:
+        """执行按钮：未监听 → 待命（启动热键监听）；已监听 → 停监听。"""
+        if self._hotkey_listener is None:
+            self._start_listening()
+        else:
+            self._stop_listening()
+
+    def _start_listening(self) -> None:
+        if self._package is None:
+            return
+        sl_mgr = self._managers[0] if self._managers else None
+        assert isinstance(sl_mgr, StepListManagementTree)
+        self._runner = _make_step_runner(sl_mgr.store)
+        self._runner.add_state_listener(self._exec_bridge.runner_state.emit)
+        settings = Settings.load()
+        self._hotkey_listener = _make_hotkey_listener(
+            settings.hotkey, self._exec_bridge.hotkey_toggle.emit)
+        self._hotkey_listener.start()
+        assert self._exec_btn is not None
+        self._exec_btn.setText("停止监听")
+        self._set_exec_status("待命：按 %s 执行/停止" % settings.hotkey)
+        LogModel.instance().info("执行器待命：热键 %s（再按停止）" % settings.hotkey)
+
+    def _stop_listening(self) -> None:
+        if self._hotkey_listener is not None:
+            self._hotkey_listener.stop()
+            self._hotkey_listener = None
+        if self._runner is not None:
+            self._runner.request_stop()          # 执行中 → 当前步骤完成后停
+            self._runner = None
+        assert self._exec_btn is not None
+        self._exec_btn.setText("执行")
+        self._set_exec_status("已停止监听")
+        LogModel.instance().info("执行器已停止监听")
+
+    def _handle_hotkey_toggle(self) -> None:
+        """热键按下（GUI 线程，经桥 queued）：READY → start；否则 → request_stop。"""
+        if self._runner is None:
+            return
+        if self._runner.state is StepRunnerState.READY:
+            self._runner.start()
+        else:
+            self._runner.request_stop()
+
+    def _on_runner_state(self, st) -> None:
+        """执行器状态变化（GUI 线程）：状态栏 + 编辑锁定。"""
+        if st is StepRunnerState.RUNNING:
+            self._set_exec_status("执行中……（按热键停止）")
+            self._set_exec_locked(True)
+        elif st is StepRunnerState.STOPPING:
+            self._set_exec_status("停止中……（当前步骤完成后停）")
+        else:
+            self._set_exec_status(
+                "待命：按 %s 执行/停止" % Settings.load().hotkey)
+            self._set_exec_locked(False)
+
+    def _set_exec_status(self, text: str) -> None:
+        if self._exec_status is not None:
+            self._exec_status.setText(text)
+
+    def _set_exec_locked(self, locked: bool) -> None:
+        """执行期间锁定编辑：左侧树面板禁用；预览栈与日志不锁（只读展示）。"""
+        if self._exec_locked == locked:
+            return
+        self._exec_locked = locked
+        if self._tree_stack is not None:
+            self._tree_stack.setEnabled(not locked)
 
     def _on_new(self) -> None:
         LogModel.instance().info("新建工程")
@@ -876,6 +988,8 @@ class MainWindow(QMainWindow):
         assert self._switcher is not None
         # 默认管理树 = 步骤列表管理树（_managers 第 1 位；进入工程即见步骤列表）
         self._switcher.set_current_row(0)
+        if self._exec_btn is not None:
+            self._exec_btn.setEnabled(True)
 
     @staticmethod
     def _load_shared_tree(package: KscpPackage) -> VariableTree:
@@ -910,6 +1024,7 @@ if __name__ == "__main__":
 
     from model.project_variable import ProjectVariable
     from model.step_list import StepList
+    from model.step_runner import StepRunner, StepRunnerState
 
     app = QApplication.instance() or QApplication(sys.argv)
 
@@ -1141,5 +1256,52 @@ class DemoStep(Step):
     finally:
         QFileDialog.getSaveFileName = orig_gsf
     assert calls == []
+
+    # ---- 执行器接线：按钮/状态栏/锁定/热键 toggle 逻辑 ----
+    # 冒烟不得真实全局监听：桩替换监听工厂（__main__ 模块命名空间内直接改全局）
+    class _StubListener:
+        def __init__(self, hotkey, on_toggle):
+            self.hotkey, self.on_toggle = hotkey, on_toggle
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            self.started = False
+
+    _orig_mk_listener = _make_hotkey_listener
+    _make_hotkey_listener = lambda h, cb: _StubListener(h, cb)
+    try:
+        win_exec = MainWindow()
+        win_exec._open_package(KscpPackage.create_empty(), None)
+        app.processEvents()
+        assert win_exec._runner is None
+        # 未开包无执行入口——开包后按钮可用
+        assert win_exec._exec_btn is not None and win_exec._exec_btn.isEnabled()
+        # 点击执行按钮 → 进入待命（listener 启动）；再点 → 停止监听
+        win_exec._exec_btn.click()
+        assert win_exec._hotkey_listener is not None
+        assert isinstance(win_exec._hotkey_listener, _StubListener)
+        assert win_exec._hotkey_listener.started
+        assert "待命" in win_exec._exec_status.text()
+        win_exec._exec_btn.click()
+        assert win_exec._hotkey_listener is None
+        # 热键 toggle：READY → start；RUNNING → request_stop（空 store 无步骤 → 恒 READY）
+        win_exec._exec_btn.click()          # 待命
+        win_exec._handle_hotkey_toggle()    # 模拟热键按下（无步骤 → start 后仍 READY）
+        assert win_exec._runner is not None
+        assert win_exec._runner.state is StepRunnerState.READY
+        # 编辑锁定：锁定时树面板禁用，解锁恢复
+        win_exec._set_exec_locked(True)
+        assert not win_exec._tree_stack.isEnabled()
+        win_exec._set_exec_locked(False)
+        assert win_exec._tree_stack.isEnabled()
+        # 未开包点执行按钮 → 不启动（安全）
+        win_bare = MainWindow()
+        win_bare._exec_btn.click()
+        assert win_bare._hotkey_listener is None
+    finally:
+        _make_hotkey_listener = _orig_mk_listener
 
     print("MainWindow smoke OK")
