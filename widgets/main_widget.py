@@ -581,7 +581,7 @@ class _ActivityBar(QWidget):
 
 class _ExecBridge(QObject):
     """执行器跨线程桥：工作线程 emit → Qt queued 到 GUI 线程刷新。"""
-    runner_state = pyqtSignal(object)     # StepRunnerState
+    runner_state = pyqtSignal(object)     # (gen, StepRunnerState)：代际标记防陈旧覆盖
     hotkey_toggle = pyqtSignal()
 
 
@@ -662,6 +662,7 @@ class MainWindow(QMainWindow):
         self._exec_bridge.runner_state.connect(self._on_runner_state)
         self._exec_bridge.hotkey_toggle.connect(self._handle_hotkey_toggle)
         self._exec_locked = False
+        self._runner_gen = 0                     # 执行器代际：陈旧 runner 迟到状态被忽略
 
         self._central = QStackedWidget()
         self.setCentralWidget(self._central)
@@ -797,7 +798,10 @@ class MainWindow(QMainWindow):
         sl_mgr = self._managers[0] if self._managers else None
         assert isinstance(sl_mgr, StepListManagementTree)
         self._runner = _make_step_runner(sl_mgr.store)
-        self._runner.add_state_listener(self._exec_bridge.runner_state.emit)
+        self._runner_gen += 1
+        gen = self._runner_gen
+        self._runner.add_state_listener(
+            lambda st, g=gen: self._exec_bridge.runner_state.emit((g, st)))
         settings = Settings.load()
         self._hotkey_listener = _make_hotkey_listener(
             settings.hotkey, self._exec_bridge.hotkey_toggle.emit)
@@ -828,8 +832,11 @@ class MainWindow(QMainWindow):
         else:
             self._runner.request_stop()
 
-    def _on_runner_state(self, st) -> None:
+    def _on_runner_state(self, payload) -> None:
         """执行器状态变化（GUI 线程）：状态栏 + 编辑锁定。"""
+        gen, st = payload
+        if gen != self._runner_gen:
+            return                      # 陈旧 runner（已停止）的迟到状态 → 忽略
         if st is StepRunnerState.RUNNING:
             self._set_exec_status("执行中……（按热键停止）")
             self._set_exec_locked(True)
@@ -1361,5 +1368,19 @@ class DemoStep(Step):
     assert not win_exec._hotkey_edit._apply_key("ab")
     assert _fake_settings.hotkey == "f"       # 非法不落盘
     assert win_exec._hotkey_edit.text() == "f"
+
+    # ---- 代际标记（随附修复）：陈旧 runner 迟到 READY 不覆盖新 runner 状态 ----
+    win_exec._exec_btn.click()                       # 停监听（旧 runner 收尾）
+    win_exec._exec_btn.click()                       # 再待命 → 新 runner（新代际）
+    win_exec._set_exec_status("执行中……（按热键停止）")
+    win_exec._set_exec_locked(True)
+    stale_gen = win_exec._runner_gen - 1             # 旧代际
+    win_exec._exec_bridge.runner_state.emit((stale_gen, StepRunnerState.READY))
+    assert "执行中" in win_exec._exec_status.text()  # 陈旧 READY 被忽略
+    assert not win_exec._tree_stack.isEnabled()      # 编辑仍锁定
+    win_exec._exec_bridge.runner_state.emit((win_exec._runner_gen, StepRunnerState.READY))
+    assert "待命" in win_exec._exec_status.text()    # 当前代际状态正常刷新（解锁）
+    assert win_exec._tree_stack.isEnabled()
+    win_exec._exec_btn.click()                       # 复位：停监听
 
     print("MainWindow smoke OK")
