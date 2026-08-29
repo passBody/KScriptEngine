@@ -594,6 +594,45 @@ def _make_hotkey_listener(hotkey, on_toggle):
     return HotkeyListener(hotkey, on_toggle)
 
 
+class _HotkeyEdit(QLineEdit):
+    """热键编辑框：聚焦后按任意键绑定并保存到 setting.json；Esc 还原。"""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self.setFixedWidth(42)
+        self.setAlignment(Qt.AlignCenter)
+        self.setToolTip(
+            "点击后按下任意单字符键绑定执行热键（保存到 setting.json）。\n"
+            "热键勿与步骤按键冲突（模拟按键也会被监听）。")
+        self._settings = Settings.load()
+        self.setText(self._settings.hotkey)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        self.setText("…")                     # 提示等待按键
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        if event.key() == Qt.Key_Escape:
+            self.setText(self._settings.hotkey)   # 取消还原
+            return
+        ch = event.text()
+        if ch:
+            self._apply_key(ch)
+
+    def _apply_key(self, key: str) -> bool:
+        """绑定热键并保存；非法（非单字符）→ False 且还原显示。"""
+        try:
+            self._settings.set_hotkey(key)
+        except ValueError:
+            self.setText(self._settings.hotkey)
+            return False
+        self._settings.save()
+        self.setText(self._settings.hotkey)
+        LogModel.instance().info("执行热键已设为 %s" % self._settings.hotkey)
+        return True
+
+
 # ================================================================
 # 主窗口
 # ================================================================
@@ -618,6 +657,7 @@ class MainWindow(QMainWindow):
         self._hotkey_listener: Optional[HotkeyListener] = None
         self._exec_btn: Optional[QToolButton] = None
         self._exec_status: Optional[QLabel] = None
+        self._hotkey_edit: Optional[QLineEdit] = None
         self._exec_bridge = _ExecBridge()
         self._exec_bridge.runner_state.connect(self._on_runner_state)
         self._exec_bridge.hotkey_toggle.connect(self._handle_hotkey_toggle)
@@ -696,6 +736,8 @@ class MainWindow(QMainWindow):
         self._exec_btn.clicked.connect(self._on_exec_clicked)
         self._exec_btn.setEnabled(False)          # 未开包不可用
         tb.addWidget(self._exec_btn)
+        self._hotkey_edit = _HotkeyEdit(self)
+        tb.addWidget(self._hotkey_edit)
 
     def _on_toggle_log(self, checked: bool) -> None:
         if self._log_widget is not None:
@@ -1303,5 +1345,21 @@ class DemoStep(Step):
         assert win_bare._hotkey_listener is None
     finally:
         _make_hotkey_listener = _orig_mk_listener
+
+    # ---- 热键设置输入框 ----
+    assert win_exec._hotkey_edit is not None
+    # 冒烟不得改写真实 setting.json：替换编辑框的 Settings 为内存桩（save 空操作）
+    _fake_settings = Settings()
+    _fake_settings.save = lambda path=None: None
+    win_exec._hotkey_edit._settings = _fake_settings
+    win_exec._hotkey_edit.setText(win_exec._hotkey_edit._settings.hotkey)
+    assert win_exec._hotkey_edit.text() == "`"
+    # 直接调用绑定逻辑（不真实按键）：合法单字符保存、非法拒绝
+    assert win_exec._hotkey_edit._apply_key("f")
+    assert _fake_settings.hotkey == "f"
+    assert win_exec._hotkey_edit.text() == "f"
+    assert not win_exec._hotkey_edit._apply_key("ab")
+    assert _fake_settings.hotkey == "f"       # 非法不落盘
+    assert win_exec._hotkey_edit.text() == "f"
 
     print("MainWindow smoke OK")
