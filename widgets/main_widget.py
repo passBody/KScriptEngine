@@ -583,6 +583,8 @@ class _ExecBridge(QObject):
     """执行器跨线程桥：工作线程 emit → Qt queued 到 GUI 线程刷新。"""
     runner_state = pyqtSignal(object)     # (gen, StepRunnerState)：代际标记防陈旧覆盖
     hotkey_toggle = pyqtSignal()
+    log_changed = pyqtSignal()            # LogModel 变更（worker 线程记日志）→ GUI 线程刷计数
+    step_status = pyqtSignal()            # 步骤状态变更（执行线程）→ GUI 线程刷卡片颜色
 
 
 # 模拟注入点：冒烟测试替换以避开真实热键/线程（与 picker 包装同思路）
@@ -661,8 +663,11 @@ class MainWindow(QMainWindow):
         self._exec_bridge = _ExecBridge()
         self._exec_bridge.runner_state.connect(self._on_runner_state)
         self._exec_bridge.hotkey_toggle.connect(self._handle_hotkey_toggle)
+        self._exec_bridge.log_changed.connect(self._update_status_counts)
+        self._exec_bridge.step_status.connect(self._on_step_status)
         self._exec_locked = False
         self._runner_gen = 0                     # 执行器代际：陈旧 runner 迟到状态被忽略
+        self._step_hooks: List[Tuple[object, Callable]] = []   # 执行期步骤状态监听（卡片刷新）
 
         self._central = QStackedWidget()
         self.setCentralWidget(self._central)
@@ -771,7 +776,8 @@ class MainWindow(QMainWindow):
         sb.addWidget(self._status_counts)                      # 左：错误/警告计数
         self._status_python = QLabel("Python %s" % platform.python_version())
         sb.addPermanentWidget(self._status_python)            # 右：Python 版本
-        LogModel.instance().add_listener(self._update_status_counts)
+        # 经桥监听：worker 线程记日志 → queued 到 GUI 线程刷计数（不直接操作 QLabel）
+        LogModel.instance().add_listener(self._exec_bridge.log_changed.emit)
         self._update_status_counts()
         self._exec_status = QLabel("")
         sb.addPermanentWidget(self._exec_status)
@@ -793,6 +799,11 @@ class MainWindow(QMainWindow):
             self._stop_listening()
 
     def _start_listening(self) -> None:
+        # 旧 runner 执行/停止中 → 拒绝并发双执行（同一 store 只允许一个执行器）
+        if self._runner is not None and self._runner.state is not StepRunnerState.READY:
+            self._set_exec_status("等待当前执行结束…")
+            LogModel.instance().info("执行器仍忙碌：等待当前执行结束后再待命")
+            return
         if self._package is None:
             return
         sl_mgr = self._managers[0] if self._managers else None
@@ -809,6 +820,7 @@ class MainWindow(QMainWindow):
         assert self._exec_btn is not None
         self._exec_btn.setText("停止监听")
         self._set_exec_status("待命：按 %s 执行/停止" % settings.hotkey)
+        self._set_exec_locked(False)          # 重待命复位锁定（停止监听后立即重待命不卡死）
         LogModel.instance().info("执行器待命：热键 %s（再按停止）" % settings.hotkey)
 
     def _stop_listening(self) -> None:
@@ -817,7 +829,9 @@ class MainWindow(QMainWindow):
             self._hotkey_listener = None
         if self._runner is not None:
             self._runner.request_stop()          # 执行中 → 当前步骤完成后停
-            self._runner = None
+            if self._runner.state is StepRunnerState.READY:
+                self._runner = None              # 已就绪 → 直接释放
+            # 非 READY → 保留引用（防并发双执行）：其自然结束 READY 时经 _on_runner_state 清理
         assert self._exec_btn is not None
         self._exec_btn.setText("执行")
         self._set_exec_status("已停止监听")
@@ -828,12 +842,13 @@ class MainWindow(QMainWindow):
         if self._runner is None:
             return
         if self._runner.state is StepRunnerState.READY:
+            self._attach_step_hooks()          # 执行前挂卡片状态监听
             self._runner.start()
         else:
             self._runner.request_stop()
 
     def _on_runner_state(self, payload) -> None:
-        """执行器状态变化（GUI 线程）：状态栏 + 编辑锁定。"""
+        """执行器状态变化（GUI 线程）：状态栏 + 编辑锁定 + 挂钩清理。"""
         gen, st = payload
         if gen != self._runner_gen:
             return                      # 陈旧 runner（已停止）的迟到状态 → 忽略
@@ -846,6 +861,41 @@ class MainWindow(QMainWindow):
             self._set_exec_status(
                 "待命：按 %s 执行/停止" % Settings.load().hotkey)
             self._set_exec_locked(False)
+            self._detach_step_hooks()
+            # 停止监听后自然结束的旧 runner：READY 回调清理引用（防并发双执行）
+            if self._runner is not None and self._hotkey_listener is None:
+                self._runner = None
+
+    # ---- 执行期卡片状态刷新（spec §6 组件 6）：步骤状态 → 桥 → 重检卡片颜色 ----
+    def _attach_step_hooks(self) -> None:
+        """执行前：为 store 全部步骤挂状态监听（卡片颜色随执行刷新）。"""
+        self._detach_step_hooks()              # 幂等：先清旧钩再挂新钩
+        if not self._managers:
+            return
+        m0 = self._managers[0]
+        if not isinstance(m0, StepListManagementTree):
+            return
+        for path, is_group in m0.store.walk():
+            if is_group:
+                continue
+            for step in m0.store.get(path).steps:
+                cb = lambda _s, _st: self._exec_bridge.step_status.emit()
+                step.add_status_listener(cb)
+                self._step_hooks.append((step, cb))
+
+    def _detach_step_hooks(self) -> None:
+        """执行结束：移除全部步骤状态监听并清空。"""
+        for step, cb in self._step_hooks:
+            step.remove_status_listener(cb)
+        self._step_hooks.clear()
+
+    def _on_step_status(self) -> None:
+        """步骤状态变化（GUI 线程，经桥 queued）：步骤列表卡片重检颜色。"""
+        if not self._managers:
+            return
+        m0 = self._managers[0]
+        if isinstance(m0, StepListManagementTree):
+            m0.refresh_cards()
 
     def _set_exec_status(self, text: str) -> None:
         if self._exec_status is not None:
@@ -1072,6 +1122,7 @@ if __name__ == "__main__":
     from PyQt5.QtWidgets import QApplication
 
     from model.project_variable import ProjectVariable
+    from model.step import StepStatus
     from model.step_list import StepList
     from model.step_runner import StepRunner, StepRunnerState
 
@@ -1326,6 +1377,14 @@ class DemoStep(Step):
         win_exec._open_package(KscpPackage.create_empty(), None)
         app.processEvents()
         assert win_exec._runner is None
+        # C1: 状态栏计数监听经桥（worker 线程日志不得同步操作 QLabel）
+        assert not any(cb is win_exec._update_status_counts
+                       for cb in LogModel.instance()._listeners), \
+            "状态栏计数直接注册 _update_status_counts 会在 worker 线程操作 QLabel"
+        _spy_counts = []
+        win_exec._exec_bridge.log_changed.connect(lambda: _spy_counts.append(1))
+        LogModel.instance().info("counts-spy")
+        assert len(_spy_counts) == 1, _spy_counts      # 日志变更经桥发出
         # 未开包无执行入口——开包后按钮可用
         assert win_exec._exec_btn is not None and win_exec._exec_btn.isEnabled()
         # 点击执行按钮 → 进入待命（listener 启动）；再点 → 停止监听
@@ -1346,10 +1405,110 @@ class DemoStep(Step):
         assert not win_exec._tree_stack.isEnabled()
         win_exec._set_exec_locked(False)
         assert win_exec._tree_stack.isEnabled()
+        # I1: 停止监听后立即重新待命 → 编辑锁定复位（待命成功路径解锁）
+        win_exec._exec_btn.click()               # 停止监听
+        assert win_exec._hotkey_listener is None
+        win_exec._set_exec_locked(True)
+        assert not win_exec._tree_stack.isEnabled()
+        win_exec._start_listening()              # 重待命：成功路径应解锁
+        assert win_exec._tree_stack.isEnabled(), "重待命后编辑仍锁定（卡死）"
+        assert win_exec._hotkey_listener is not None
         # 未开包点执行按钮 → 不启动（安全）
         win_bare = MainWindow()
         win_bare._exec_btn.click()
         assert win_bare._hotkey_listener is None
+
+        # ---- I2: 执行中重待命不得并发双执行（假 runner 状态可控） ----
+        class _FakeRunner:
+            """桩执行器：状态手动置位，记录 start/request_stop 调用。"""
+
+            def __init__(self, store):
+                self.store = store
+                self.state = StepRunnerState.READY
+                self.calls = []
+                self._listeners = []
+
+            def add_state_listener(self, cb):
+                self._listeners.append(cb)
+
+            def start(self):
+                self.calls.append("start")
+
+            def request_stop(self):
+                self.calls.append("stop")
+
+            def _set(self, st):
+                self.state = st
+                for cb in list(self._listeners):
+                    cb(st)
+
+        _orig_mk_runner = _make_step_runner
+        _make_step_runner = lambda store: _FakeRunner(store)
+        try:
+            win_i2 = MainWindow()
+            win_i2._open_package(KscpPackage.create_empty(), None)
+            app.processEvents()
+            win_i2._exec_btn.click()                    # 待命 → 假 runner（READY）
+            fake1 = win_i2._runner
+            assert isinstance(fake1, _FakeRunner)
+            fake1._set(StepRunnerState.RUNNING)         # 模拟开始执行
+            app.processEvents()
+            assert "执行中" in win_i2._exec_status.text()
+            win_i2._exec_btn.click()                    # 停止监听（执行中）
+            assert win_i2._runner is fake1, "执行中停止监听须保留 runner 引用"
+            assert fake1.calls == ["stop"], fake1.calls
+            win_i2._exec_btn.click()                    # 立即重待命 → 守卫拦截
+            assert win_i2._runner is fake1, "执行中重待命不得创建第二个 runner（并发双执行）"
+            assert "等待当前执行结束" in win_i2._exec_status.text()
+            fake1._set(StepRunnerState.READY)           # 旧 runner 自然结束
+            app.processEvents()
+            assert win_i2._runner is None, "旧 runner READY 后引用应清理"
+            win_i2._exec_btn.click()                    # READY 后再待命 → 正常创建
+            assert isinstance(win_i2._runner, _FakeRunner)
+            # I3: 空 store → attach 无 hook；且不崩
+            win_i2._handle_hotkey_toggle()              # READY → attach（空）→ start
+            assert win_i2._step_hooks == []
+            win_i2._exec_btn.click()                    # 复位：停监听
+            # I3: 含步骤 store → attach 后挂钩、状态变更刷卡片、detach 后清空
+            pkg_i3 = KscpPackage.create_empty()
+            pkg_i3.write_file("actions/示例.py", GOOD.encode("utf-8"))
+            tree_i3 = VariableTree.create_empty()
+            tree_i3.add("n1", ProjectVariable.create("number", 100, pkg_i3))
+            pkg_i3.write_file("variables.json", tree_i3.to_json_bytes())
+            slm_i3 = StepListManagementTree(pkg_i3, tree_i3)
+            s_i3 = slm_i3._mgr.create_step("示例")
+            s_i3.io.change_value("input", 0, "5")
+            s_i3.io.change_value("output", 0, "n1")
+            sl_i3 = StepList.create_empty()
+            sl_i3.add(s_i3)
+            slm_i3._store.add_list("主列表", sl_i3)
+            slm_i3._save_store()
+            win_i3 = MainWindow()
+            win_i3._open_package(pkg_i3, None)
+            app.processEvents()
+            win_i3._exec_btn.click()                    # 待命 → 假 runner
+            fake3 = win_i3._runner
+            assert isinstance(fake3, _FakeRunner)
+            assert win_i3._step_hooks == []
+            win_i3._handle_hotkey_toggle()              # READY → attach + start
+            assert len(win_i3._step_hooks) == 1, win_i3._step_hooks
+            fired3 = []
+            win_i3._exec_bridge.step_status.connect(lambda: fired3.append(1))
+            step3 = win_i3._step_hooks[0][0]
+            step3.status = StepStatus.RUNNING
+            assert len(fired3) == 1, fired3             # 状态变更 → 桥 → 卡片刷新
+            step3.status = StepStatus.FINISHED
+            assert len(fired3) == 2, fired3
+            fake3._set(StepRunnerState.RUNNING)         # 模拟执行中
+            app.processEvents()
+            fake3._set(StepRunnerState.READY)           # 执行结束 → detach
+            app.processEvents()
+            assert win_i3._step_hooks == [], win_i3._step_hooks   # detach 后清空
+            step3.status = StepStatus.PENDING
+            assert len(fired3) == 2, fired3             # detach 后不再通知
+            win_i3._exec_btn.click()                    # 复位：停监听
+        finally:
+            _make_step_runner = _orig_mk_runner
     finally:
         _make_hotkey_listener = _orig_mk_listener
 

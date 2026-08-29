@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Set
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QObject, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QLabel, QListWidget,
@@ -48,6 +48,13 @@ _LEVEL_HEX = {
 }
 
 
+class _LogBridge(QObject):
+    """LogModel → GUI 线程信号桥：模型在 worker 线程发日志时，
+    changed.emit 经 Qt queued 连接投递到 GUI 线程再刷新控件。"""
+
+    changed = pyqtSignal()
+
+
 class LogWidget(QWidget):
     """承载 LogModel 的日志窗口：列表 + 级别筛选开关 + 清空 + 导出。"""
 
@@ -55,6 +62,10 @@ class LogWidget(QWidget):
         super().__init__(parent)
         self._model = LogModel.instance()
         self._toggles: Dict[LogLevel, QToolButton] = {}
+        self._bridge = _LogBridge()
+        self._bridge.changed.connect(self._refresh)   # queued：跨线程日志不直接操作控件
+        # sip 信号 emit 每次访问生成新包装对象（身份比较不相等）→ 存储同一对象供 add/remove
+        self._bridge_emit = self._bridge.changed.emit
 
         bar = QHBoxLayout()
         bar.setContentsMargins(6, 4, 6, 4)
@@ -97,7 +108,7 @@ class LogWidget(QWidget):
         lay.addLayout(bar)
         lay.addWidget(self._list, 1)
 
-        self._model.add_listener(self._refresh)
+        self._model.add_listener(self._bridge_emit)
         self._rendered_count = 0    # 已渲染条目数（增量刷新锚点）
         self._refresh()
 
@@ -178,7 +189,7 @@ class LogWidget(QWidget):
             cb.setText(item.text())
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
-        self._model.remove_listener(self._refresh)
+        self._model.remove_listener(self._bridge_emit)
         super().closeEvent(event)
 
 
@@ -190,7 +201,14 @@ if __name__ == "__main__":
     LogModel._reset_instance()
     w = LogWidget()
     m = LogModel.instance()
+    # C1: 监听器须经 QObject 信号桥（worker 线程日志不得同步操作 Qt 控件）
+    assert not any(cb is w._refresh for cb in m._listeners), "直接注册 _refresh 会在 worker 线程操作 QListWidget"
+    assert len(m._listeners) == 1, m._listeners      # 唯一监听器 = _bridge.changed.emit（桥）
+    _spy = []
+    w._bridge.changed.connect(lambda: _spy.append(1))
     m.info("a"); m.debug("b"); m.error("c")
+    assert len(_spy) == 3, _spy                     # 模型变更经桥发出（非 _refresh 直连）
+    app.processEvents()                 # queued 信号经事件循环投递到 GUI 线程
     assert w._list.count() == 3
     # 默认 5 个全勾选 → 全显示
     assert all(not w._list.item(i).isHidden() for i in range(w._list.count()))
@@ -209,6 +227,7 @@ if __name__ == "__main__":
     assert all(not w._list.item(i).isHidden() for i in range(w._list.count()))
     # 清空
     w._btn_clear.click()
+    app.processEvents()                 # clear() 经桥 queued 刷新
     assert w._list.count() == 0
 
     # ---- 增量刷新：追加保留旧条目对象；回看时不被强制拉底 ----
@@ -217,28 +236,46 @@ if __name__ == "__main__":
     w2.resize(300, 40)               # 小窗口：条目超出可视区（滚动条生效）
     m2 = LogModel.instance()
     m2.info("first")
+    app.processEvents()
     it0 = w2._list.item(0)
     assert it0 is not None
     m2.info("second")
+    app.processEvents()
     assert w2._list.item(0) is it0, "增量追加不得重建旧条目对象"
     assert w2._list.count() == 2
     for i in range(10):
         m2.info("filler%d" % i)
+    app.processEvents()
     assert w2._list.count() == 12
     vbar = w2._list.verticalScrollBar()
     vbar.setValue(0)                 # 用户回看顶部
     m2.info("third")
+    app.processEvents()
     assert w2._list.count() == 13
     assert vbar.value() == 0, "回看旧日志时不得被强制拉底"
     # 清空（条目数回退）→ 全量重建
     m2.clear()
+    app.processEvents()
     assert w2._list.count() == 0
     m2.info("after-clear")
+    app.processEvents()
     assert w2._list.count() == 1
     # 右键复制（直接验证 _copy_item）
     m.info("copy-me")
+    app.processEvents()
     it = w._list.item(w._list.count() - 1)
     assert it is not None
     w._copy_item(it)
     assert QApplication.clipboard().text() == it.text()
+    # 关闭 → closeEvent 移除监听器：后续日志不再刷新（且不崩）
+    LogModel._reset_instance()
+    w3 = LogWidget()
+    m3 = LogModel.instance()
+    m3.info("x")
+    app.processEvents()
+    assert w3._list.count() == 1
+    w3.close()
+    m3.info("y")
+    app.processEvents()
+    assert w3._list.count() == 1, "closeEvent 应移除监听器"
     print("LogWidget smoke OK")

@@ -16,6 +16,7 @@
 > 模拟输入到游戏窗口需以管理员身份运行 KScript。
 """
 import re
+import weakref
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -92,6 +93,13 @@ def _to_pixmap(image: Any) -> Optional[QPixmap]:
     return None
 
 
+def _notify_preview_weak(view_ref) -> None:
+    """弱引用回调：视图已销毁 → no-op（io 监听器不持视图强引用，避免泄漏）。"""
+    view = view_ref()
+    if view is not None:
+        view._on_io_changed()
+
+
 class _ClickPreview(QLabel):
     """可点击预览图：左键点击发出 :data:`clicked`。"""
 
@@ -137,7 +145,9 @@ class _MouseInfoView(QWidget):
         lay.addWidget(self._preview)
         lay.addWidget(self._btn_mark)
 
-        step.io.add_listener(self._on_io_changed)   # 素材槽变化 → 刷新预览
+        self_ref = weakref.ref(self)                 # 弱引用：监听器不持视图强引用
+        self._weak_cb = lambda r=self_ref: _notify_preview_weak(r)
+        step.io.add_listener(self._weak_cb)          # 素材槽变化 → 刷新预览
         self._on_io_changed()
 
     # ---- 预览 ----
@@ -334,5 +344,16 @@ if __name__ == "__main__":
         QMessageBox.warning = _warn
     assert warned == [1]
     assert m3.io.input_value(0) == "1" and m3.io.input_value(1) == "2"   # 未改写
+
+    # ---- I4: 视图销毁后监听器不泄漏（弱引用回调；触发 io 变更不崩） ----
+    import weakref as _wr
+    import gc as _gc
+    _v = m3.info_widget()
+    _vref = _wr.ref(_v)
+    del _v
+    _gc.collect()
+    assert _vref() is None, "监听器须为弱引用：视图销毁后应可被 GC 回收"
+    m3.io.change_value("input", 3, "")          # 死回调路径 → no-op 不崩
+    m3.io.change_value("input", 3, "{{图}}")
 
     print("MouseClick smoke OK")
