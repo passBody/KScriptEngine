@@ -45,7 +45,7 @@ import base64
 import json
 import re
 import weakref
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from model.project_variable import ProjectVariable
 
@@ -352,6 +352,8 @@ class StepIOWidget:
         widget = QWidget(parent)
         widget.input_fields = []   # List[QWidget]：各输入槽的控件
         widget.output_fields = []  # List[QWidget]：各输出槽的控件
+        widget.input_labels = []   # List[QLabel]：各输入槽的标签（变量名/常量值）
+        widget.output_labels = []  # List[QLabel]：各输出槽的标签
 
         root = QVBoxLayout(widget)
         root.setContentsMargins(6, 6, 6, 6)
@@ -405,9 +407,11 @@ class StepIOWidget:
 
         row = QHBoxLayout()
         row.setSpacing(4)
-        lbl = QLabel("%s%d" % (vtype, i))
-        lbl.setFixedWidth(54)
+        lbl = QLabel()
+        lbl.setMinimumWidth(40)
+        self._apply_row_label(lbl, "input", i)
         row.addWidget(lbl)
+        widget.input_labels.append(lbl)
         if self._type_is_resource(vtype):
             # 资源类：仅一个按钮（只能选择变量）
             btn = QPushButton(self._display_name(self._input_values[i])
@@ -438,9 +442,11 @@ class StepIOWidget:
 
         row = QHBoxLayout()
         row.setSpacing(4)
-        lbl = QLabel("%s%d" % (vtype, i))
-        lbl.setFixedWidth(54)
+        lbl = QLabel()
+        lbl.setMinimumWidth(40)
+        self._apply_row_label(lbl, "output", i)
         row.addWidget(lbl)
+        widget.output_labels.append(lbl)
         edit = QLineEdit(self._output_values[i])
         edit.setReadOnly(True)
         edit.setPlaceholderText("未指定")
@@ -462,6 +468,32 @@ class StepIOWidget:
         m = _VAR_REF.match(value)
         return m.group(1) if m else value
 
+    def _row_label(self, kind: str, i: int) -> Tuple[str, str]:
+        """槽标签 (显示文本, tooltip)：输入 = 变量名/常量值（空回退「类型+序号」）；
+        输出 = 变量名 / 「未指定」。tooltip 恒含类型。
+
+        显示文本不在此截断——截断在控件层按标签宽度做（见 _apply_row_label）。
+        """
+        if kind == "input":
+            vtype = self._input_type[i]
+            value = self._input_values[i]
+            shown = self._display_name(value) if value else "%s%d" % (vtype, i)
+        else:
+            vtype = self._output_type[i]
+            value = self._output_values[i]
+            shown = value if value else "未指定"
+        return shown, "类型: %s | %s" % (vtype, shown)
+
+    def _apply_row_label(self, lbl: QLabel, kind: str, i: int) -> None:
+        """把槽标签写到 QLabel：超宽省略（80px），tooltip 放完整信息。"""
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtGui import QFontMetrics
+
+        shown, tooltip = self._row_label(kind, i)
+        fm = QFontMetrics(lbl.font())
+        lbl.setText(fm.elidedText(shown, Qt.ElideRight, 80))
+        lbl.setToolTip(tooltip)
+
     def _refresh_input_field(self, widget: QWidget, i: int) -> None:
         from PyQt5.QtWidgets import QLineEdit, QPushButton
 
@@ -473,9 +505,13 @@ class StepIOWidget:
             field.blockSignals(False)
         elif isinstance(field, QPushButton):
             field.setText(self._display_name(value) or "选择变量…")
+        if len(widget.input_labels) > i:      # 标签随值变化同步（变量名/常量值）
+            self._apply_row_label(widget.input_labels[i], "input", i)
 
     def _refresh_output_field(self, widget: QWidget, i: int) -> None:
         widget.output_fields[i].setText(self._output_values[i])
+        if len(widget.output_labels) > i:
+            self._apply_row_label(widget.output_labels[i], "output", i)
 
     # ================================================================
     # 槽位写入（统一入口：更新数据 + 同步已生成控件）
@@ -724,6 +760,26 @@ if __name__ == "__main__":
     w.change_value("input", 0, "7")
     assert card.input_fields[0].text() == "7"
     assert card2.input_fields[0].text() == "7"
+
+    # ---- IO 槽标签：显示变量名/常量值（类型进 tooltip；空槽回退 类型序号） ----
+    wl2 = StepIOWidget(["number", "string"], ["number"], tree, pkg)
+    cl = wl2.gen_widget()
+    assert cl.input_labels[0].text() == "number0"     # 空槽回退
+    assert cl.input_labels[1].text() == "string1"
+    assert cl.output_labels[0].text() == "未指定"
+    assert "number" in cl.input_labels[0].toolTip()   # tooltip 恒含类型
+    # 有值：变量引用 → 变量名；常量 → 常量值
+    wl2.change_value("input", 0, "{{n1}}")
+    assert cl.input_labels[0].text() == "n1"
+    assert "n1" in cl.input_labels[0].toolTip()
+    wl2.change_value("input", 1, "hello")
+    assert cl.input_labels[1].text() == "hello"
+    wl2.change_value("output", 0, "n1")
+    assert cl.output_labels[0].text() == "n1"
+    # 同步刷新：新控件标签读取当前数据
+    cl3 = wl2.gen_widget()
+    assert cl3.input_labels[0].text() == "n1"
+    assert cl3.output_labels[0].text() == "n1"
 
     # 不合规：number 输入空
     w4 = StepIOWidget(["number"], [], tree, pkg)

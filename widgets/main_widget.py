@@ -22,17 +22,18 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import sys
 from typing import Callable, List, Optional, Tuple
 
-from PyQt5.QtCore import QObject, Qt, QSize, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap
+from PyQt5.QtCore import QObject, QPoint, Qt, QSize, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygon
 from PyQt5.QtWidgets import (
-    QAction, QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter,
-    QStackedWidget, QToolButton, QVBoxLayout, QWidget,
+    QAction, QApplication, QDialog, QDialogButtonBox, QFileDialog, QFrame,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+    QPushButton, QSplitter, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from model.kscp_package import KscpPackage
@@ -104,6 +105,19 @@ def _make_icon(kind: str) -> QIcon:
         p.setBrush(QColor("#fff3e0"))
         for y in (12, 18, 24):
             p.drawRoundedRect(9, y, 14, 3, 1, 1)   # 方块内三条横线
+    elif kind == "exec":
+        # 绿色播放三角（执行语义）
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#27ae60"))
+        p.drawPolygon(QPolygon([QPoint(10, 8), QPoint(10, 24), QPoint(25, 16)]))
+    elif kind == "settings":
+        # 齿轮：外环 + 内圆
+        p.setPen(QPen(QColor("#888888"), 2.5))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QPoint(16, 16), 9, 9)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#888888"))
+        p.drawEllipse(QPoint(16, 16), 3.5, 3.5)
     else:
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#888888"))
@@ -543,6 +557,7 @@ class _ActivityBar(QWidget):
         self._lay.setSpacing(6)
         self._lay.addStretch()
         self._buttons: List[QToolButton] = []
+        self._bottom_buttons: List[QToolButton] = []   # 底部功能按钮（clear 不清）
 
     def add_item(self, name: str, icon: QIcon) -> None:
         btn = QToolButton(self)
@@ -566,8 +581,28 @@ class _ActivityBar(QWidget):
                 self.currentChanged.emit(i)
 
         btn.toggled.connect(_on_toggled)
-        self._lay.insertWidget(self._lay.count() - 1, btn)   # 插在 stretch 之前
+        self._lay.insertWidget(self._lay.count() - 1 - len(self._bottom_buttons), btn)
         self._buttons.append(btn)
+
+    def add_bottom_button(self, name: str, icon: QIcon, on_click) -> QToolButton:
+        """底部功能按钮（stretch 之下；``clear()`` 不清除——非管理树切换项）。"""
+        btn = QToolButton(self)
+        btn.setCheckable(True)                     # 状态按钮：待命中 checked（绿色）
+        btn.setAutoRaise(True)
+        btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        btn.setIcon(icon)
+        btn.setIconSize(QSize(26, 26))
+        btn.setFixedSize(44, 44)
+        btn.setToolTip(name)
+        btn.setStyleSheet(
+            "QToolButton { border:none; border-radius:6px; background:transparent; }"
+            "QToolButton:hover { background:#e3e3e3; }"
+            "QToolButton:checked { background:#c8e6c9; }"
+            "QToolButton:checked:hover { background:#b7dcba; }")
+        btn.clicked.connect(on_click)
+        self._lay.addWidget(btn)                   # stretch 之后 = 栏位最底
+        self._bottom_buttons.append(btn)
+        return btn
 
     def clear(self) -> None:
         for btn in self._buttons:
@@ -597,18 +632,21 @@ def _make_hotkey_listener(hotkey, on_toggle):
 
 
 class _HotkeyEdit(QLineEdit):
-    """热键编辑框：聚焦后按任意键绑定并保存到 setting.json；Esc 还原。"""
+    """热键编辑框（设置弹窗内）：聚焦后按任意键完成绑定（保存由弹窗按钮统一执行）。"""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, initial: str, parent=None) -> None:
         super().__init__(parent)
+        self._hotkey = initial
         self.setReadOnly(True)
         self.setFixedWidth(42)
         self.setAlignment(Qt.AlignCenter)
         self.setToolTip(
-            "点击后按下任意单字符键绑定执行热键（保存到 setting.json）。\n"
+            "点击后按下任意单字符键绑定执行热键。\n"
             "热键勿与步骤按键冲突（模拟按键也会被监听）。")
-        self._settings = Settings.load()
-        self.setText(self._settings.hotkey)
+        self.setText(self._hotkey)
+
+    def hotkey(self) -> str:
+        return self._hotkey
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         self.setText("…")                     # 提示等待按键
@@ -616,23 +654,48 @@ class _HotkeyEdit(QLineEdit):
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         if event.key() == Qt.Key_Escape:
-            self.setText(self._settings.hotkey)   # 取消还原
+            self.setText(self._hotkey)           # 取消还原
             return
         ch = event.text()
         if ch:
             self._apply_key(ch)
 
     def _apply_key(self, key: str) -> bool:
-        """绑定热键并保存；非法（非单字符）→ False 且还原显示。"""
-        try:
-            self._settings.set_hotkey(key)
-        except ValueError:
-            self.setText(self._settings.hotkey)
+        """校验并记录待绑定热键；非法（非单字符）→ False 且还原显示。"""
+        if not isinstance(key, str) or len(key) != 1:
+            self.setText(self._hotkey)
             return False
-        self._settings.save()
-        self.setText(self._settings.hotkey)
-        LogModel.instance().info("执行热键已设为 %s" % self._settings.hotkey)
+        self._hotkey = key
+        self.setText(key)
         return True
+
+
+class _SettingsDialog(QDialog):
+    """设置弹窗：触发热键配置；右下角「保存/取消」按钮。"""
+
+    def __init__(self, hotkey: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("设置")
+        self.resize(320, 140)
+        self._hotkey_edit = _HotkeyEdit(hotkey, self)
+
+        lay = QVBoxLayout(self)
+        row = QHBoxLayout()
+        lbl = QLabel("触发热键")
+        row.addWidget(lbl)
+        row.addStretch()
+        row.addWidget(self._hotkey_edit)
+        lay.addLayout(row)
+        tip = QLabel("热键勿与步骤按键冲突（模拟按键也会被监听）；\n模拟输入到游戏窗口需管理员运行。")
+        tip.setStyleSheet("color:#888;")
+        lay.addWidget(tip)
+        btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def hotkey(self) -> str:
+        return self._hotkey_edit.hotkey()
 
 
 # ================================================================
@@ -657,9 +720,9 @@ class MainWindow(QMainWindow):
         self._step_mgr: Optional[StepManagementTree] = None
         self._runner: Optional[StepRunner] = None
         self._hotkey_listener: Optional[HotkeyListener] = None
-        self._exec_btn: Optional[QToolButton] = None
+        self._exec_btn: Optional[QToolButton] = None       # 活动栏底部「执行」按钮
+        self._settings_btn: Optional[QToolButton] = None   # 活动栏底部「设置」按钮
         self._exec_status: Optional[QLabel] = None
-        self._hotkey_edit: Optional[QLineEdit] = None
         self._exec_bridge = _ExecBridge()
         self._exec_bridge.runner_state.connect(self._on_runner_state)
         self._exec_bridge.hotkey_toggle.connect(self._handle_hotkey_toggle)
@@ -692,14 +755,16 @@ class MainWindow(QMainWindow):
         # 文件菜单：新建 / 打开 / 保存 / 另存为（快捷键挂菜单项上）
         file_btn = QToolButton(self)
         file_btn.setText("文件")
+        file_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)   # 无图标占位，防文本被压缩截断
+        file_btn.setMinimumWidth(self.fontMetrics().horizontalAdvance("文件") + 16)
         file_btn.setPopupMode(QToolButton.InstantPopup)
         file_menu = QMenu(file_btn)
-        a_new = file_menu.addAction("新建")
-        a_new.setShortcut("Ctrl+N")
-        a_new.triggered.connect(self._on_new)
-        a_open = file_menu.addAction("打开…")
-        a_open.setShortcut("Ctrl+O")
-        a_open.triggered.connect(self._on_open)
+        self._a_new = file_menu.addAction("新建")
+        self._a_new.setShortcut("Ctrl+N")
+        self._a_new.triggered.connect(self._on_new)
+        self._a_open = file_menu.addAction("打开…")
+        self._a_open.setShortcut("Ctrl+O")
+        self._a_open.triggered.connect(self._on_open)
         file_menu.addSeparator()
         a_save = file_menu.addAction("保存")
         a_save.setShortcut("Ctrl+S")
@@ -713,6 +778,8 @@ class MainWindow(QMainWindow):
         # 管理菜单：导入步骤模板（未开包不可用）
         self._manage_btn = QToolButton(self)
         self._manage_btn.setText("管理")
+        self._manage_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self._manage_btn.setMinimumWidth(self.fontMetrics().horizontalAdvance("管理") + 16)
         self._manage_btn.setPopupMode(QToolButton.InstantPopup)
         manage_menu = QMenu(self._manage_btn)
         a_import = manage_menu.addAction("导入…")
@@ -724,6 +791,8 @@ class MainWindow(QMainWindow):
         # 窗口菜单：显示日志开关
         win_btn = QToolButton(self)
         win_btn.setText("窗口")
+        win_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        win_btn.setMinimumWidth(self.fontMetrics().horizontalAdvance("窗口") + 16)
         win_btn.setPopupMode(QToolButton.InstantPopup)
         win_menu = QMenu(win_btn)
         self._a_show_log = win_menu.addAction("显示日志")
@@ -732,18 +801,6 @@ class MainWindow(QMainWindow):
         self._a_show_log.toggled.connect(self._on_toggle_log)
         win_btn.setMenu(win_menu)
         tb.addWidget(win_btn)
-
-        tb.addSeparator()
-        self._exec_btn = QToolButton(self)
-        self._exec_btn.setText("执行")
-        self._exec_btn.setToolTip(
-            "点击进入待命：按下热键开始执行全部列表，再按停止（当前步骤完成后停）。\n"
-            "热键勿与步骤按键冲突（模拟按键也会被监听）；模拟输入到游戏窗口需管理员运行。")
-        self._exec_btn.clicked.connect(self._on_exec_clicked)
-        self._exec_btn.setEnabled(False)          # 未开包不可用
-        tb.addWidget(self._exec_btn)
-        self._hotkey_edit = _HotkeyEdit(self)
-        tb.addWidget(self._hotkey_edit)
 
     def _on_toggle_log(self, checked: bool) -> None:
         if self._log_widget is not None:
@@ -803,6 +860,7 @@ class MainWindow(QMainWindow):
         if self._runner is not None and self._runner.state is not StepRunnerState.READY:
             self._set_exec_status("等待当前执行结束…")
             LogModel.instance().info("执行器仍忙碌：等待当前执行结束后再待命")
+            self._update_exec_button()          # 按钮 checked 状态回正（拒绝路径）
             return
         if self._package is None:
             return
@@ -813,15 +871,14 @@ class MainWindow(QMainWindow):
         gen = self._runner_gen
         self._runner.add_state_listener(
             lambda st, g=gen: self._exec_bridge.runner_state.emit((g, st)))
-        settings = Settings.load()
+        hotkey = self._current_hotkey()
         self._hotkey_listener = _make_hotkey_listener(
-            settings.hotkey, self._exec_bridge.hotkey_toggle.emit)
+            hotkey, self._exec_bridge.hotkey_toggle.emit)
         self._hotkey_listener.start()
-        assert self._exec_btn is not None
-        self._exec_btn.setText("停止监听")
-        self._set_exec_status("待命：按 %s 执行/停止" % settings.hotkey)
+        self._update_exec_button()
+        self._set_exec_status("待命：按 %s 执行/停止" % hotkey)
         self._set_exec_locked(False)          # 重待命复位锁定（停止监听后立即重待命不卡死）
-        LogModel.instance().info("执行器待命：热键 %s（再按停止）" % settings.hotkey)
+        LogModel.instance().info("执行器待命：热键 %s（再按停止）" % hotkey)
 
     def _stop_listening(self) -> None:
         if self._hotkey_listener is not None:
@@ -832,8 +889,7 @@ class MainWindow(QMainWindow):
             if self._runner.state is StepRunnerState.READY:
                 self._runner = None              # 已就绪 → 直接释放
             # 非 READY → 保留引用（防并发双执行）：其自然结束 READY 时经 _on_runner_state 清理
-        assert self._exec_btn is not None
-        self._exec_btn.setText("执行")
+        self._update_exec_button()
         self._set_exec_status("已停止监听")
         LogModel.instance().info("执行器已停止监听")
 
@@ -859,7 +915,7 @@ class MainWindow(QMainWindow):
             self._set_exec_status("停止中……（当前步骤完成后停）")
         else:
             self._set_exec_status(
-                "待命：按 %s 执行/停止" % Settings.load().hotkey)
+                "待命：按 %s 执行/停止" % self._current_hotkey())
             self._set_exec_locked(False)
             self._detach_step_hooks()
             # 停止监听后自然结束的旧 runner：READY 回调清理引用（防并发双执行）
@@ -901,13 +957,93 @@ class MainWindow(QMainWindow):
         if self._exec_status is not None:
             self._exec_status.setText(text)
 
+    # ---- 执行/设置按钮（活动栏底部） ----
+    def _update_exec_button(self) -> None:
+        """执行按钮视觉态：待命（监听中）→ 绿色 checked + tooltip「停止监听」；否则复原。"""
+        if self._exec_btn is None:
+            return
+        listening = self._hotkey_listener is not None
+        self._exec_btn.setChecked(listening)
+        self._exec_btn.setToolTip(
+            "停止监听" if listening else
+            "执行：点击进入待命，按下热键开始执行全部列表，再按停止（当前步骤完成后停）。\n"
+            "热键勿与步骤按键冲突（模拟按键也会被监听）；模拟输入到游戏窗口需管理员运行。")
+
+    def _on_settings_clicked(self) -> None:
+        """打开设置弹窗（触发热键配置）；保存 → setting.json + .kscp/executor.json。"""
+        if self._package is None:
+            return
+        dlg = _SettingsDialog(self._current_hotkey(), self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        self._apply_hotkey(dlg.hotkey())
+
+    def _current_hotkey(self) -> str:
+        """当前生效热键：.kscp 内 executor.json 优先（工程自带配置）；否则本地 setting.json。"""
+        if self._package is not None and self._package.exists("executor.json"):
+            try:
+                data = json.loads(
+                    self._package.read_file("executor.json").decode("utf-8"))
+                if isinstance(data, dict) and isinstance(data.get("hotkey"), str) \
+                        and len(data["hotkey"]) == 1:
+                    return data["hotkey"]
+                LogModel.instance().warning("executor.json 热键配置非法，回退本地设置")
+            except (ValueError, UnicodeDecodeError):
+                LogModel.instance().warning("executor.json 无法读取，回退本地设置")
+        return Settings.load().hotkey
+
+    def _apply_hotkey(self, key: str) -> None:
+        """保存热键：setting.json + 工程包 executor.json（有路径则立即落盘）。
+
+        待命（监听中）时重建监听器使新热键即时生效。
+        """
+        settings = Settings.load()
+        settings.set_hotkey(key)
+        settings.save()
+        if self._package is not None:
+            self._package.write_file(
+                "executor.json",
+                json.dumps({"hotkey": key}, ensure_ascii=False).encode("utf-8"))
+            if self._kscp_path:
+                try:
+                    self._package.save(self._kscp_path)
+                except OSError as e:
+                    QMessageBox.warning(self, "设置", "工程文件保存失败：%s" % e)
+                    LogModel.instance().error("设置保存到 .kscp 失败：%s" % e)
+        # 待命中 → 用新热键重建监听（旧监听器销毁）
+        if self._hotkey_listener is not None:
+            self._hotkey_listener.stop()
+            self._hotkey_listener = None
+            self._hotkey_listener = _make_hotkey_listener(
+                key, self._exec_bridge.hotkey_toggle.emit)
+            self._hotkey_listener.start()
+            self._set_exec_status("待命：按 %s 执行/停止" % key)
+        LogModel.instance().info("执行热键已设为 %s" % key)
+
     def _set_exec_locked(self, locked: bool) -> None:
-        """执行期间锁定编辑：左侧树面板禁用；预览栈与日志不锁（只读展示）。"""
+        """执行期间锁定所有影响执行器的 GUI 编辑入口：
+
+        树面板（步骤/变量/模板/资源）、预览栈（卡片视图/变量编辑/资源预览——
+        卡片右键增删步骤、变量编辑都从这里漏）、管理菜单（导入模板）、
+        文件菜单的新建/打开（换工程）、设置按钮（改热键）。
+        执行按钮保留（停止通道）；日志面板与保存只读无害不锁。
+        """
         if self._exec_locked == locked:
             return
         self._exec_locked = locked
+        enabled = not locked
         if self._tree_stack is not None:
-            self._tree_stack.setEnabled(not locked)
+            self._tree_stack.setEnabled(enabled)
+        if self._preview_stack is not None:
+            self._preview_stack.setEnabled(enabled)
+        if self._manage_btn is not None:
+            # 管理按钮基础态 = 已开包才可用；解锁时不能把它错误启用（未开包场景）
+            self._manage_btn.setEnabled(enabled and self._package is not None)
+        if self._settings_btn is not None:
+            self._settings_btn.setEnabled(enabled)
+        for a in (getattr(self, "_a_new", None), getattr(self, "_a_open", None)):
+            if a is not None:
+                a.setEnabled(enabled)
 
     def _on_new(self) -> None:
         LogModel.instance().info("新建工程")
@@ -980,6 +1116,12 @@ class MainWindow(QMainWindow):
         # 切换栏（VSCode 风格图标条，无标题，悬停显示功能名）
         self._switcher = _ActivityBar()
         self._switcher.currentChanged.connect(self._on_switch)
+        # 栏位最底：执行（待命/停止监听）与设置（热键配置弹窗）
+        self._exec_btn = self._switcher.add_bottom_button(
+            "执行", _make_icon("exec"), self._on_exec_clicked)
+        self._update_exec_button()
+        self._settings_btn = self._switcher.add_bottom_button(
+            "设置", _make_icon("settings"), self._on_settings_clicked)
 
         # 树栏（标题随当前管理树变化）
         self._tree_stack = QStackedWidget()
@@ -1387,14 +1529,19 @@ class DemoStep(Step):
         assert len(_spy_counts) == 1, _spy_counts      # 日志变更经桥发出
         # 未开包无执行入口——开包后按钮可用
         assert win_exec._exec_btn is not None and win_exec._exec_btn.isEnabled()
-        # 点击执行按钮 → 进入待命（listener 启动）；再点 → 停止监听
+        # 活动栏底部按钮：执行 + 设置存在
+        assert win_exec._settings_btn is not None
+        assert len(win_exec._switcher._bottom_buttons) == 2
+        # 点击执行按钮 → 进入待命（listener 启动 + 按钮绿色 checked）；再点 → 停止监听
         win_exec._exec_btn.click()
         assert win_exec._hotkey_listener is not None
         assert isinstance(win_exec._hotkey_listener, _StubListener)
         assert win_exec._hotkey_listener.started
+        assert win_exec._exec_btn.isChecked(), "待命中执行按钮应呈 checked（绿色）"
         assert "待命" in win_exec._exec_status.text()
         win_exec._exec_btn.click()
         assert win_exec._hotkey_listener is None
+        assert not win_exec._exec_btn.isChecked()
         # 热键 toggle：READY → start；RUNNING → request_stop（空 store 无步骤 → 恒 READY）
         win_exec._exec_btn.click()          # 待命
         win_exec._handle_hotkey_toggle()    # 模拟热键按下（无步骤 → start 后仍 READY）
@@ -1405,6 +1552,18 @@ class DemoStep(Step):
         assert not win_exec._tree_stack.isEnabled()
         win_exec._set_exec_locked(False)
         assert win_exec._tree_stack.isEnabled()
+        # ⑤ 执行期间锁定所有影响执行器的编辑入口（预览栈/管理菜单/文件新建打开/设置按钮）
+        win_exec._set_exec_locked(True)
+        assert not win_exec._preview_stack.isEnabled()
+        assert not win_exec._manage_btn.isEnabled()
+        assert not win_exec._settings_btn.isEnabled()
+        assert not win_exec._a_new.isEnabled() and not win_exec._a_open.isEnabled()
+        assert win_exec._exec_btn.isEnabled()          # 执行按钮保留（停止通道）
+        win_exec._set_exec_locked(False)
+        assert win_exec._preview_stack.isEnabled()
+        assert win_exec._manage_btn.isEnabled()        # 已开包 → 解锁后恢复可用
+        assert win_exec._settings_btn.isEnabled()
+        assert win_exec._a_new.isEnabled() and win_exec._a_open.isEnabled()
         # I1: 停止监听后立即重新待命 → 编辑锁定复位（待命成功路径解锁）
         win_exec._exec_btn.click()               # 停止监听
         assert win_exec._hotkey_listener is None
@@ -1413,10 +1572,13 @@ class DemoStep(Step):
         win_exec._start_listening()              # 重待命：成功路径应解锁
         assert win_exec._tree_stack.isEnabled(), "重待命后编辑仍锁定（卡死）"
         assert win_exec._hotkey_listener is not None
-        # 未开包点执行按钮 → 不启动（安全）
+        # 未开包：无活动栏 → 执行/设置按钮不存在（无入口，安全）
         win_bare = MainWindow()
-        win_bare._exec_btn.click()
-        assert win_bare._hotkey_listener is None
+        assert win_bare._exec_btn is None and win_bare._settings_btn is None
+        # 工具栏菜单按钮：最小宽度 >= 文本度量（防文字被压缩截断）
+        fm = win_bare.fontMetrics()
+        assert win_bare._manage_btn.minimumWidth() >= fm.horizontalAdvance("管理")
+        assert win_bare._manage_btn.toolButtonStyle() == Qt.ToolButtonTextOnly
 
         # ---- I2: 执行中重待命不得并发双执行（假 runner 状态可控） ----
         class _FakeRunner:
@@ -1512,21 +1674,35 @@ class DemoStep(Step):
     finally:
         _make_hotkey_listener = _orig_mk_listener
 
-    # ---- 热键设置输入框 ----
-    assert win_exec._hotkey_edit is not None
-    # 冒烟不得改写真实 setting.json：替换编辑框的 Settings 为内存桩（save 空操作）
+    # ---- 设置弹窗 + 热键编辑框 ----
+    # 编辑框：点击后按键绑定（不真实按键，直接调 _apply_key）；非法拒绝并还原
+    dlg = _SettingsDialog("`")
+    assert dlg._hotkey_edit.text() == "`"
+    assert dlg._hotkey_edit._apply_key("f")
+    assert dlg._hotkey_edit.text() == "f" and dlg.hotkey() == "f"
+    assert not dlg._hotkey_edit._apply_key("ab")
+    assert dlg._hotkey_edit.text() == "f" and dlg.hotkey() == "f"   # 非法不落盘、显示还原
+    # _apply_hotkey：setting.json 内存桩不落盘 + 工程包 executor.json 写入
     _fake_settings = Settings()
     _fake_settings.save = lambda path=None: None
-    win_exec._hotkey_edit._settings = _fake_settings
-    win_exec._hotkey_edit.setText(win_exec._hotkey_edit._settings.hotkey)
-    assert win_exec._hotkey_edit.text() == "`"
-    # 直接调用绑定逻辑（不真实按键）：合法单字符保存、非法拒绝
-    assert win_exec._hotkey_edit._apply_key("f")
-    assert _fake_settings.hotkey == "f"
-    assert win_exec._hotkey_edit.text() == "f"
-    assert not win_exec._hotkey_edit._apply_key("ab")
-    assert _fake_settings.hotkey == "f"       # 非法不落盘
-    assert win_exec._hotkey_edit.text() == "f"
+    _orig_load = Settings.load
+    Settings.load = staticmethod(lambda path=None: _fake_settings)
+    try:
+        win_exec._apply_hotkey("g")
+    finally:
+        Settings.load = _orig_load
+    assert _fake_settings.hotkey == "g"
+    assert win_exec._package.exists("executor.json")
+    data = json.loads(win_exec._package.read_file("executor.json").decode("utf-8"))
+    assert data == {"hotkey": "g"}, data
+    # 工程优先：_current_hotkey 读 executor.json；本地无则读 Settings
+    assert win_exec._current_hotkey() == "g"
+    win_exec._package.remove("executor.json")
+    try:
+        assert win_exec._current_hotkey() == "`"      # 回退本地设置（默认）
+    finally:
+        win_exec._package.write_file(
+            "executor.json", b'{"hotkey": "g"}')
 
     # ---- 代际标记（随附修复）：陈旧 runner 迟到 READY 不覆盖新 runner 状态 ----
     # 本段再次点击执行按钮 → 重新桩替换监听工厂（冒烟不得真实全局监听）

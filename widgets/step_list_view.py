@@ -34,8 +34,8 @@ from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PyQt5.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QGraphicsItem,
     QGraphicsProxyWidget, QGraphicsScene, QGraphicsSimpleTextItem,
-    QGraphicsView, QMenu, QMessageBox, QStyle, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QGraphicsView, QMenu, QMessageBox, QStyle, QToolTip, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from model.step_list import StepList
@@ -62,6 +62,29 @@ def _label_slot() -> float:
     probe = QGraphicsSimpleTextItem("⚠: 样例文本")
     probe.setFont(QFont("SimSun", 12))
     return probe.boundingRect().height() + 4.0
+
+
+class _ErrorLabelItem(QGraphicsSimpleTextItem):
+    """卡片错误标签：完整文本存 ``_full``，悬停时 QToolTip 浮窗显示完整信息。
+
+    显示文本可能被省略到卡宽（见 :meth:`StepListView._set_error_label`）；
+    浮窗在 hoverEnter 弹出、hoverLeave 收起。
+    """
+
+    def __init__(self, text: str, full: str) -> None:
+        super().__init__(text)
+        self._full = full
+        self.setAcceptHoverEvents(True)
+
+    def set_full(self, full: str) -> None:
+        """同步完整文本（标签复用路径：文本变更时不重建 item）。"""
+        self._full = full
+
+    def hoverEnterEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        QToolTip.showText(event.screenPos(), self._full)
+
+    def hoverLeaveEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        QToolTip.hideText()
 
 
 class _CardShadowItem(QGraphicsItem):
@@ -299,6 +322,8 @@ class StepListView(QGraphicsView):
         """按卡片当前 io 校验同步其下方错误标签（合规 → 移除）。
 
         文本格式「⚠: 原因1, 原因2」；标签在卡片外正下方居中（y = 卡底 + 4）。
+        完整文本宽于卡片时以省略号截断到卡宽（:class:`_ErrorLabelItem` 悬停
+        浮窗显示完整文本，见 QToolTip）。
         """
         label = self._error_labels.get(card)
         reasons = card.step.io.error_reasons()
@@ -307,13 +332,21 @@ class StepListView(QGraphicsView):
                 self._scene.removeItem(label)
                 del self._error_labels[card]
             return
-        text = "⚠: " + ", ".join(reasons)
+        full = "⚠: " + ", ".join(reasons)
+        # 超宽省略：显示文本截断到卡宽；完整文本挂在 item._full（悬停浮窗）
+        fm = QFontMetrics(QFont("SimSun", 12))
+        if fm.horizontalAdvance(full) > card.width():
+            text = fm.elidedText(full, Qt.ElideRight, card.width())
+        else:
+            text = full
         if label is None:
-            label = self._scene.addSimpleText(text)
+            label = _ErrorLabelItem(text, full)
             label.setFont(QFont("SimSun", 12))
             label.setBrush(QColor(200, 50, 40))   # 错误红
+            self._scene.addItem(label)
             self._error_labels[card] = label
         else:
+            label.set_full(full)                  # 同步完整文本（供浮窗）
             label.setText(text)
         p = self._proxies[self._cards.index(card)].pos()
         r = label.boundingRect()
@@ -321,7 +354,7 @@ class StepListView(QGraphicsView):
         pad = card.height() * _SCALE_GROW
         label.setPos(p.x() + (card.width() - r.width()) / 2.0,
                      p.y() + card.height() + pad + 4.0)
-        self._fit_scene_width()   # 多原因文本可宽于卡片 → 场景宽同步扩展
+        self._fit_scene_width()   # 未截断文本仍可宽于卡片 → 场景宽同步扩展
 
     def _viewport_overhead(self) -> int:
         """视口外占用：上下 frame 边框 + 水平滚动条高度。
@@ -1025,17 +1058,20 @@ class DemoStep(Step):
                 + list(view._index_labels.values())):
         r = view.mapFromScene(lbl.sceneBoundingRect()).boundingRect()
         assert vp.contains(r), (vp, r, lbl.text())
-    # 宽错误标签（多原因，文本宽于卡片）→ 场景宽扩展、标签完整在场景内
+    # 宽错误标签（多原因，文本宽于卡片）→ 省略到卡宽 + 完整文本挂在 _full
     for c in view._cards:
         c.step.io.change_value("input", 0, "")
         c.step.io.change_value("output", 0, "")
     view.refresh_validity()
     assert len(view._error_labels) == len(view._cards)
-    sc_r = view.scene().sceneRect()
+    card_w = view._cards[0].width()
     for lbl in view._error_labels.values():
-        br = lbl.sceneBoundingRect()
-        assert br.x() >= sc_r.x() and br.right() <= sc_r.right(), \
-            (lbl.text(), br, sc_r)
+        full = lbl._full
+        assert full.startswith("⚠: ") and len(full) > 3, full
+        assert lbl.text().endswith("…"), (lbl.text(), full)      # 超宽被省略
+        assert lbl.boundingRect().width() <= card_w + 2.0, \
+            (lbl.text(), lbl.boundingRect())
+        assert lbl.acceptHoverEvents()                           # 悬停浮窗开关
 
     # ---- J-7：序号标签 (n/总数) 在卡片正上方 ----
     view.set_list(sl, mgr)
