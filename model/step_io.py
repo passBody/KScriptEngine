@@ -101,6 +101,7 @@ class StepIOWidget:
         self._output_values: List[str] = [""] * len(self._output_type)
         self._picker: Optional[Callable[..., Optional[str]]] = None  # None -> 内置默认
         self._widgets: List["weakref.ref[QWidget]"] = []  # 已生成控件弱引用
+        self._listeners: List[Callable[[], None]] = []  # 槽值变更监听（任意写入路径均通知）
 
     # ================================================================
     # 类型扩展接口（预留）
@@ -116,6 +117,44 @@ class StepIOWidget:
         """该类型是否为资源类（决定编辑器样式：资源类只能选择）。"""
         h = ProjectVariable.type_of(vtype)
         return h.is_resource if h is not None else False
+
+    # ================================================================
+    # 槽值变更监听（自定义视图刷新预览等用；纯 Python 回调，无 Qt）
+    # ================================================================
+    def add_listener(self, cb: Callable[[], None]) -> None:
+        """注册槽值变更监听：任何输入/输出槽值写入后调用 ``cb()``。"""
+        self._listeners.append(cb)
+
+    def remove_listener(self, cb: Callable[[], None]) -> None:
+        """移除监听者；未注册静默忽略。"""
+        try:
+            self._listeners.remove(cb)
+        except ValueError:
+            pass
+
+    def _notify_listeners(self) -> None:
+        for cb in list(self._listeners):   # 拷贝遍历：回调可增删监听者
+            try:
+                cb()
+            except Exception:
+                pass                       # 监听者异常不打断数据写入
+
+    def input_value(self, i: int) -> str:
+        """读取输入槽原始串（常量或 ``{{变量名}}``）；越界抛 :class:`IndexError`。"""
+        if not 0 <= i < len(self._input_values):
+            raise IndexError("输入索引越界: %d" % i)
+        return self._input_values[i]
+
+    def output_value(self, i: int) -> str:
+        """读取输出槽原始串（变量名）；越界抛 :class:`IndexError`。"""
+        if not 0 <= i < len(self._output_values):
+            raise IndexError("输出索引越界: %d" % i)
+        return self._output_values[i]
+
+    @property
+    def tree(self) -> "VariableTree":
+        """关联的变量树（自定义视图解析 ``{{变量}}`` 引用用）。"""
+        return self._tree
 
     # ================================================================
     # 合规性 / 解析 / 写回
@@ -448,6 +487,7 @@ class StepIOWidget:
             if wd is skip:
                 continue
             self._refresh_input_field(wd, i)
+        self._notify_listeners()
 
     def _set_output(self, i: int, value: str,
                     skip: Optional[QWidget] = None) -> None:
@@ -456,6 +496,7 @@ class StepIOWidget:
             if wd is skip:
                 continue
             self._refresh_output_field(wd, i)
+        self._notify_listeners()
 
     def change_value(self, kind: str, index: int, value: str) -> None:
         """手动修改输入/输出槽位（程序化设置，同步刷新所有已生成控件）。
@@ -785,5 +826,39 @@ if __name__ == "__main__":
     w17 = StepIOWidget(["number"], ["number"], tree, pkg)
     w17.change_value("input", 0, "{{不存在}}")
     assert w17.error_reasons() == ["变量不存在: 不存在", "输出变量未指定"]
+
+    # ---- 槽值变更监听 + 读取接口 ----
+    # add_listener：change_value 与 GUI 编辑两路写入都通知；remove 后不通知
+    events = []
+    wl = StepIOWidget(["number"], ["number"], tree, pkg)
+    wl.add_listener(lambda: events.append(1))
+    wl.change_value("input", 0, "5")
+    assert events == [1], events                 # change_value 路径
+    cw = wl.gen_widget()
+    cw.input_fields[0].setText("7")              # GUI 编辑路径（模拟用户输入）
+    assert events == [1, 1], events
+    cb2 = lambda: events.append(2)
+    wl.add_listener(cb2)
+    wl.change_value("input", 0, "3")
+    assert events == [1, 1, 1, 2], events        # 多监听者依次通知
+    wl.remove_listener(cb2)
+    wl.change_value("input", 0, "4")
+    assert events == [1, 1, 1, 2, 1], events
+    # 监听者异常不中断写入
+    def bad_cb():
+        raise RuntimeError("boom")
+    wl.add_listener(bad_cb)
+    wl.change_value("input", 0, "6")             # 不抛
+    assert wl.input_value(0) == "6"
+    # 读取接口
+    assert wl.input_value(0) == "6"
+    assert wl.output_value(0) == ""
+    for bad_i, fn in ((-1, lambda i: wl.input_value(i)),
+                      (1, lambda i: wl.input_value(i))):
+        try:
+            fn(bad_i)
+            raise AssertionError("越界应抛 IndexError")
+        except IndexError:
+            pass
 
     print("StepIOWidget smoke OK")
