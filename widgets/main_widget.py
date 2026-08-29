@@ -1370,17 +1370,23 @@ class DemoStep(Step):
     assert win_exec._hotkey_edit.text() == "f"
 
     # ---- 代际标记（随附修复）：陈旧 runner 迟到 READY 不覆盖新 runner 状态 ----
-    win_exec._exec_btn.click()                       # 停监听（旧 runner 收尾）
-    win_exec._exec_btn.click()                       # 再待命 → 新 runner（新代际）
-    win_exec._set_exec_status("执行中……（按热键停止）")
-    win_exec._set_exec_locked(True)
-    stale_gen = win_exec._runner_gen - 1             # 旧代际
-    win_exec._exec_bridge.runner_state.emit((stale_gen, StepRunnerState.READY))
-    assert "执行中" in win_exec._exec_status.text()  # 陈旧 READY 被忽略
-    assert not win_exec._tree_stack.isEnabled()      # 编辑仍锁定
-    win_exec._exec_bridge.runner_state.emit((win_exec._runner_gen, StepRunnerState.READY))
-    assert "待命" in win_exec._exec_status.text()    # 当前代际状态正常刷新（解锁）
-    assert win_exec._tree_stack.isEnabled()
-    win_exec._exec_btn.click()                       # 复位：停监听
+    # 本段再次点击执行按钮 → 重新桩替换监听工厂（冒烟不得真实全局监听）
+    _orig_mk_listener2 = _make_hotkey_listener
+    _make_hotkey_listener = lambda h, cb: _StubListener(h, cb)
+    try:
+        win_exec._exec_btn.click()                       # 停监听（旧 runner 收尾）
+        win_exec._exec_btn.click()                       # 再待命 → 新 runner（新代际）
+        win_exec._set_exec_status("执行中……（按热键停止）")
+        win_exec._set_exec_locked(True)
+        stale_gen = win_exec._runner_gen - 1             # 旧代际
+        win_exec._exec_bridge.runner_state.emit((stale_gen, StepRunnerState.READY))
+        assert "执行中" in win_exec._exec_status.text()  # 陈旧 READY 被忽略
+        assert not win_exec._tree_stack.isEnabled()      # 编辑仍锁定
+        win_exec._exec_bridge.runner_state.emit((win_exec._runner_gen, StepRunnerState.READY))
+        assert "待命" in win_exec._exec_status.text()    # 当前代际状态正常刷新（解锁）
+        assert win_exec._tree_stack.isEnabled()
+        win_exec._exec_btn.click()                       # 复位：停监听
+    finally:
+        _make_hotkey_listener = _orig_mk_listener2
 
     print("MainWindow smoke OK")
