@@ -169,6 +169,14 @@ class StepCard(QFrame):
         self._selected = selected
         self._update_style()
 
+    def set_read_only(self, ro: bool) -> None:
+        """执行期只读：禁用激活按钮/签名编辑/io 控件（悬停动画由视图管理，不受影响）。"""
+        self._btn_active.setEnabled(not ro)
+        self._tag_edit.setReadOnly(ro)
+        for fld in (list(self._io_widget.input_fields)
+                    + list(self._io_widget.output_fields)):
+            fld.setEnabled(not ro)
+
     # ================================================================
     # 内部
     # ================================================================

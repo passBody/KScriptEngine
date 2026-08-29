@@ -30,12 +30,12 @@ from typing import Dict, List, Optional
 from PyQt5.QtCore import (
     QEasingCurve, QEvent, QPointF, QRectF, Qt, QVariantAnimation, pyqtSignal,
 )
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QKeySequence, QPainter
 from PyQt5.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QGraphicsItem,
     QGraphicsProxyWidget, QGraphicsScene, QGraphicsSimpleTextItem,
-    QGraphicsView, QMenu, QMessageBox, QStyle, QToolTip, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QGraphicsView, QMenu, QMessageBox, QShortcut, QStyle, QToolTip,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from model.step_list import StepList
@@ -217,6 +217,11 @@ class StepListView(QGraphicsView):
         self._index_labels: Dict[StepCard, QGraphicsSimpleTextItem] = {}
 
         self._scene = QGraphicsScene(self)
+        # Del 快捷键：删除选中卡片（含多选）——焦点在视图时不再落到树的「删除列表」
+        self._del_shortcut = QShortcut(QKeySequence.Delete, self)
+        self._del_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._del_shortcut.activated.connect(self._delete_selected)
+        self._read_only = False            # 执行期只读：禁编辑/右键/Del，保留悬停缩放
         self.setScene(self._scene)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -280,6 +285,7 @@ class StepListView(QGraphicsView):
         y = round(pad + slot + _EDGE)
         for n, step in enumerate(sl, 1):
             card = StepCard(step)
+            card.set_read_only(self._read_only)    # 执行期只读卡片（重建时同步）
             card.io_changed.connect(self.edited)   # 卡片内 io 编辑 → 内容已改（宿主保存）
             # io 编辑同步该卡错误标签（不重建；卡销毁后信号不会再来）
             card.io_changed.connect(
@@ -571,8 +577,45 @@ class StepListView(QGraphicsView):
         sel = set(self._multi)
         return [c for c in self._cards if c in sel]
 
+    def set_read_only(self, ro: bool) -> None:
+        """执行期只读：禁右键菜单/Del 删除/卡片编辑，**保留悬停缩放动画与滚轮**。
+
+        与禁用整个视图（setEnabled(False)）的关键区别：禁用会吞掉 hover 事件
+        → 执行中卡片缩放动画消失（用户报告）。只读化把动画保留、把编辑入口全关。
+        """
+        self._read_only = ro
+        self._del_shortcut.setEnabled(not ro)
+        for card in self._cards:
+            card.set_read_only(ro)
+
+    def _delete_selected(self) -> None:
+        """Del 快捷键：删除选中卡片（含多选批量），列表本身保留。
+
+        动机（用户报告）：全选卡片后按 Del——焦点在树上时触发树的「删除列表」
+        快捷键，把整列表误删；给视图挂自己的 Del 后，焦点在卡片即删卡片。
+        """
+        if self._step_list is None:
+            return
+        cards = self._selected_cards()
+        if not cards:
+            return
+        n = len(cards)
+        if QMessageBox.question(
+                self, "删除", "确定删除选中的 %d 个步骤？" % n,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes) != QMessageBox.Yes:
+            return
+        for i in sorted((self._cards.index(c) for c in cards), reverse=True):
+            self._step_list.remove(i)
+        self._multi = []
+        self._selected = None
+        self.refresh()
+        self.edited.emit()
+
     # ---- 右键菜单 ----
     def _on_context_menu(self, pos) -> None:
+        if self._read_only:
+            return                      # 执行期只读：右键菜单禁弹
         card = self._card_at(pos)
         if card is not None:
             # 菜单 exec_ 需要全局坐标；viewport 局部坐标直接用会在视图左上角弹出
@@ -593,6 +636,8 @@ class StepListView(QGraphicsView):
             self._paste(len(self._step_list) if self._step_list is not None else 0)
 
     def _on_card_menu(self, card: StepCard, pos) -> None:
+        if self._read_only:
+            return                      # 执行期只读
         self._card_menu(card, pos)   # StepCard.contextMenuEvent 已传全局坐标
 
     def _card_menu(self, card: StepCard, global_pos) -> None:
@@ -834,6 +879,25 @@ class DemoStep(Step):
         assert clipboard.steps is not None          # 剪贴板保留（可再次粘贴）
         view._paste(2)
         assert len(sl) == n
+    finally:
+        QMessageBox.question = orig_q
+
+    # Del 快捷键：删除选中卡片（多选批量）；列表本身保留（空列表不误删）
+    # 独立探针（不污染主 view 的卡片数量——后续冒烟依赖其现状）
+    del_view = StepListView(mgr, StepClipboard())
+    del_sl = StepList.create_empty()
+    for _ in range(4):
+        del_sl.add(make_step())
+    del_view.set_list(del_sl, mgr)
+    assert del_view._del_shortcut is not None
+    assert del_view._del_shortcut.key() == QKeySequence(QKeySequence.Delete)
+    del_view._multi = [del_view._cards[0], del_view._cards[2]]
+    del_view._selected = del_view._cards[0]
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+    try:
+        del_view._delete_selected()
+        assert len(del_sl) == 2                      # 两张选中卡被删，列表保留
+        assert len(del_view._cards) == 2
     finally:
         QMessageBox.question = orig_q
 

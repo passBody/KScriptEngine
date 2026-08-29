@@ -71,6 +71,10 @@ class Step:
     def __init__(self, io: StepIOWidget, enabled: bool = True,
                  tag: str = "") -> None:
         self.io = io                     # 步骤输入/输出设置（数据 + GUI 生成器）
+        # 槽标签显示参数名（dataclass 字段名，如 x/y）而非类型名
+        self.io.set_slot_names(
+            [f.name for f in fields(self.input_class)] if self.input_class is not object else None,
+            [f.name for f in fields(self.output_class)] if self.output_class is not object else None)
         self.enabled = enabled           # 是否运行（勾选运行；默认运行）
         self.tag = tag                   # 标签/签名（用户标记；卡片上方可编辑）
         self._status = StepStatus.PENDING    # 经 status 属性读写（变更即通知监听者）

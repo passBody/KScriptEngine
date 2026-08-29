@@ -99,6 +99,8 @@ class StepIOWidget:
         self._package = package
         self._input_values: List[str] = [""] * len(self._input_type)
         self._output_values: List[str] = [""] * len(self._output_type)
+        self._input_names: Optional[List[str]] = None    # 参数名（Step 签名注入；None=无名字）
+        self._output_names: Optional[List[str]] = None
         self._picker: Optional[Callable[..., Optional[str]]] = None  # None -> 内置默认
         self._widgets: List["weakref.ref[QWidget]"] = []  # 已生成控件弱引用
         self._listeners: List[Callable[[], None]] = []  # 槽值变更监听（任意写入路径均通知）
@@ -155,6 +157,16 @@ class StepIOWidget:
     def tree(self) -> "VariableTree":
         """关联的变量树（自定义视图解析 ``{{变量}}`` 引用用）。"""
         return self._tree
+
+    def set_slot_names(self, input_names: Optional[List[str]],
+                       output_names: Optional[List[str]]) -> None:
+        """设置槽标签用的参数名（来自 Step 的输入/输出 dataclass 字段名）。
+
+        ``None`` = 无名字 → 标签回退「类型+序号」。名字数量与槽数不符时
+        只取前 N 个，多余忽略（防调用方数据错误）。
+        """
+        self._input_names = list(input_names) if input_names else None
+        self._output_names = list(output_names) if output_names else None
 
     # ================================================================
     # 合规性 / 解析 / 写回
@@ -469,20 +481,27 @@ class StepIOWidget:
         return m.group(1) if m else value
 
     def _row_label(self, kind: str, i: int) -> Tuple[str, str]:
-        """槽标签 (显示文本, tooltip)：输入 = 变量名/常量值（空回退「类型+序号」）；
-        输出 = 变量名 / 「未指定」。tooltip 恒含类型。
+        """槽标签 (显示文本, tooltip)：**参数名**（Step 签名注入，如 ``x``/``y``），
+        无名字回退「类型+序号」；tooltip 含类型与当前值（变量名/常量）。
 
         显示文本不在此截断——截断在控件层按标签宽度做（见 _apply_row_label）。
         """
         if kind == "input":
             vtype = self._input_type[i]
             value = self._input_values[i]
-            shown = self._display_name(value) if value else "%s%d" % (vtype, i)
+            names = self._input_names
         else:
             vtype = self._output_type[i]
             value = self._output_values[i]
+            names = self._output_names
+        if names is not None and i < len(names) and names[i]:
+            shown = names[i]
+        elif kind == "input":
+            shown = "%s%d" % (vtype, i)
+        else:
             shown = value if value else "未指定"
-        return shown, "类型: %s | %s" % (vtype, shown)
+        current = self._display_name(value) if value else "（空）"
+        return shown, "类型: %s | 当前: %s" % (vtype, current)
 
     def _apply_row_label(self, lbl: QLabel, kind: str, i: int) -> None:
         """把槽标签写到 QLabel：超宽省略（80px），tooltip 放完整信息。"""
@@ -761,25 +780,28 @@ if __name__ == "__main__":
     assert card.input_fields[0].text() == "7"
     assert card2.input_fields[0].text() == "7"
 
-    # ---- IO 槽标签：显示变量名/常量值（类型进 tooltip；空槽回退 类型序号） ----
+    # ---- IO 槽标签：参数名优先（Step 签名注入）；无名字回退 类型+序号 ----
     wl2 = StepIOWidget(["number", "string"], ["number"], tree, pkg)
     cl = wl2.gen_widget()
-    assert cl.input_labels[0].text() == "number0"     # 空槽回退
+    assert cl.input_labels[0].text() == "number0"     # 无名字回退
     assert cl.input_labels[1].text() == "string1"
     assert cl.output_labels[0].text() == "未指定"
     assert "number" in cl.input_labels[0].toolTip()   # tooltip 恒含类型
-    # 有值：变量引用 → 变量名；常量 → 常量值
+    # 注入参数名 → 标签显示参数名；tooltip 含类型与当前值
+    wl2.set_slot_names(["x", "y"], ["结果"])
     wl2.change_value("input", 0, "{{n1}}")
-    assert cl.input_labels[0].text() == "n1"
-    assert "n1" in cl.input_labels[0].toolTip()
+    assert cl.input_labels[0].text() == "x"
+    assert "n1" in cl.input_labels[0].toolTip()       # 当前值进 tooltip
     wl2.change_value("input", 1, "hello")
-    assert cl.input_labels[1].text() == "hello"
+    assert cl.input_labels[1].text() == "y"
+    assert "hello" in cl.input_labels[1].toolTip()
     wl2.change_value("output", 0, "n1")
-    assert cl.output_labels[0].text() == "n1"
-    # 同步刷新：新控件标签读取当前数据
+    assert cl.output_labels[0].text() == "结果"
+    assert "n1" in cl.output_labels[0].toolTip()
+    # 同步刷新：新控件标签读取参数名
     cl3 = wl2.gen_widget()
-    assert cl3.input_labels[0].text() == "n1"
-    assert cl3.output_labels[0].text() == "n1"
+    assert cl3.input_labels[0].text() == "x"
+    assert cl3.output_labels[0].text() == "结果"
 
     # 不合规：number 输入空
     w4 = StepIOWidget(["number"], [], tree, pkg)

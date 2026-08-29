@@ -26,7 +26,7 @@ import json
 import os
 import platform
 import sys
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QObject, QPoint, Qt, QSize, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygon
@@ -38,6 +38,7 @@ from PyQt5.QtWidgets import (
 
 from model.kscp_package import KscpPackage
 from model.log_model import LogLevel, LogModel
+from model.step import StepStatus
 from widgets.resource_tree_widget import ResourceTreeWidget
 from widgets.log_widget import LogWidget
 from widgets.variable_tree_widget import VariableTreeWidget
@@ -46,7 +47,6 @@ from model.step_list_store import StepListStore
 from model.step_manager import StepManager
 from model.variable_tree import VariableTree
 from model.hotkey import HotkeyListener
-from model.settings import Settings
 from model.step_runner import StepRunner, StepRunnerState
 from widgets.step_list_view import StepClipboard, StepListView
 from widgets.step_list_tree_widget import StepListTreeWidget
@@ -280,6 +280,14 @@ class StepListManagementTree(ManagementTree):
         """步骤列表存储（执行器数据源）。"""
         return self._store
 
+    def set_read_only(self, ro: bool) -> None:
+        """执行期只读：树可点击切换查看列表（禁拖拽/右键/快捷键/勾选），
+        卡片视图禁编辑保留悬停动画。"""
+        if self._sl_tree is not None:
+            self._sl_tree.set_read_only(ro)
+        if self._host is not None:
+            self._host.set_read_only(ro)
+
     def icon(self) -> QIcon:
         return _make_icon("step")
 
@@ -462,6 +470,10 @@ class _StepListHost(QStackedWidget):
     def refresh_validity(self) -> None:
         self._view.refresh_validity()
 
+    def set_read_only(self, ro: bool) -> None:
+        """执行期只读转发：卡片视图禁编辑但保留悬停动画。"""
+        self._view.set_read_only(ro)
+
 
 class PlaceholderManagementTree(ManagementTree):
     """占位管理树：演示切换 + 预留接口，后续替换为真实实现。"""
@@ -584,10 +596,15 @@ class _ActivityBar(QWidget):
         self._lay.insertWidget(self._lay.count() - 1 - len(self._bottom_buttons), btn)
         self._buttons.append(btn)
 
-    def add_bottom_button(self, name: str, icon: QIcon, on_click) -> QToolButton:
-        """底部功能按钮（stretch 之下；``clear()`` 不清除——非管理树切换项）。"""
+    def add_bottom_button(self, name: str, icon: QIcon, on_click,
+                          checkable: bool = False) -> QToolButton:
+        """底部功能按钮（stretch 之下；``clear()`` 不清除——非管理树切换项）。
+
+        ``checkable``：状态按钮（如执行待命态绿色高亮）；瞬时按钮（如设置）
+        用 False——否则点击后 checked 样式残留（悬停/按压高亮不退）。
+        """
         btn = QToolButton(self)
-        btn.setCheckable(True)                     # 状态按钮：待命中 checked（绿色）
+        btn.setCheckable(checkable)
         btn.setAutoRaise(True)
         btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
         btn.setIcon(icon)
@@ -619,7 +636,7 @@ class _ExecBridge(QObject):
     runner_state = pyqtSignal(object)     # (gen, StepRunnerState)：代际标记防陈旧覆盖
     hotkey_toggle = pyqtSignal()
     log_changed = pyqtSignal()            # LogModel 变更（worker 线程记日志）→ GUI 线程刷计数
-    step_status = pyqtSignal()            # 步骤状态变更（执行线程）→ GUI 线程刷卡片颜色
+    step_status = pyqtSignal(object)      # 步骤状态变更（执行线程）→ GUI 线程刷卡片颜色/树高亮
 
 
 # 模拟注入点：冒烟测试替换以避开真实热键/线程（与 picker 包装同思路）
@@ -690,6 +707,8 @@ class _SettingsDialog(QDialog):
         tip.setStyleSheet("color:#888;")
         lay.addWidget(tip)
         btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Save).setText("保存")
+        btns.button(QDialogButtonBox.Cancel).setText("取消")
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
@@ -731,6 +750,7 @@ class MainWindow(QMainWindow):
         self._exec_locked = False
         self._runner_gen = 0                     # 执行器代际：陈旧 runner 迟到状态被忽略
         self._step_hooks: List[Tuple[object, Callable]] = []   # 执行期步骤状态监听（卡片刷新）
+        self._step_paths: Dict[object, str] = {}   # 执行期 step → 列表路径（树高亮映射）
 
         self._central = QStackedWidget()
         self.setCentralWidget(self._central)
@@ -924,8 +944,10 @@ class MainWindow(QMainWindow):
 
     # ---- 执行期卡片状态刷新（spec §6 组件 6）：步骤状态 → 桥 → 重检卡片颜色 ----
     def _attach_step_hooks(self) -> None:
-        """执行前：为 store 全部步骤挂状态监听（卡片颜色随执行刷新）。"""
+        """执行前：为 store 全部步骤挂状态监听（卡片颜色随执行刷新、
+        树高亮正在执行的列表）。"""
         self._detach_step_hooks()              # 幂等：先清旧钩再挂新钩
+        self._step_paths = {}
         if not self._managers:
             return
         m0 = self._managers[0]
@@ -935,23 +957,42 @@ class MainWindow(QMainWindow):
             if is_group:
                 continue
             for step in m0.store.get(path).steps:
-                cb = lambda _s, _st: self._exec_bridge.step_status.emit()
+                self._step_paths[step] = path
+                cb = lambda s, _st: self._exec_bridge.step_status.emit(s)
                 step.add_status_listener(cb)
                 self._step_hooks.append((step, cb))
 
     def _detach_step_hooks(self) -> None:
-        """执行结束：移除全部步骤状态监听并清空。"""
+        """执行结束：移除全部步骤状态监听并清空 + 清除树高亮。"""
         for step, cb in self._step_hooks:
             step.remove_status_listener(cb)
         self._step_hooks.clear()
+        self._step_paths = {}
+        self._clear_running_highlight()
 
-    def _on_step_status(self) -> None:
-        """步骤状态变化（GUI 线程，经桥 queued）：步骤列表卡片重检颜色。"""
+    def _clear_running_highlight(self) -> None:
+        """清除步骤列表树的执行高亮（▶ 前缀/蓝色）。"""
+        if not self._managers:
+            return
+        m0 = self._managers[0]
+        if isinstance(m0, StepListManagementTree) and m0._sl_tree is not None:
+            m0._sl_tree.set_running_path(None)
+
+    def _on_step_status(self, step) -> None:
+        """步骤状态变化（GUI 线程，经桥 queued）：卡片重检颜色 + 树高亮执行中列表。"""
         if not self._managers:
             return
         m0 = self._managers[0]
         if isinstance(m0, StepListManagementTree):
             m0.refresh_cards()
+            if m0._sl_tree is not None:
+                # 找当前 RUNNING 的步骤 → 高亮其列表；无则清高亮
+                running = None
+                for s, path in self._step_paths.items():
+                    if s.status is StepStatus.RUNNING:
+                        running = path
+                        break
+                m0._sl_tree.set_running_path(running)
 
     def _set_exec_status(self, text: str) -> None:
         if self._exec_status is not None:
@@ -979,7 +1020,11 @@ class MainWindow(QMainWindow):
         self._apply_hotkey(dlg.hotkey())
 
     def _current_hotkey(self) -> str:
-        """当前生效热键：.kscp 内 executor.json 优先（工程自带配置）；否则本地 setting.json。"""
+        """当前生效热键：.kscp 内 executor.json 优先（工程自带配置）；缺失/非法 → 默认 `` ` ``。
+
+        开包后热键完全随工程走——**不读写 setting.json**（executor.json 一旦
+        存在即唯一来源，避免两处配置互相覆盖的困惑）。
+        """
         if self._package is not None and self._package.exists("executor.json"):
             try:
                 data = json.loads(
@@ -987,19 +1032,17 @@ class MainWindow(QMainWindow):
                 if isinstance(data, dict) and isinstance(data.get("hotkey"), str) \
                         and len(data["hotkey"]) == 1:
                     return data["hotkey"]
-                LogModel.instance().warning("executor.json 热键配置非法，回退本地设置")
+                LogModel.instance().warning("executor.json 热键配置非法，使用默认热键")
             except (ValueError, UnicodeDecodeError):
-                LogModel.instance().warning("executor.json 无法读取，回退本地设置")
-        return Settings.load().hotkey
+                LogModel.instance().warning("executor.json 无法读取，使用默认热键")
+        return "`"
 
     def _apply_hotkey(self, key: str) -> None:
-        """保存热键：setting.json + 工程包 executor.json（有路径则立即落盘）。
+        """保存热键到工程包 executor.json（有路径则立即落盘 .kscp）。
 
-        待命（监听中）时重建监听器使新热键即时生效。
+        不写 setting.json（executor.json 为唯一来源）。待命（监听中）时
+        重建监听器使新热键即时生效。
         """
-        settings = Settings.load()
-        settings.set_hotkey(key)
-        settings.save()
         if self._package is not None:
             self._package.write_file(
                 "executor.json",
@@ -1023,19 +1066,28 @@ class MainWindow(QMainWindow):
     def _set_exec_locked(self, locked: bool) -> None:
         """执行期间锁定所有影响执行器的 GUI 编辑入口：
 
-        树面板（步骤/变量/模板/资源）、预览栈（卡片视图/变量编辑/资源预览——
-        卡片右键增删步骤、变量编辑都从这里漏）、管理菜单（导入模板）、
-        文件菜单的新建/打开（换工程）、设置按钮（改热键）。
-        执行按钮保留（停止通道）；日志面板与保存只读无害不锁。
+        * 步骤列表树 + 卡片视图 → **只读模式**：条目仍可点击切换查看列表、
+          卡片悬停缩放动画保留，但拖拽/右键/Del/勾选/卡片编辑全禁
+        * 变量/模板/资源树与其预览 → 整树禁用（无查看需求）
+        * 管理菜单（导入模板）、文件菜单新建/打开（换工程）、设置按钮（改热键）禁用
+        * 执行按钮保留（停止通道）；日志面板与保存只读无害不锁
         """
         if self._exec_locked == locked:
             return
         self._exec_locked = locked
         enabled = not locked
-        if self._tree_stack is not None:
-            self._tree_stack.setEnabled(enabled)
-        if self._preview_stack is not None:
-            self._preview_stack.setEnabled(enabled)
+        for m in self._managers:
+            if isinstance(m, StepListManagementTree):
+                m.set_read_only(locked)
+                continue
+            # 已构建的树/预览才需要处理（懒构建：未构建的不会出现在屏幕）
+            tw = getattr(m, "_vtree", None) or getattr(m, "_stree", None) \
+                or getattr(m, "_rtree", None)
+            if tw is not None:
+                tw.setEnabled(enabled)
+            pw = getattr(m, "_preview", None)
+            if pw is not None:
+                pw.setEnabled(enabled)
         if self._manage_btn is not None:
             # 管理按钮基础态 = 已开包才可用；解锁时不能把它错误启用（未开包场景）
             self._manage_btn.setEnabled(enabled and self._package is not None)
@@ -1116,9 +1168,9 @@ class MainWindow(QMainWindow):
         # 切换栏（VSCode 风格图标条，无标题，悬停显示功能名）
         self._switcher = _ActivityBar()
         self._switcher.currentChanged.connect(self._on_switch)
-        # 栏位最底：执行（待命/停止监听）与设置（热键配置弹窗）
+        # 栏位最底：执行（待命/停止监听，checkable 状态钮）与设置（瞬时按钮）
         self._exec_btn = self._switcher.add_bottom_button(
-            "执行", _make_icon("exec"), self._on_exec_clicked)
+            "执行", _make_icon("exec"), self._on_exec_clicked, checkable=True)
         self._update_exec_button()
         self._settings_btn = self._switcher.add_bottom_button(
             "设置", _make_icon("settings"), self._on_settings_clicked)
@@ -1547,20 +1599,25 @@ class DemoStep(Step):
         win_exec._handle_hotkey_toggle()    # 模拟热键按下（无步骤 → start 后仍 READY）
         assert win_exec._runner is not None
         assert win_exec._runner.state is StepRunnerState.READY
-        # 编辑锁定：锁定时树面板禁用，解锁恢复
+        # 编辑锁定：步骤列表树走只读模式（可点击查看、禁编辑；不整树禁用——
+        # 禁用会吞 hover 事件导致卡片缩放动画消失）；其余树整树禁用
+        sl_tree = win_exec._managers[0]._sl_tree
+        assert sl_tree is not None
+        var_tree = win_exec._managers[1].tree_widget()
         win_exec._set_exec_locked(True)
-        assert not win_exec._tree_stack.isEnabled()
+        assert sl_tree._read_only, "步骤列表树应进入只读模式"
+        assert not var_tree.isEnabled()                 # 变量树整树禁用
         win_exec._set_exec_locked(False)
-        assert win_exec._tree_stack.isEnabled()
-        # ⑤ 执行期间锁定所有影响执行器的编辑入口（预览栈/管理菜单/文件新建打开/设置按钮）
+        assert not sl_tree._read_only
+        assert var_tree.isEnabled()
+        # ⑤ 执行期间锁定所有影响执行器的编辑入口（管理菜单/文件新建打开/设置按钮）
         win_exec._set_exec_locked(True)
-        assert not win_exec._preview_stack.isEnabled()
         assert not win_exec._manage_btn.isEnabled()
         assert not win_exec._settings_btn.isEnabled()
         assert not win_exec._a_new.isEnabled() and not win_exec._a_open.isEnabled()
         assert win_exec._exec_btn.isEnabled()          # 执行按钮保留（停止通道）
+        assert not win_exec._exec_locked or win_exec._exec_locked
         win_exec._set_exec_locked(False)
-        assert win_exec._preview_stack.isEnabled()
         assert win_exec._manage_btn.isEnabled()        # 已开包 → 解锁后恢复可用
         assert win_exec._settings_btn.isEnabled()
         assert win_exec._a_new.isEnabled() and win_exec._a_open.isEnabled()
@@ -1568,9 +1625,9 @@ class DemoStep(Step):
         win_exec._exec_btn.click()               # 停止监听
         assert win_exec._hotkey_listener is None
         win_exec._set_exec_locked(True)
-        assert not win_exec._tree_stack.isEnabled()
+        assert sl_tree._read_only
         win_exec._start_listening()              # 重待命：成功路径应解锁
-        assert win_exec._tree_stack.isEnabled(), "重待命后编辑仍锁定（卡死）"
+        assert not sl_tree._read_only, "重待命后编辑仍锁定（卡死）"
         assert win_exec._hotkey_listener is not None
         # 未开包：无活动栏 → 执行/设置按钮不存在（无入口，安全）
         win_bare = MainWindow()
@@ -1655,12 +1712,21 @@ class DemoStep(Step):
             win_i3._handle_hotkey_toggle()              # READY → attach + start
             assert len(win_i3._step_hooks) == 1, win_i3._step_hooks
             fired3 = []
-            win_i3._exec_bridge.step_status.connect(lambda: fired3.append(1))
+            win_i3._exec_bridge.step_status.connect(lambda _s=None: fired3.append(1))
             step3 = win_i3._step_hooks[0][0]
             step3.status = StepStatus.RUNNING
             assert len(fired3) == 1, fired3             # 状态变更 → 桥 → 卡片刷新
+            app.processEvents()
+            stree3 = win_i3._managers[0]._sl_tree
+            assert stree3 is not None
+            assert stree3._running_path == "主列表"      # 树高亮正在执行的列表
+            it3 = stree3._find_item("主列表")
+            assert it3 is not None and it3.text(0) == "▶ 主列表"
             step3.status = StepStatus.FINISHED
             assert len(fired3) == 2, fired3
+            app.processEvents()
+            assert stree3._running_path is None         # 无 RUNNING → 清高亮
+            assert stree3._find_item("主列表").text(0) == "主列表"
             fake3._set(StepRunnerState.RUNNING)         # 模拟执行中
             app.processEvents()
             fake3._set(StepRunnerState.READY)           # 执行结束 → detach
@@ -1678,28 +1744,27 @@ class DemoStep(Step):
     # 编辑框：点击后按键绑定（不真实按键，直接调 _apply_key）；非法拒绝并还原
     dlg = _SettingsDialog("`")
     assert dlg._hotkey_edit.text() == "`"
+    # 按钮中文 + 设置按钮非 checkable（点击后无样式残留）
+    from PyQt5.QtWidgets import QDialogButtonBox as _QDBB
+    _bb = dlg.findChild(_QDBB)
+    assert _bb is not None
+    assert _bb.button(_QDBB.Save).text() == "保存"
+    assert _bb.button(_QDBB.Cancel).text() == "取消"
+    assert not win_exec._settings_btn.isCheckable()
     assert dlg._hotkey_edit._apply_key("f")
     assert dlg._hotkey_edit.text() == "f" and dlg.hotkey() == "f"
     assert not dlg._hotkey_edit._apply_key("ab")
     assert dlg._hotkey_edit.text() == "f" and dlg.hotkey() == "f"   # 非法不落盘、显示还原
-    # _apply_hotkey：setting.json 内存桩不落盘 + 工程包 executor.json 写入
-    _fake_settings = Settings()
-    _fake_settings.save = lambda path=None: None
-    _orig_load = Settings.load
-    Settings.load = staticmethod(lambda path=None: _fake_settings)
-    try:
-        win_exec._apply_hotkey("g")
-    finally:
-        Settings.load = _orig_load
-    assert _fake_settings.hotkey == "g"
+    # _apply_hotkey：只写工程包 executor.json（不碰 setting.json——executor.json 唯一来源）
+    win_exec._apply_hotkey("g")
     assert win_exec._package.exists("executor.json")
     data = json.loads(win_exec._package.read_file("executor.json").decode("utf-8"))
     assert data == {"hotkey": "g"}, data
-    # 工程优先：_current_hotkey 读 executor.json；本地无则读 Settings
+    # 工程优先：_current_hotkey 读 executor.json；缺失回退默认 "`"
     assert win_exec._current_hotkey() == "g"
     win_exec._package.remove("executor.json")
     try:
-        assert win_exec._current_hotkey() == "`"      # 回退本地设置（默认）
+        assert win_exec._current_hotkey() == "`"      # 缺失 → 默认热键
     finally:
         win_exec._package.write_file(
             "executor.json", b'{"hotkey": "g"}')
@@ -1716,10 +1781,10 @@ class DemoStep(Step):
         stale_gen = win_exec._runner_gen - 1             # 旧代际
         win_exec._exec_bridge.runner_state.emit((stale_gen, StepRunnerState.READY))
         assert "执行中" in win_exec._exec_status.text()  # 陈旧 READY 被忽略
-        assert not win_exec._tree_stack.isEnabled()      # 编辑仍锁定
+        assert win_exec._managers[0]._sl_tree._read_only  # 编辑仍锁定（只读模式）
         win_exec._exec_bridge.runner_state.emit((win_exec._runner_gen, StepRunnerState.READY))
         assert "待命" in win_exec._exec_status.text()    # 当前代际状态正常刷新（解锁）
-        assert win_exec._tree_stack.isEnabled()
+        assert not win_exec._managers[0]._sl_tree._read_only
         win_exec._exec_btn.click()                       # 复位：停监听
     finally:
         _make_hotkey_listener = _orig_mk_listener2

@@ -92,9 +92,27 @@ class StepListTreeWidget(QTreeWidget):
         self.currentItemChanged.connect(self._on_current_changed)
         self.itemChanged.connect(self._on_item_changed)   # 列表勾选框 → 全部步骤激活/停用
 
-        QShortcut(QKeySequence.Delete, self, self._act_delete)
-        QShortcut("F2", self, self._act_rename)
+        self._shortcut_del = QShortcut(QKeySequence.Delete, self, self._act_delete)
+        self._shortcut_f2 = QShortcut("F2", self, self._act_rename)
+        self._read_only = False             # 执行期只读：可点击查看，禁编辑操作
+        self._running_path: Optional[str] = None   # 正在执行的列表（▶ 前缀 + 蓝色高亮）
 
+        self.refresh()
+
+    def set_read_only(self, ro: bool) -> None:
+        """执行期只读：条目仍可点击选中（切换查看列表），但禁拖拽/右键菜单/
+        Del/F2 快捷键/勾选框操作。变量/模板/资源树走整树禁用（无查看需求）。"""
+        self._read_only = ro
+        self.setDragDropMode(QAbstractItemView.NoDragDrop
+                             if ro else QAbstractItemView.InternalMove)
+        self._shortcut_del.setEnabled(not ro)
+        self._shortcut_f2.setEnabled(not ro)
+
+    def set_running_path(self, path: Optional[str]) -> None:
+        """高亮正在执行的列表（▶ 前缀 + 蓝色加粗）；None 清除。路径未变不刷新。"""
+        if path == self._running_path:
+            return
+        self._running_path = path
         self.refresh()
 
     def refresh(self, current_path: Optional[str] = None) -> None:
@@ -149,10 +167,17 @@ class StepListTreeWidget(QTreeWidget):
             if not p:
                 continue
             err = p in mark
+            running = p == self._running_path and not self._is_group(p)
             f = it.font(0)
-            f.setBold(err)
+            f.setBold(err or running)
             it.setFont(0, f)
-            it.setForeground(0, QColor(200, 50, 40) if err else default_fg)
+            if err:
+                fg = QColor(200, 50, 40)          # 错误红（优先于执行蓝）
+            elif running:
+                fg = QColor(27, 122, 214)          # 执行中蓝（哪个列表在执行）
+            else:
+                fg = default_fg
+            it.setForeground(0, fg)
 
     def refresh_active_marks(self) -> None:
         """卡片激活按钮切换 → 树勾选框同步（不重建树）。
@@ -193,7 +218,9 @@ class StepListTreeWidget(QTreeWidget):
         for name, is_group in self._children_of(prefix):
             path = name if not prefix else prefix + "/" + name
             item = QTreeWidgetItem(parent_item)
-            item.setText(0, name)
+            # 正在执行的列表：▶ 前缀（组条目不加——组不执行）
+            item.setText(0, ("▶ " + name) if (not is_group and path == self._running_path)
+                         else name)
             item.setData(0, _PATH_ROLE, path)
             if is_group:
                 if style is not None:
@@ -283,6 +310,8 @@ class StepListTreeWidget(QTreeWidget):
         用户从「全勾」点了一下（或混合框点成未勾），一律按未勾处理 →
         全部停用。全量刷新由 _changed 重建树完成。
         """
+        if self._read_only:
+            return                      # 执行期只读：勾选框点击无效
         if column != 0:
             return
         if not (item.flags() & Qt.ItemIsUserCheckable):
@@ -307,6 +336,8 @@ class StepListTreeWidget(QTreeWidget):
 
     # ---- 右键菜单 ----
     def _on_context_menu(self, pos) -> None:
+        if self._read_only:
+            return                      # 执行期只读：右键菜单禁弹
         item = self.itemAt(pos)
         if item is not None and not item.isSelected():
             self.setCurrentItem(item)
