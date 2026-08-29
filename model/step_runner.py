@@ -1,0 +1,302 @@
+# -*- coding: utf-8 -*-
+"""
+步骤执行器（纯 Python 状态机）
+==============================
+
+:class:`StepRunner` 按「程序计数器 + 偏移量」逐条执行全部列表的可运行步骤
+（:meth:`StepListStore.all_do_methods`，插入序 DFS、enabled 过滤），类似汇编
+逐条执行：
+
+* 偏移量 1 = 下一个；2 = 跳一个；0 = 重调用自身；负值 = 回跳。
+* ``request_stop()`` 为协作式停止：当前步骤完成后在下一步前退出。
+* 任一步骤 do() 抛异常 → 停止整个执行（错误已由 do() 记日志）。
+* 步数上限 ``max_steps`` 防 0/负偏移死循环。
+
+线程模型：``start()`` 在调用线程完成复位后，在工作线程（daemon）执行循环；
+状态读写经锁保护；监听者回调在状态变更线程发生（UI 需自行桥接）。
+
+基本用法
+--------
+::
+
+    runner = StepRunner(store)
+    runner.add_state_listener(lambda st: print(st))
+    runner.start()           # READY -> RUNNING，工作线程执行
+    runner.request_stop()    # 当前步骤完成后停止
+"""
+import threading
+from enum import Enum
+from typing import Callable, List, Optional
+
+from model.log_model import LogModel
+from model.step import StepStatus
+from model.step_list_store import StepListStore
+
+__all__ = ["StepRunner", "StepRunnerState"]
+
+
+class StepRunnerState(Enum):
+    """执行器状态：待命 | 执行中 | 停止中。"""
+    READY = "待命"
+    RUNNING = "执行中"
+    STOPPING = "停止中"
+
+
+class StepRunner:
+    """执行器：PC + 偏移量循环执行全部列表的步骤。"""
+
+    max_steps = 10000   # 死循环保护上限（冒烟测试可用小上限子类覆盖）
+
+    def __init__(self, store: StepListStore) -> None:
+        self._store = store
+        self._state = StepRunnerState.READY
+        self._lock = threading.RLock()   # 可重入：request_stop 锁内调 _set_state
+        self._stop_event = threading.Event()
+        self._listeners: List[Callable[[StepRunnerState], None]] = []
+
+    # ---- 状态（线程安全 + 监听通知） ----
+    @property
+    def state(self) -> StepRunnerState:
+        with self._lock:
+            return self._state
+
+    def _set_state(self, value: StepRunnerState) -> None:
+        with self._lock:
+            changed = value is not self._state
+            self._state = value
+        if changed:
+            for cb in list(self._listeners):
+                try:
+                    cb(value)
+                except Exception:
+                    pass
+
+    def add_state_listener(self, cb: Callable[[StepRunnerState], None]) -> None:
+        """注册状态监听：``cb(new_state)``。"""
+        self._listeners.append(cb)
+
+    # ---- 控制 ----
+    def start(self) -> None:
+        """复位全部步骤并启动执行线程；仅 READY 可调用，否则 :class:`RuntimeError`。"""
+        with self._lock:
+            if self._state is not StepRunnerState.READY:
+                raise RuntimeError("执行器非待命状态（当前 %s）" % self._state.value)
+        # 复位：全部列表全部步骤（含 enabled=False 的）→ PENDING
+        for path, is_group in self._store.walk():
+            if is_group:
+                continue
+            for step in self._store.get(path).steps:
+                step.status = StepStatus.PENDING
+        prog = self._store.all_do_methods()
+        self._stop_event.clear()
+        if not prog:
+            LogModel.instance().info("无可执行的步骤")
+            return                          # 空程序：状态保持 READY
+        self._set_state(StepRunnerState.RUNNING)
+        threading.Thread(target=self._run, args=(prog,), daemon=True).start()
+
+    def request_stop(self) -> None:
+        """协作式停止：当前步骤完成后退出；非运行态静默忽略。"""
+        with self._lock:
+            if self._state in (StepRunnerState.RUNNING, StepRunnerState.STOPPING):
+                self._stop_event.set()
+                self._set_state(StepRunnerState.STOPPING)
+
+    # ---- 执行循环（工作线程） ----
+    def _run(self, prog: List[Callable[[], int]]) -> None:
+        try:
+            pc = 0
+            steps_done = 0
+            while pc < len(prog) and not self._stop_event.is_set():
+                steps_done += 1
+                if steps_done > self.max_steps:
+                    LogModel.instance().error(
+                        "执行步数超过上限 %d，已停止（偏移量 0/负值疑似死循环）"
+                        % self.max_steps)
+                    break
+                try:
+                    offset = prog[pc]()     # do(): input -> run -> output
+                except Exception:
+                    break                   # 遇错停止（错误日志由 do() 记录）
+                pc += offset
+                if pc < 0:
+                    pc = 0                  # 负偏移回跳，最前钳到 0
+        finally:
+            self._stop_event.clear()
+            self._set_state(StepRunnerState.READY)
+
+
+# ================================================================
+# 冒烟演示：直接 ``python -m model.step_runner`` 运行
+# ================================================================
+if __name__ == "__main__":
+    import time
+    from dataclasses import dataclass
+
+    from model.log_model import LogModel
+    from model.step import Step, StepStatus
+    from model.step_list import StepList
+    from model.step_list_store import StepListStore
+
+    def _wait_ready(runner: StepRunner, timeout: float = 5.0) -> None:
+        """轮询等待执行器回到 READY（工作线程收尾）。"""
+        t0 = time.monotonic()
+        while runner.state is not StepRunnerState.READY:
+            assert time.monotonic() - t0 < timeout, "执行器超时未回到 READY"
+            time.sleep(0.01)
+
+    @dataclass
+    class _In:
+        n: "number" = 0
+
+    @dataclass
+    class _Out:
+        pass
+
+    class _ProbeStep(Step):
+        """探针步骤：run 记录执行序号，返回预设偏移；不写变量（无输出槽）。"""
+        name = "探针"
+        description = "测试探针"
+        input_class = _In
+        output_class = _Out
+        calls = []
+        offsets = []
+
+        def run(self) -> int:
+            type(self).calls.append(self.tag)
+            return type(self).offsets[len(type(self).calls) - 1]
+
+    def make_store(offsets, tags):
+        _ProbeStep.calls = []
+        _ProbeStep.offsets = list(offsets)
+        store = StepListStore.create_empty()
+        sl = StepList.create_empty()
+        for i, t in enumerate(tags):
+            s = _ProbeStep.create_default(None, None)  # type: ignore  # 无 io 需求
+            s.io._input_values = [str(i)]
+            s.tag = t
+            sl.add(s)
+        store.add_list("L", sl)
+        return store
+
+    # ---- 顺序执行：偏移 1 逐条 ----
+    store = make_store([1, 1, 1], ["a", "b", "c"])
+    runner = StepRunner(store)
+    states = []
+    runner.add_state_listener(states.append)
+    runner.start()
+    assert runner.state in (StepRunnerState.RUNNING, StepRunnerState.READY)
+    _wait_ready(runner)
+    assert _ProbeStep.calls == ["a", "b", "c"], _ProbeStep.calls
+    assert states[-1] is StepRunnerState.READY
+
+    # ---- 偏移 2 跳一步；负偏移回跳 ----
+    store = make_store([2, 1], ["a", "b"])      # a 跳 b → 只跑 a；b 后越界结束
+    runner = StepRunner(store)
+    runner.start()
+    _wait_ready(runner)
+    assert _ProbeStep.calls == ["a"], _ProbeStep.calls
+    # 负偏移：b 回跳到 a（a 偏移 1 → b → 再回跳…）
+    store = make_store([1, -1, 1, -1], ["a", "b"])
+    class _TinyRunner(StepRunner):
+        max_steps = 4
+    runner = _TinyRunner(store)
+    runner.start()
+    _wait_ready(runner)
+    assert _ProbeStep.calls == ["a", "b", "a", "b"], _ProbeStep.calls
+
+    # ---- 偏移 0 死循环 → 步数上限停止 + 日志 ----
+    LogModel.instance().clear()
+    store = make_store([0, 0, 0, 0], ["a"])
+    runner = _TinyRunner(store)
+    runner.start()
+    _wait_ready(runner)
+    assert len(_ProbeStep.calls) == 4, _ProbeStep.calls
+    assert any("超过上限" in e.message for e in LogModel.instance().entries)
+
+    # ---- 协作式停止：当前步骤完成后退出，不开始下一步 ----
+    class _SlowStep(Step):
+        name = "慢步骤"
+        description = "慢"
+        input_class = _In
+        output_class = _Out
+        count = 0
+
+        def run(self) -> int:
+            type(self).count += 1
+            time.sleep(0.15)
+            return 1
+
+    store = StepListStore.create_empty()
+    sl = StepList.create_empty()
+    slow1 = _SlowStep.create_default(None, None)  # type: ignore
+    slow1.io._input_values = ["0"]                 # 合法输入 → 错误不会发生在 input()
+    sl.add(slow1)
+    slow2 = _SlowStep.create_default(None, None)  # type: ignore
+    slow2.io._input_values = ["0"]
+    sl.add(slow2)
+    store.add_list("L", sl)
+    _SlowStep.count = 0
+    runner = StepRunner(store)
+    runner.start()
+    time.sleep(0.05)                 # 第一步执行中
+    runner.request_stop()
+    assert runner.state is StepRunnerState.STOPPING
+    _wait_ready(runner)
+    assert _SlowStep.count == 1, _SlowStep.count   # 第二步未执行（完成后才停）
+
+    # ---- 遇错停止：do() 抛异常 → 停止整个执行 ----
+    class _ErrStep(Step):
+        name = "错误步骤"
+        description = "错"
+        input_class = _In
+        output_class = _Out
+
+        def run(self) -> int:
+            raise ValueError("boom")
+
+    store = StepListStore.create_empty()
+    sl = StepList.create_empty()
+    e = _ErrStep.create_default(None, None)          # type: ignore
+    e.io._input_values = ["0"]                       # 合法输入 → 错误发生在 run()
+    sl.add(e)
+    sl.add(_ProbeStep.create_default(None, None))    # type: ignore
+    store.add_list("L", sl)
+    _ProbeStep.calls = []                            # 清空上次执行残留 → 只统计本次
+    runner = StepRunner(store)
+    runner.start()
+    _wait_ready(runner)
+    assert _ProbeStep.calls == [], _ProbeStep.calls   # 后续步骤未执行
+
+    # ---- start 复位全部步骤 PENDING；RUNNING 中重复 start → RuntimeError ----
+    _SlowStep.count = 0
+    store = StepListStore.create_empty()
+    sl = StepList.create_empty()
+    slow = _SlowStep.create_default(None, None)      # type: ignore
+    slow.io._input_values = ["0"]
+    sl.add(slow)
+    store.add_list("L", sl)
+    runner = StepRunner(store)
+    runner.start()
+    try:
+        runner.start()                               # RUNNING 中重复 start
+        raise AssertionError("RUNNING 中重复 start 应抛 RuntimeError")
+    except RuntimeError:
+        pass
+    _wait_ready(runner)
+    assert slow.status is StepStatus.FINISHED
+    # 再次 start：复位 PENDING 后从头执行（手动弄脏状态 → 重跑后回到 FINISHED）
+    slow.status = StepStatus.ERROR
+    _SlowStep.count = 0
+    runner.start()
+    _wait_ready(runner)
+    assert _SlowStep.count == 1
+    assert slow.status is StepStatus.FINISHED        # 复位 PENDING → 重跑完成
+
+    # ---- 空程序：start 保持 READY，不创建线程 ----
+    store = StepListStore.create_empty()
+    runner = StepRunner(store)
+    runner.start()
+    assert runner.state is StepRunnerState.READY
+
+    print("StepRunner smoke OK")
