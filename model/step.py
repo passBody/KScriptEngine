@@ -121,6 +121,20 @@ class Step:
     # ================================================================
     # 槽类型推导 / 签名
     # ================================================================
+    @staticmethod
+    def _safe_fields(klass: type) -> List[Any]:
+        """dataclass 字段列表；``object``（无输入/输出哨兵）→ 空列表。
+
+        非 dataclass → ValueError（原 ``fields()`` 抛 TypeError，与文档承诺
+        不符——评审#19；基类 ``input_class=object`` 属合法空签名）。
+        """
+        if klass is object:
+            return []
+        try:
+            return list(fields(klass))
+        except TypeError:
+            raise ValueError("输入/输出类 %r 不是 dataclass" % (klass,))
+
     @classmethod
     def _io_type_lists(cls) -> Tuple[List[str], List[str]]:
         """由输入/输出 dataclass 字段的类型注解推导 io 槽类型列表（顺序一致）。
@@ -130,7 +144,7 @@ class Step:
         """
         def _types_of(klass: type, role: str) -> List[str]:
             types = []
-            for f in fields(klass):
+            for f in cls._safe_fields(klass):
                 if ProjectVariable.type_of(f.type) is None:
                     raise ValueError(
                         "步骤 %s 的%s类字段 %r 的类型注解未注册: %r（支持: %s）"
@@ -144,7 +158,7 @@ class Step:
     @classmethod
     def _signature(cls, klass: type) -> List[List[str]]:
         """dataclass 签名：[(字段名, 类型注解), ...]。"""
-        return [[f.name, f.type] for f in fields(klass)]
+        return [[f.name, f.type] for f in cls._safe_fields(klass)]
 
     # ================================================================
     # 工厂
@@ -250,8 +264,8 @@ class Step:
         if obj["out"] != cls._signature(cls.output_class):
             return None
         io = StepIOWidget.from_format_string(obj["io"], tree, package)
-        if io._input_type != cls._io_type_lists()[0] \
-                or io._output_type != cls._io_type_lists()[1]:
+        if io.input_types != cls._io_type_lists()[0] \
+                or io.output_types != cls._io_type_lists()[1]:
             return None
         return cls(io, enabled=obj.get("run", True),    # 旧格式串无 run 键 → 默认运行
                    tag=obj.get("tag", ""))              # 旧格式串无 tag 键 → 默认空
@@ -328,13 +342,30 @@ if __name__ == "__main__":
 
     # create_default：槽类型由字段签名推导；info_widget 默认 QLabel(描述)
     s = _StubStep.create_default(tree, pkg)
-    assert s.io._input_type == ["number", "string"]
-    assert s.io._output_type == ["number"]
+    assert s.io.input_types == ["number", "string"]
+    assert s.io.output_types == ["number"]
     assert s.status is StepStatus.PENDING
     assert s.inputs.a == 0 and s.inputs.b == "" and s.outputs.total == 0
     card = s.info_widget()
     assert isinstance(card, QLabel)
     assert card.text() == "测试用桩步骤"
+
+    # 评审#19：基类 Step（input_class=object 哨兵）create_default 不抛 TypeError——
+    # object 视为空签名；非 dataclass 输入类 → ValueError（与文档承诺一致）
+    s_base = Step.create_default(tree, pkg)
+    assert s_base.io.input_types == [] and s_base.io.output_types == []
+
+    class _NotDataclass:
+        pass
+
+    _BadStep = type("_BadStep", (Step,), {
+        "name": "坏步骤", "description": "",
+        "input_class": _NotDataclass, "output_class": object})
+    try:
+        _BadStep.create_default(tree, pkg)
+        raise AssertionError("非 dataclass 输入类应抛 ValueError")
+    except ValueError:
+        pass
 
     # do() 全流程：输入解析 → run → 输出写回变量树
     s.io.change_value("input", 0, "5")          # number 常量

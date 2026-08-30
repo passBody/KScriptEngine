@@ -282,6 +282,11 @@ class ProjectVariable:
         return (self._type, self._data, self._valid) == (
             other._type, other._data, other._valid)
 
+    def __hash__(self) -> int:
+        # __eq__ 已定义则必须配套 __hash__（评审#14）：否则对象不可哈希，
+        # 不能作 dict key / set 元素
+        return hash((self._type, self._data, self._valid))
+
     def __repr__(self) -> str:
         return "ProjectVariable(type=%r, data=%r, valid=%r)" % (
             self._type, self._data, self._valid)
@@ -418,5 +423,12 @@ if __name__ == "__main__":
         assert a.is_resource and a.valid and a.get_actual_data() == b"MP3"
         ab = ProjectVariable.from_format_string(a.to_format_string(), pkg)
         assert ab.is_resource and ab == a
+
+    # 评审#14：__eq__ 配套 __hash__ —— 可作 dict key / set 元素（相等 → 同哈希）
+    _v1 = ProjectVariable.create("number", 42, pkg)
+    _v2 = ProjectVariable.from_format_string(_v1.to_format_string(), pkg)
+    assert hash(_v1) == hash(_v2)
+    assert len({_v1: "x", _v2: "y"}) == 1            # 相等对象同键
+    assert _v1 in {_v2}
 
     print("ProjectVariable smoke OK")

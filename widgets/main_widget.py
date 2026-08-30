@@ -572,9 +572,13 @@ class MainWindow(QMainWindow):
         assert self._tree_stack is not None and self._preview_stack is not None
         self._switcher.clear()
         for _ in range(self._tree_stack.count()):
-            self._tree_stack.removeWidget(self._tree_stack.widget(0))
+            w = self._tree_stack.widget(0)
+            self._tree_stack.removeWidget(w)
+            w.deleteLater()               # 反复开工程不堆积旧控件（评审#8）
         for _ in range(self._preview_stack.count()):
-            self._preview_stack.removeWidget(self._preview_stack.widget(0))
+            w = self._preview_stack.widget(0)
+            self._preview_stack.removeWidget(w)
+            w.deleteLater()
         for m in self._managers:
             self._switcher.add_item(m.name, m.icon())
             self._tree_stack.addWidget(m.tree_widget())

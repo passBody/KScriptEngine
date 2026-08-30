@@ -187,8 +187,10 @@ class StepManager:
             return True
         try:
             self._package.remove(target)
-        except Exception:
-            pass
+        except Exception as e:
+            # 评审#16：回滚失败不再静默——孤儿模板文件残留会与注册表状态不一致
+            LogModel.instance().warning(
+                "模板回滚失败（%s 可能残留于工程包）: %s" % (target, e))
         self.load()
         LogModel.instance().error(
             "%s失败, 已回滚: %s(文件中没有可注册的步骤模板)" % (what, target))
@@ -398,13 +400,14 @@ class NoDcStep(Step):
     LogModel.instance().clear()
     mgr.load()
 
-    # 注册表：顶层"示例" + 子目录"控制流程/示例"；坏语法/坏注解/重名被跳过，readme 不处理
-    assert mgr.template_paths() == ["控制流程/示例", "示例"]
+    # 注册表：顶层"示例" + 子目录"控制流程/示例" + "缺容器"（input_class=object
+    # 空签名哨兵，评审#19 修复后为合法模板）；坏语法/坏注解/重名被跳过，readme 不处理
+    assert mgr.template_paths() == ["控制流程/示例", "示例", "缺容器"]
     errs = [e.message for e in LogModel.instance().entries]
     assert any("坏语法" in m for m in errs)
     assert any("坏注解" in m and "audio" in m for m in errs)
     assert any("路径冲突" in m for m in errs)   # 同目录重名仅保留其一（谁被跳取决于排序，断言不依赖胜者）
-    assert any("缺容器" in m for m in errs)   # 非 dataclass 容器 → TypeError 也须类级跳过
+    assert mgr.create_step("缺容器").io.input_types == []   # object 哨兵 → 空签名正常加载
 
     # create_step：子目录 / 顶层 / 未知路径
     s = mgr.create_step("控制流程/示例")

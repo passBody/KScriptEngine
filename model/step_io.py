@@ -159,6 +159,16 @@ class StepIOWidget:
         return self._output_values[i]
 
     @property
+    def input_types(self) -> List[str]:
+        """输入槽类型列表（只读副本；跨类签名比对用，避免访问私有 _input_type——评审#11）。"""
+        return list(self._input_type)
+
+    @property
+    def output_types(self) -> List[str]:
+        """输出槽类型列表（只读副本）。"""
+        return list(self._output_type)
+
+    @property
     def tree(self) -> "VariableTree":
         """关联的变量树（自定义视图解析 ``{{变量}}`` 引用用）。"""
         return self._tree

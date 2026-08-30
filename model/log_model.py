@@ -23,9 +23,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from enum import Enum
 from typing import Callable, List, NamedTuple, Optional
+
+_logger = logging.getLogger(__name__)
 
 
 class LogLevel(Enum):
@@ -138,7 +141,8 @@ class LogModel:
             try:
                 cb()
             except Exception:
-                pass
+                # 评审#15：不再静默吞异常——UI 刷新崩溃应可见（其余监听者照常收到通知）
+                _logger.exception("日志监听器回调异常（该监听器已跳过）")
 
     # ---- 静态 ----
     @staticmethod
@@ -182,4 +186,24 @@ if __name__ == "__main__":
     a.remove_listener(cb)
     a.info("no notify")
     assert len(a) == 1 and fired == ["x", "x"]       # 移除后不再触发
+
+    # 评审#15：监听器异常可见（logging 记录），其余监听者照常收到通知
+    import logging as _lg
+    import sys as _sys
+    _records = []
+    _h = _lg.Handler()
+    _h.emit = lambda r: _records.append(r.getMessage())
+    # runpy 下本模块以 __main__ 执行，模块级 _logger 绑定的是 "__main__"——
+    # 必须挂到运行命名空间的 logger 上（而非按包名 getLogger）
+    _running_logger = _sys.modules[__name__]._logger
+    _running_logger.addHandler(_h)
+    try:
+        a.add_listener(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        fired2 = []
+        a.add_listener(lambda: fired2.append(1))
+        a.info("after-bad")
+        assert fired2 == [1]                          # 异常监听者不阻断后续通知
+        assert any("监听器回调异常" in m for m in _records)   # 异常不再静默
+    finally:
+        _running_logger.removeHandler(_h)
     print("LogModel smoke OK")

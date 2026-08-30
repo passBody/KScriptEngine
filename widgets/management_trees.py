@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QStackedWidget, QVBoxLayout,
@@ -186,6 +186,7 @@ class StepListManagementTree(ManagementTree):
         self._sl_tree: Optional[StepListTreeWidget] = None
         self._host: Optional[StepListHost] = None
         self._current: Optional[str] = None
+        self._save_timer: Optional[QTimer] = None   # 落盘防抖（评审#10）
 
     @property
     def store(self) -> StepListStore:
@@ -222,10 +223,18 @@ class StepListManagementTree(ManagementTree):
         return self._sl_tree
 
     def _on_edited(self) -> None:
-        """视图内容编辑（io/签名/激活切换）→ 保存 + 树勾选框同步激活态。"""
-        self._save_store()
+        """视图内容编辑（io/签名/激活切换）→ 防抖落盘 + 树勾选框同步激活态。
+
+        防抖 500ms：连续键入合并为一次写盘（此前每键一次全量序列化——评审#10）。
+        """
         if self._sl_tree is not None:
             self._sl_tree.refresh_active_marks()
+        if self._save_timer is None:
+            self._save_timer = QTimer()
+            self._save_timer.setSingleShot(True)
+            self._save_timer.setInterval(500)
+            self._save_timer.timeout.connect(self._save_store)
+        self._save_timer.start()
 
     def preview_widget(self) -> QWidget:
         if self._host is None:
@@ -453,6 +462,13 @@ if __name__ == "__main__":
     tw.list_selected.emit("主列表")
     assert host.currentIndex() == 1
     assert host._view._step_list is sl
+
+    # 落盘防抖（评审#10）：编辑 → 500ms 单发定时器，到期才写盘
+    slm._on_edited()
+    assert slm._save_timer is not None and slm._save_timer.isActive()
+    assert slm._save_timer.interval() == 500 and slm._save_timer.isSingleShot()
+    slm._save_timer.stop()
+    slm._save_timer.timeout.emit()          # 模拟防抖到期 → 落盘（不崩）
 
     # 占位管理树：占位页含「待实现」提示
     ph = PlaceholderManagementTree("演示")

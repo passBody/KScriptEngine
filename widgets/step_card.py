@@ -43,13 +43,22 @@ __all__ = ["StepCard", "card_size_for_screen"]
 _CARD_QSS_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "view", "cards.qss")
 
+# 文件缺失/损坏时的最小兜底样式（评审#9：模块级读取会让整个 widgets 包导入失败）
+_FALLBACK_CARD_QSS = "StepCard { border-radius: 8px; }"
 
-def _load_card_qss() -> str:
-    with open(_CARD_QSS_PATH, encoding="utf-8") as f:
-        return f.read()
+_CARD_QSS: Optional[str] = None
 
 
-_CARD_QSS = _load_card_qss()   # 模块级加载一次（含 view/cards.qss 全部规则）
+def _card_qss() -> str:
+    """懒加载卡片样式表（首次使用时读取并缓存；缺失/损坏 → 兜底样式）。"""
+    global _CARD_QSS
+    if _CARD_QSS is None:
+        try:
+            with open(_CARD_QSS_PATH, encoding="utf-8") as f:
+                _CARD_QSS = f.read()
+        except OSError:
+            _CARD_QSS = _FALLBACK_CARD_QSS
+    return _CARD_QSS
 
 
 def card_size_for_screen() -> Tuple[int, int]:
@@ -107,7 +116,7 @@ class StepCard(QFrame):
         # 阴影由视图在场景层绘制（_CardShadowItem）；此处禁用 QGraphicsEffect：
         # QGraphicsDropShadowEffect 挂在 QGraphicsProxyWidget 上会让卡片整体渲染
         # 白屏（Qt 5.15 Windows 纹理化 bug），且 Qt QSS 不支持 box-shadow。
-        self.setStyleSheet(_CARD_QSS)   # 静态规则文件 + 动态属性选择器
+        self.setStyleSheet(_card_qss())   # 静态规则文件 + 动态属性选择器
 
         top = QHBoxLayout()
         top.setContentsMargins(8, 8, 8, 0)
@@ -276,7 +285,16 @@ if __name__ == "__main__":
 
     # 样式来自 view/cards.qss（毛玻璃/圆角/柔和色）；动态状态经属性选择器
     assert "StepCard {" in card.styleSheet() and "border-radius" in card.styleSheet()
-    assert _CARD_QSS_PATH.endswith("cards.qss")      # 模块级加载即文件内容
+    assert _CARD_QSS_PATH.endswith("cards.qss")      # 懒加载路径指向文件
+    # 样式表文件缺失 → 兜底样式不崩（评审#9：原模块级读取会让整个包导入失败）
+    import tempfile as _tmp
+    _orig_qss_path = _CARD_QSS_PATH
+    globals()["_CARD_QSS_PATH"] = os.path.join(
+        _tmp.gettempdir(), "不存在的cards.qss")
+    globals()["_CARD_QSS"] = None
+    assert "StepCard" in _card_qss()
+    globals()["_CARD_QSS_PATH"] = _orig_qss_path
+    globals()["_CARD_QSS"] = None
     # 阴影：禁止 QGraphicsEffect（QGraphicsDropShadowEffect 在 QGraphicsProxyWidget
     # 中渲染整体白屏，Qt 5.15 Windows 纹理化 bug）；投影由视图在场景层绘制
     assert card.graphicsEffect() is None
@@ -390,7 +408,7 @@ if __name__ == "__main__":
     # 签名框字体：14 号宋体（QSS #cardTag 规则内显式声明；「14号」= 14pt，
     # 14px ≈ 10.5pt 视觉增幅太小——用户反馈「没变大」后才改用 pt 单位）
     import re as _re
-    _tag_rule = _re.search(r"#cardTag \{[^}]*\}", _CARD_QSS, _re.S)
+    _tag_rule = _re.search(r"#cardTag \{[^}]*\}", _card_qss(), _re.S)
     assert _tag_rule is not None
     assert "SimSun" in _tag_rule.group(0) and "font-size: 14pt" in _tag_rule.group(0)
 

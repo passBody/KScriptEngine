@@ -15,7 +15,9 @@ KScript 资源管理树 —— 演示脚本
 * 右键空白或某项弹上下文菜单：复制 / 剪切 / 粘贴 / 重命名 / 删除 / 添加（文件/组）；
 * 点选某项在右侧预览（png 缩略图 / 文本 / 二进制占位 / 目录占位）。
 
-示例包内含：封面.png（生成）、说明.txt、data.bin、音乐/、音乐/封面2.png、脚本/run.py、空目录。
+示例包内含：封面.png（生成）、说明.txt、data.bin、音乐/、音乐/封面2.png、脚本/run.py、
+空目录；以及与 sample.kscp 同构的 actions/示例.py + variables.json + step_list.json
+（评审#18：demo --save 产物与 sample 同构，sample 为手工扩充的完整示例）。
 """
 
 import sys
@@ -26,6 +28,30 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QSplitter
 
 from model import KscpPackage
 from widgets import ResourceTreeWidget
+
+# 与 sample.kscp 同构的最小示例模板（in-package 可加载：import actions.base）
+_DEMO_TEMPLATE = '''# -*- coding: utf-8 -*-
+from dataclasses import dataclass
+from actions.base import Step
+
+@dataclass
+class _DemoInput:
+    count: "number" = 0
+
+@dataclass
+class _DemoOutput:
+    total: "number" = 0
+
+class DemoStep(Step):
+    name = "示例"
+    description = "演示模板"
+    input_class = _DemoInput
+    output_class = _DemoOutput
+
+    def run(self) -> int:
+        self.outputs.total = self.inputs.count * 2
+        return 1
+'''
 
 
 def _make_png(color: str) -> bytes:
@@ -52,6 +78,15 @@ def build_sample_package() -> KscpPackage:
     pkg.write_file("assets/音乐/2.txt", "音乐目录下的文本。".encode("utf-8"))
     pkg.write_file("assets/脚本/run.py", b"print('hello from KScript')\n")
     pkg.make_dir("assets/空目录")
+    # 与 sample.kscp 同构：步骤模板 + 变量树 + 空步骤列表（main.py 可直接打开）
+    pkg.write_file("actions/示例.py", _DEMO_TEMPLATE.encode("utf-8"))
+    from model.project_variable import ProjectVariable
+    from model.step_list_store import StepListStore
+    from model.variable_tree import VariableTree
+    tree = VariableTree.create_empty()
+    tree.add("n1", ProjectVariable.create("number", 100, pkg))
+    pkg.write_file("variables.json", tree.to_json_bytes())
+    pkg.write_file("step_list.json", StepListStore.create_empty().to_json_bytes())
     return pkg
 
 
