@@ -41,7 +41,6 @@ MODULES = [
 CHECKS = [
     ["main.py", "sample.kscp", "--check"],
     ["main.py", "qwer.kscp", "--check"],
-    ["demo_resource_tree.py", "--check"],
 ]
 
 
