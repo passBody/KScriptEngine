@@ -189,7 +189,7 @@ if __name__ == "__main__":
 
     @dataclass
     class _In:
-        n: "number" = 0
+        n: "number" = 0  # type: ignore
 
     @dataclass
     class _Out:
