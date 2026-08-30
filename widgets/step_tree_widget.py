@@ -32,8 +32,9 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
-    QInputDialog, QLabel, QMenu, QMessageBox, QShortcut, QStackedWidget,
-    QStyle, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QInputDialog, QLabel, QMenu, QMessageBox, QPushButton, QShortcut,
+    QStackedWidget, QStyle, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QWidget,
 )
 
 from model.kscp_package import KscpPackage
@@ -354,12 +355,19 @@ class StepTreeWidget(QTreeWidget):
 
 
 class StepInfoPanel(QStackedWidget):
-    """步骤模板只读信息面板：占位 / 信息两页；数据全部来自模板类（零实例创建）。"""
+    """步骤模板只读信息面板：占位 / 信息两页；数据全部来自模板类（零实例创建）。
+
+    「加入当前列表」按钮发出 :data:`add_requested`（携带模板路径）——
+    由主窗口接线实例化并追加到当前选中的步骤列表（模板树选中 → 添加闭环）。
+    """
+
+    add_requested = pyqtSignal(str)
 
     def __init__(self, mgr: StepManager,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._mgr = mgr
+        self._current_path: Optional[str] = None
         self._placeholder = QLabel("选择一个步骤模板")
         self._placeholder.setAlignment(Qt.AlignCenter)
         self._placeholder.setStyleSheet("color:#999; font-size:14px;")
@@ -386,12 +394,22 @@ class StepInfoPanel(QStackedWidget):
         io_lay.addWidget(self._out_col)
         io_lay.addStretch()
 
+        self._btn_add = QPushButton("加入当前列表")
+        self._btn_add.setToolTip("实例化该模板并追加到左侧当前选中的步骤列表")
+        self._btn_add.setEnabled(False)
+        self._btn_add.clicked.connect(self._on_add_clicked)
+
         lay.addWidget(self._name)
         lay.addWidget(self._group)
         lay.addWidget(self._desc)
         lay.addWidget(io_host)
+        lay.addWidget(self._btn_add)
         lay.addStretch()
         self.addWidget(info)                        # 1
+
+    def _on_add_clicked(self) -> None:
+        if self._current_path:
+            self.add_requested.emit(self._current_path)
 
     @staticmethod
     def _make_column(title: str) -> QWidget:
@@ -443,10 +461,14 @@ class StepInfoPanel(QStackedWidget):
         self._desc.setText(cls.description or "（无描述）")
         self._fill_column(self._in_col, cls._signature(cls.input_class))
         self._fill_column(self._out_col, cls._signature(cls.output_class))
+        self._current_path = path
+        self._btn_add.setEnabled(True)
         self.setCurrentIndex(1)
 
     def show_placeholder(self, text: str = "选择一个步骤模板") -> None:
         self._placeholder.setText(text)
+        self._current_path = None
+        self._btn_add.setEnabled(False)
         self.setCurrentIndex(0)
 
 
@@ -580,11 +602,18 @@ class TimeDelayStep(Step):
 
     # 选中叶子 → 面板信息页（名称/分组/描述/字段签名）
     pv = tree.preview_widget()
+    assert not pv._btn_add.isEnabled()               # 未选模板 → 加入按钮禁用
     tree.setCurrentItem(delay)
     assert pv.currentIndex() == 1
     assert pv._name.text() == "延时"
     assert "控制流程" in pv._group.text()
     assert pv._desc.text() == "等待指定毫秒数"
+    # 「加入当前列表」按钮：选中模板后可用，点击发出 add_requested(路径)（添加闭环）
+    assert pv._btn_add.isEnabled()
+    _added = []
+    pv.add_requested.connect(_added.append)
+    pv._btn_add.click()
+    assert _added == ["控制流程/延时"]
     # 输入左栏、输出右栏；列内容 = 表头 + 每槽一行
     assert pv._in_col.layout().count() == 2
     assert pv._out_col.layout().count() == 2

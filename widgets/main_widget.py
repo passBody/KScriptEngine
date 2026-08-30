@@ -43,7 +43,7 @@ from model.step_runner import StepRunner, StepRunnerState
 from model.variable_tree import VariableTree
 from widgets.log_widget import LogWidget
 from widgets.step_list_tree_widget import StepListTreeWidget
-from widgets.step_tree_widget import StepTreeWidget
+from widgets.step_tree_widget import StepInfoPanel, StepTreeWidget
 from widgets.variable_tree_widget import VariableTreeWidget
 from widgets.activity_bar import ActivityBar
 from widgets.management_trees import (
@@ -538,6 +538,15 @@ class MainWindow(QMainWindow):
         LogModel.instance().info("新建工程")
         self._open_package(KscpPackage.create_empty(), None)
 
+    def _on_add_template(self, path: str) -> None:
+        """模板信息面板「加入当前列表」→ 实例化并追加到当前选中的步骤列表。"""
+        sl_mgr = self._managers[0] if self._managers else None
+        if isinstance(sl_mgr, StepListManagementTree) \
+                and sl_mgr.add_template_to_current(path):
+            return
+        QMessageBox.information(self, "加入当前列表",
+                                "请先在左侧选中一个步骤列表")
+
     def _on_open(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "打开 .kscp", "", "KScript 工程 (*.kscp)")
@@ -680,6 +689,10 @@ class MainWindow(QMainWindow):
         shared_mgr = StepManager(package, tree)
         shared_mgr.load()
         self._step_mgr = StepManagementTree(package, shared_mgr)
+        # 模板树「加入当前列表」闭环：信息面板按钮 → 实例化加入当前列表
+        spanel = self._step_mgr.preview_widget()
+        assert isinstance(spanel, StepInfoPanel)
+        spanel.add_requested.connect(self._on_add_template)
         # 左侧管理树排序（从上到下）：步骤列表 / 全局变量 / 步骤模板 / 资源
         self._managers = [
             StepListManagementTree(package, tree, shared_mgr),
@@ -924,6 +937,25 @@ class DemoStep(Step):
     assert len(host2._view._cards) == 0                 # 「乙」为空列表 → 无卡片
     assert sl_mgr2._current == "乙"                     # 树中选中项 = 第一个列表
     assert host2._view._step_list is sl_mgr2._store.get("乙")
+
+    # ---- 模板树「加入当前列表」闭环：信息面板 → 实例化加入当前列表 ----
+    spanel2 = win2._step_mgr.preview_widget()
+    assert isinstance(spanel2, StepInfoPanel)
+    win2._on_add_template("示例")
+    assert len(sl_mgr2._store.get("乙").steps) == 1
+    assert len(host2._view._cards) == 1                 # 宿主刷新出新卡片
+    # 失败路径：未选中列表 → 提示框
+    _infos = []
+    _orig_info = QMessageBox.information
+    QMessageBox.information = staticmethod(
+        lambda *a, **k: (_infos.append(1), QMessageBox.Ok)[1])
+    try:
+        sl_mgr2._current = None
+        win2._on_add_template("示例")
+    finally:
+        QMessageBox.information = _orig_info
+    assert _infos == [1]
+    sl_mgr2._current = "乙"                             # 复位，不影响后续用例
 
     # ---- 需求：激活切换双向立刻刷新（树勾选 → 卡片；卡片按钮 → 树勾选框） ----
     it2 = tw2._find_item("组甲/丙")

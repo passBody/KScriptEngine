@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
 )
 
 from model.kscp_package import KscpPackage
+from model.log_model import LogModel
 from model.step_list import StepList
 from model.step_list_store import StepListStore
 from model.step_manager import StepManager
@@ -279,6 +280,31 @@ class StepListManagementTree(ManagementTree):
         else:
             self._host.set_list(lst, self._mgr)
 
+    def add_template_to_current(self, path: str) -> bool:
+        """模板树「加入当前列表」闭环：实例化模板并追加到当前选中列表。
+
+        未选中列表 / 列表被删 / 模板创建失败 → 日志记录并返回 False（不弹窗，
+        由调用方决定 UI 提示）；成功刷新宿主卡片与树标记并返回 True。
+        """
+        if self._current is None:
+            LogModel.instance().warning("加入当前列表：未选中任何步骤列表")
+            return False
+        try:
+            step = self._mgr.create_step(path)
+            lst = self._store.get(self._current)
+        except (ValueError, FileNotFoundError) as e:
+            LogModel.instance().error("加入当前列表失败：%s" % e)
+            return False
+        lst.add(step)
+        self._save_store()
+        if self._host is not None:
+            self._host.set_list(lst, self._mgr)
+        if self._sl_tree is not None:
+            self._sl_tree.refresh_error_marks()
+            self._sl_tree.refresh_active_marks()
+        LogModel.instance().info("模板「%s」已加入列表「%s」" % (path, self._current))
+        return True
+
 
 class StepListHost(QStackedWidget):
     """步骤列表视图宿主：占位页 + 工具栏 + StepListView（视图编辑 → 保存回调）。
@@ -474,6 +500,51 @@ if __name__ == "__main__":
     assert slm._save_timer.interval() == 500 and slm._save_timer.isSingleShot()
     slm._save_timer.stop()
     slm._save_timer.timeout.emit()          # 模拟防抖到期 → 落盘（不崩）
+
+    # ---- add_template_to_current：模板树「加入当前列表」闭环 ----
+    _GOOD = '''# -*- coding: utf-8 -*-
+from dataclasses import dataclass
+from actions.base import Step
+
+@dataclass
+class _DemoInput:
+    count: "number" = 0
+
+@dataclass
+class _DemoOutput:
+    total: "number" = 0
+
+class DemoStep(Step):
+    name = "示例"
+    description = "演示模板"
+    input_class = _DemoInput
+    output_class = _DemoOutput
+
+    def run(self) -> int:
+        self.outputs.total = self.inputs.count * 2
+        return 1
+'''
+    pkg2 = KscpPackage.create_empty()
+    pkg2.write_file("actions/示例.py", _GOOD.encode("utf-8"))
+    tree2 = VariableTree.create_empty()
+    slm2 = StepListManagementTree(pkg2, tree2)
+    sl2 = StepList.create_empty()
+    slm2._store.add_list("主列表", sl2)
+    slm2._save_store()
+    host2 = slm2.preview_widget()               # 先建宿主再选中（联动发生在选中时）
+    tw2 = slm2.tree_widget()
+    tw2.refresh()
+    tw2.list_selected.emit("主列表")
+    assert host2.currentIndex() == 1
+    assert slm2.add_template_to_current("示例") is True
+    assert len(sl2.steps) == 1
+    assert len(host2._view._cards) == 1              # 宿主刷新出新卡片
+    # 未选中列表 → False + 日志（不弹窗）
+    LogModel.instance().clear()
+    slm2._current = None
+    assert slm2.add_template_to_current("示例") is False
+    assert any("未选中任何步骤列表" in e.message
+               for e in LogModel.instance().entries)
 
     # 占位管理树：占位页含「待实现」提示
     ph = PlaceholderManagementTree("演示")

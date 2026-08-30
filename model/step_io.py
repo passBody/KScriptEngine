@@ -659,11 +659,13 @@ class StepIOWidget:
         dlg.resize(320, 400)
         lay = QVBoxLayout(dlg)
         tw = QTreeWidget()
-        tw.setHeaderLabel("变量")
+        tw.setHeaderLabels(["变量", "类型"])   # 双列：名称 + 类型（picker 升级）
+        tw.setColumnWidth(0, 180)
         sub = self._picker_tree(tree, vtype) if vtype else tree
         root_item = tw.invisibleRootItem()
         if root_item is not None:
             self._fill_tree(root_item, sub, "")
+        tw.expandAll()                         # 分组默认展开，变量一目了然
         lay.addWidget(tw)
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         lay.addWidget(btns)
@@ -673,6 +675,14 @@ class StepIOWidget:
             item = tw.currentItem()
             if item is not None:
                 chosen["path"] = item.data(0, _USER_ROLE)  # 叶子存路径，分组为 None
+
+        def on_double(item, _col) -> None:
+            # 双击叶子 = 选中并确定（分组双击仅选中，不关闭）
+            if item is not None and item.data(0, _USER_ROLE):
+                chosen["path"] = item.data(0, _USER_ROLE)
+                dlg.accept()
+
+        tw.itemDoubleClicked.connect(on_double)
         btns.accepted.connect(on_ok)
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
@@ -691,6 +701,7 @@ class StepIOWidget:
             item.setText(0, name)
             if var_tree.is_variable(path):
                 item.setData(0, _USER_ROLE, path)
+                item.setText(1, var_tree.get(path).type)   # 第二列 = 类型
             else:
                 StepIOWidget._fill_tree(item, var_tree, path)  # 分组递归
 
@@ -917,6 +928,12 @@ if __name__ == "__main__":
         w9._default_picker(tree, "number", c9)
         assert len(_captured) == 1
         assert _captured[0].parent() is None   # 修复：顶层窗口，不被卡片遮挡
+        # picker 升级：双列（名称/类型）+ 叶子第二列为变量类型
+        from PyQt5.QtWidgets import QTreeWidget as _QTW
+        _tw = _captured[0].findChild(_QTW)
+        assert _tw is not None and _tw.columnCount() == 2
+        assert _tw.topLevelItemCount() >= 1
+        assert _tw.topLevelItem(0).text(1) == "number"
     finally:
         QDialog.exec_ = _orig_exec
 
