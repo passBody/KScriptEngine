@@ -349,12 +349,21 @@ class VariableTree:
         保留各变量原路径（分组按需隐含，空分组丢弃）。未知类型抛
         :class:`ValueError`。返回的树无 package，可 ``to_json_bytes``/``get``/``list_dir``。
         """
-        if vtype not in ProjectVariable.supported_types():
-            raise ValueError(
-                "不支持的变量类型: %r（支持: %s）" % (vtype, ProjectVariable.supported_types()))
+        return self.filter_by_types(vtype)
+
+    def filter_by_types(self, *types: str) -> "VariableTree":
+        """返回只含指定多个类型变量的同类型对象（:meth:`filter_by_type` 的单类型特例）。
+
+        语义与 :meth:`filter_by_type` 相同；任一类型未知抛 :class:`ValueError`。
+        """
+        for t in types:
+            if t not in ProjectVariable.supported_types():
+                raise ValueError(
+                    "不支持的变量类型: %r（支持: %s）"
+                    % (t, ProjectVariable.supported_types()))
         tree = VariableTree()
         for path, var in self._vars.items():
-            if var.type == vtype:
+            if var.type in types:
                 tree._vars[path] = var  # 复制引用；分组由路径隐含
         return tree
 
@@ -460,6 +469,15 @@ if __name__ == "__main__":
         try:
             tree.filter_by_type("audio")
             raise AssertionError("未知类型应抛 ValueError")
+        except ValueError:
+            pass
+
+        # filter_by_types：多类型合并（string 槽兼容 number 的选择器用）
+        mix = tree.filter_by_types("string", "image")
+        assert sorted(mix.variables) == ["s", "循环系列/p1", "循环系列/子/p2"]
+        try:
+            tree.filter_by_types("number", "audio")
+            raise AssertionError("filter_by_types 未知类型应抛 ValueError")
         except ValueError:
             pass
 

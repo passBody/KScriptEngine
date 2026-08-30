@@ -108,6 +108,15 @@ class LogWidget(QWidget):
         lay.addLayout(bar)
         lay.addWidget(self._list, 1)
 
+        # 跟随底部：用户未回看时新日志自动滚到最新。追加条目后滚动范围
+        # **延迟**更新（Qt 布局定时器），同步 scrollToBottom 拿到旧 max 会差
+        # 一条——故由 rangeChanged 在范围真正变化时补滚；valueChanged 跟踪
+        # 用户是否滚离底部（回看即停、回底恢复）。
+        self._follow_bottom = True
+        vbar = self._list.verticalScrollBar()
+        vbar.valueChanged.connect(self._on_vbar_value)
+        vbar.rangeChanged.connect(self._on_vbar_range)
+
         self._model.add_listener(self._bridge_emit)
         self._rendered_count = 0    # 已渲染条目数（增量刷新锚点）
         self._refresh()
@@ -116,20 +125,16 @@ class LogWidget(QWidget):
     def _refresh(self) -> None:
         """模型变更监听：**增量追加**新条目（不清空重建）。
 
-        仅在条目数回退（模型被清空）时全量重建。用户回看旧日志时不被强制
-        拉底：追加仅在原本已位于底部时跟随滚动。
+        仅在条目数回退（模型被清空）时全量重建。滚动由跟随状态维护
+        （见 __init__ 注释）：跟随中 rangeChanged 补滚到底，回看中不动。
         """
         entries = self._model.entries
         if len(entries) < self._rendered_count:
             self._rebuild(entries)   # 清空等回退场景
             return
-        vbar = self._list.verticalScrollBar()
-        at_bottom = vbar.value() >= vbar.maximum()
         for e in entries[self._rendered_count:]:
             self._add_item(e)
         self._rendered_count = len(entries)
-        if at_bottom:
-            self._list.scrollToBottom()
 
     def _rebuild(self, entries) -> None:
         """全量重建（条目数回退 / 级别筛选变化）。"""
@@ -137,7 +142,18 @@ class LogWidget(QWidget):
         for e in entries:
             self._add_item(e)
         self._rendered_count = len(entries)
+        self._follow_bottom = True    # 清空/筛选由用户主动触发 → 恢复跟随到底
         self._list.scrollToBottom()
+
+    # ---- 跟随底部（新日志自动滚动；用户回看即停） ----
+    def _on_vbar_value(self, value: int) -> None:
+        """滚动条位置变化：滚离底部 → 停止跟随；回到底部 → 恢复跟随。"""
+        self._follow_bottom = value >= self._list.verticalScrollBar().maximum()
+
+    def _on_vbar_range(self, _min: int, _max: int) -> None:
+        """追加条目后滚动范围延迟更新 → 跟随中补滚到最新（拿旧 max 会差一条）。"""
+        if self._follow_bottom:
+            self._list.scrollToBottom()
 
     def _add_item(self, e: LogEntry) -> None:
         text = "%s %-8s %s" % (LogModel.format_time(e.time), e.level.name, e.message)
@@ -278,4 +294,28 @@ if __name__ == "__main__":
     m3.info("y")
     app.processEvents()
     assert w3._list.count() == 1, "closeEvent 应移除监听器"
+    # ---- N-1：追加日志自动跟随底部；用户回看即停、回底恢复 ----
+    LogModel._reset_instance()
+    w4 = LogWidget()
+    w4.resize(300, 40)
+    w4.show()                        # 隐藏的 QListView 不计算条目布局 → 必须先显示
+    app.processEvents()
+    m4 = LogModel.instance()
+    for i in range(30):
+        m4.info("f%d" % i)
+    app.processEvents()
+    vb4 = w4._list.verticalScrollBar()
+    assert vb4.maximum() > 0
+    assert vb4.value() == vb4.maximum(), (vb4.value(), vb4.maximum())  # 跟随在最新
+    vb4.setValue(0)                                   # 用户回看顶部
+    assert w4._follow_bottom is False
+    m4.info("new1")
+    app.processEvents()
+    assert vb4.value() == 0, "回看时不得拉底"
+    vb4.setValue(vb4.maximum())                       # 回到底部 → 恢复跟随
+    assert w4._follow_bottom is True
+    m4.info("new2")
+    app.processEvents()
+    assert vb4.value() == vb4.maximum(), (vb4.value(), vb4.maximum())
+
     print("LogWidget smoke OK")

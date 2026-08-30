@@ -120,6 +120,11 @@ class StepIOWidget:
         h = ProjectVariable.type_of(vtype)
         return h.is_resource if h is not None else False
 
+    @staticmethod
+    def _accepted_types(vtype: str) -> Tuple[str, ...]:
+        """槽位接受的变量类型集合：string 槽兼容 number（隐式转字符串）。"""
+        return ("string", "number") if vtype == "string" else (vtype,)
+
     # ================================================================
     # 槽值变更监听（自定义视图刷新预览等用；纯 Python 回调，无 Qt）
     # ================================================================
@@ -187,9 +192,14 @@ class StepIOWidget:
         m = _VAR_REF.match(text)
         if m:  # 变量引用
             name = m.group(1)
-            if name not in self._tree:
-                return False
-            return self._tree.get(name).type == vtype
+            try:
+                # 用 is_variable 而非 ``in``：``in`` 对分组名也为 True，
+                # 随后 get() 抛 FileNotFoundError（用户输入 {{组名}} 崩溃）
+                if not self._tree.is_variable(name):
+                    return False
+                return self._tree.get(name).type in self._accepted_types(vtype)
+            except (ValueError, FileNotFoundError):
+                return False   # 根路径等非法引用：非法而非崩溃
         # 常量
         if self._type_is_resource(vtype):
             return False  # 资源类不可为常量，只能选择
@@ -205,7 +215,12 @@ class StepIOWidget:
     def _validate_outputs(self) -> bool:
         for i in range(len(self._output_type)):
             name = self._output_values[i]
-            if not name or name not in self._tree:
+            try:
+                # is_variable 而非 ``in``：输出槽指向分组名应判非法，
+                # 否则 write_outputs 的 tree.set() 会因「目标已是分组」抛 ValueError
+                if not name or not self._tree.is_variable(name):
+                    return False
+            except ValueError:
                 return False
         return True
 
@@ -225,10 +240,13 @@ class StepIOWidget:
             m = _VAR_REF.match(text)
             if m:  # 变量引用
                 name = m.group(1)
-                if name not in self._tree:
+                try:
+                    if not self._tree.is_variable(name):
+                        out.append("变量不存在: %s" % name)
+                    elif self._tree.get(name).type not in self._accepted_types(vtype):
+                        out.append("%s 类型不符" % name)
+                except (ValueError, FileNotFoundError):
                     out.append("变量不存在: %s" % name)
-                elif self._tree.get(name).type != vtype:
-                    out.append("%s 类型不符" % name)
                 continue
             if self._type_is_resource(vtype):
                 out.append("输入参数为空")      # 资源类不可为常量，只能选择
@@ -244,8 +262,13 @@ class StepIOWidget:
             name = self._output_values[i]
             if not name:
                 out.append("输出变量未指定")
-            elif name not in self._tree:
-                out.append("变量不存在: %s" % name)
+            else:
+                try:
+                    ok = self._tree.is_variable(name)
+                except ValueError:
+                    ok = False
+                if not ok:
+                    out.append("变量不存在: %s" % name)
         return out
 
     def resolve_inputs(self) -> List[Any]:
@@ -260,7 +283,11 @@ class StepIOWidget:
             text = self._input_values[i]
             m = _VAR_REF.match(text)
             if m:
-                out.append(self._tree.get(m.group(1)).get_actual_data())
+                var = self._tree.get(m.group(1))
+                data = var.get_actual_data()
+                if vtype == "string" and var.type == "number":
+                    data = str(data)          # 数字变量 → 字符串（隐式转换）
+                out.append(data)
             else:
                 parser = self._CONSTANT_PARSERS.get(vtype, lambda t: t)
                 out.append(parser(text))
@@ -597,9 +624,19 @@ class StepIOWidget:
             return
         self._set_output(i, name)
 
+    @staticmethod
+    def _picker_tree(tree: "VariableTree", vtype: str) -> "VariableTree":
+        """选择器展示树：string 槽兼容 number（合并两类）；其余按类型筛选。"""
+        if vtype == "string":
+            return tree.filter_by_types("string", "number")
+        return tree.filter_by_type(vtype)
+
     def _default_picker(self, tree: "VariableTree", vtype: str,
                         parent: QWidget) -> Optional[str]:
-        """内置极简变量选择器：弹窗 QTreeWidget，按类型筛选，单选返回路径。"""
+        """内置极简变量选择器：弹窗 QTreeWidget，按类型筛选，单选返回路径。
+
+        string 槽同时列出 string 与 number 变量（数字可作字符串用）。
+        """
         from PyQt5.QtWidgets import (
             QDialog, QDialogButtonBox, QTreeWidget, QVBoxLayout,
         )
@@ -607,12 +644,13 @@ class StepIOWidget:
         # 顶层窗口而非 parent：卡片在 QGraphicsView 场景（QGraphicsProxyWidget）中时，
         # 带 parent 的 QDialog 会被 proxy 内嵌渲染、被相邻卡片遮挡 → 弹到外面
         dlg = QDialog(None)
-        dlg.setWindowTitle("选择变量（%s）" % vtype)
+        dlg.setWindowTitle("选择变量（%s）" % (
+            "string / number" if vtype == "string" else vtype))
         dlg.resize(320, 400)
         lay = QVBoxLayout(dlg)
         tw = QTreeWidget()
         tw.setHeaderLabel("变量")
-        sub = tree.filter_by_type(vtype) if vtype else tree
+        sub = self._picker_tree(tree, vtype) if vtype else tree
         root_item = tw.invisibleRootItem()
         if root_item is not None:
             self._fill_tree(root_item, sub, "")
@@ -812,12 +850,13 @@ if __name__ == "__main__":
     except ValueError:
         pass
 
-    # 不合规：引用不存在的变量 / 类型不匹配
+    # 不合规：引用不存在的变量；string 槽兼容 number（隐式转字符串）
     w5 = StepIOWidget(["string"], [], tree, pkg)
     w5.change_value("input", 0, "{{nope}}")
     assert not w5.is_valid
-    w5.change_value("input", 0, "{{n1}}")     # n1 是 number，槽是 string → 不匹配
-    assert not w5.is_valid
+    w5.change_value("input", 0, "{{n1}}")     # n1 是 number，string 槽兼容 → 合法
+    assert w5.is_valid
+    assert w5.resolve_inputs()[0] == str(tree.get("n1").data)  # 隐式转字符串
 
     # 资源类不可为常量
     w6 = StepIOWidget(["image"], [], tree, pkg)
@@ -884,10 +923,14 @@ if __name__ == "__main__":
     w12 = StepIOWidget(["number"], [], tree, pkg)
     w12.change_value("input", 0, "{{不存在}}")
     assert w12.error_reasons() == ["变量不存在: 不存在"]
-    # 引用类型不符（n1 是 number，槽是 string）
-    w13 = StepIOWidget(["string"], [], tree, pkg)
-    w13.change_value("input", 0, "{{n1}}")
-    assert w13.error_reasons() == ["n1 类型不符"]
+    # 引用类型不符（s1 是 string，槽是 number）
+    w13 = StepIOWidget(["number"], [], tree, pkg)
+    w13.change_value("input", 0, "{{s1}}")
+    assert w13.error_reasons() == ["s1 类型不符"]
+    # string 槽兼容 number（隐式转字符串）→ 无错误
+    w13b = StepIOWidget(["string"], [], tree, pkg)
+    w13b.change_value("input", 0, "{{n1}}")
+    assert w13b.error_reasons() == []
     # 常量无法解析（number 槽 "abc"）
     w14 = StepIOWidget(["number"], [], tree, pkg)
     w14.change_value("input", 0, "abc")
@@ -938,5 +981,34 @@ if __name__ == "__main__":
             raise AssertionError("越界应抛 IndexError")
         except IndexError:
             pass
+
+    # ---- N-1：引用分组名/根路径：非法而非崩溃（{{组名}} 不得抛 FileNotFoundError） ----
+    tree.add_group("组")
+    w18 = StepIOWidget(["string"], [], tree, pkg)
+    for ref in ("{{组}}", "{{组/}}", "{{/}}"):
+        w18.change_value("input", 0, ref)
+        assert not w18.is_valid, ref        # 修复前：is_valid 抛 FileNotFoundError/ValueError
+        assert w18.error_reasons() == ["变量不存在: %s" % ref[2:-2]], ref
+    # 输出槽指向分组名 → 非法（在 write_outputs 前拦截，防 set() 抛 ValueError）
+    w19 = StepIOWidget([], ["number"], tree, pkg)
+    w19.change_value("output", 0, "组")
+    assert not w19.is_valid
+    assert w19.error_reasons() == ["变量不存在: 组"]
+
+    # ---- N-2：string 槽兼容 number 变量（隐式转字符串；选择器合并两类） ----
+    tree.add("f1", ProjectVariable.create("number", 3.14, pkg))
+    w20 = StepIOWidget(["string"], [], tree, pkg)
+    w20.change_value("input", 0, "{{n1}}")
+    assert w20.is_valid
+    assert w20.resolve_inputs()[0] == str(tree.get("n1").data)  # int → str
+    w20.change_value("input", 0, "{{f1}}")
+    assert w20.resolve_inputs()[0] == "3.14"     # float → "3.14"
+    w20.change_value("input", 0, "直接文本")
+    assert w20.is_valid and w20.resolve_inputs()[0] == "直接文本"
+    # 选择器树：string 槽合并 string+number；number 槽仍只列 number
+    sub = StepIOWidget._picker_tree(tree, "string")
+    assert sorted(sub.variables) == ["f1", "n1", "s1"], sub.variables
+    sub_num = StepIOWidget._picker_tree(tree, "number")
+    assert sorted(sub_num.variables) == ["f1", "n1"]
 
     print("StepIOWidget smoke OK")

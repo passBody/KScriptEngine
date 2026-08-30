@@ -78,7 +78,10 @@ def _window_size() -> Tuple[int, int]:
 
 
 def _make_icon(kind: str) -> QIcon:
-    """按类别绘制简洁图标：resource=文件夹、variable={ }、step=列表、default=方块。"""
+    """按类别绘制简洁图标：resource=文件夹、variable={ }、step=列表、default=方块。
+
+    exec/settings 为活动栏底部功能按钮绘制，放大到 48px（用户反馈图标太小）。
+    """
     pm = QPixmap(32, 32)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
@@ -123,6 +126,8 @@ def _make_icon(kind: str) -> QIcon:
         p.setBrush(QColor("#888888"))
         p.drawRoundedRect(5, 5, 22, 22, 4, 4)
     p.end()
+    if kind in ("exec", "settings"):
+        pm = pm.scaled(48, 48, transformMode=Qt.SmoothTransformation)  # 底部功能按钮图标放大
     return QIcon(pm)
 
 
@@ -608,8 +613,8 @@ class _ActivityBar(QWidget):
         btn.setAutoRaise(True)
         btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
         btn.setIcon(icon)
-        btn.setIconSize(QSize(26, 26))
-        btn.setFixedSize(44, 44)
+        btn.setIconSize(QSize(36, 36))   # 功能按钮图标大于导航项（用户反馈）
+        btn.setFixedSize(48, 48)
         btn.setToolTip(name)
         btn.setStyleSheet(
             "QToolButton { border:none; border-radius:6px; background:transparent; }"
@@ -1584,6 +1589,10 @@ class DemoStep(Step):
         # 活动栏底部按钮：执行 + 设置存在
         assert win_exec._settings_btn is not None
         assert len(win_exec._switcher._bottom_buttons) == 2
+        # 图标放大：48×48 按钮 + 36×36 图标（用户反馈图标太小）
+        for _b in (win_exec._exec_btn, win_exec._settings_btn):
+            assert _b.size() == QSize(48, 48), _b.size()
+            assert _b.iconSize() == QSize(36, 36), _b.iconSize()
         # 点击执行按钮 → 进入待命（listener 启动 + 按钮绿色 checked）；再点 → 停止监听
         win_exec._exec_btn.click()
         assert win_exec._hotkey_listener is not None

@@ -20,9 +20,11 @@ import weakref
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtWidgets import QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import (
+    QDialog, QGraphicsPixmapItem, QGraphicsScene, QHBoxLayout, QLabel,
+    QMessageBox, QPushButton, QVBoxLayout, QWidget,
+)
 
 from libs.key_control import InputControl
 from model.step import Step
@@ -72,7 +74,6 @@ class MouseClick(Step):
 
 
 _VAR_REF = re.compile(r"^\{\{(.+)\}\}$")
-_PREVIEW_H = 120
 
 
 def _to_pixmap(image: Any) -> Optional[QPixmap]:
@@ -100,15 +101,30 @@ def _notify_preview_weak(view_ref) -> None:
         view._on_io_changed()
 
 
-class _ClickPreview(QLabel):
-    """可点击预览图：左键点击发出 :data:`clicked`。"""
+class _ImagePreviewDialog(QDialog):
+    """素材预览弹出窗口：滚轮缩放 / 拖拽平移 / 双击关闭。
 
-    clicked = pyqtSignal()
+    查看器不嵌入卡片、以独立窗口弹出（用户反馈）；背景为应用背景色
+    （浅色）而非黑色。每次打开新建，画面取当前预览（标注图优先，否则素材原图）。
+    """
 
-    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
+    def __init__(self, pixmap: QPixmap, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("素材预览")
+        self.resize(640, 480)
+        from widgets.image_overlay import ZoomGraphicsView
+        self._view = ZoomGraphicsView(self)
+        self._scene = QGraphicsScene(self)
+        self._scene.addItem(QGraphicsPixmapItem(pixmap))
+        self._view.setScene(self._scene)
+        self._view.doubleClicked.connect(self.accept)   # 双击图片 → 关闭
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self._view)
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        super().showEvent(event)
+        self._view.fit_view()            # 显示后几何就绪 → 适配窗口
 
 
 class _MouseInfoView(QWidget):
@@ -116,7 +132,7 @@ class _MouseInfoView(QWidget):
 
     布局：
     * 提示标签：「自定义视图中的预览图的画面是通过读输入GUI的参数来生成」
-    * 预览图（点击 → ImageOverlay 大图）；数据源 = 素材图片输入槽
+    * 「预览」按钮 → _ImagePreviewDialog 弹出窗口查看（数据源 = 素材图片输入槽）
     * 「设置点位」按钮 → mark_image('dot') → 坐标回写 x/y 输入槽
     """
 
@@ -129,21 +145,23 @@ class _MouseInfoView(QWidget):
         hint.setStyleSheet("color:#888;")
         hint.setWordWrap(True)
 
-        self._preview = _ClickPreview()
-        self._preview.setAlignment(Qt.AlignCenter)
-        self._preview.setMinimumHeight(_PREVIEW_H)
-        self._preview.setStyleSheet("background:#1e1e1e; border:1px solid #444;")
-        self._preview.clicked.connect(self._open_overlay)
+        self._btn_preview = QPushButton("预览")
+        self._btn_preview.setToolTip("弹出窗口查看素材预览")
+        self._btn_preview.clicked.connect(self._open_preview)
 
         self._btn_mark = QPushButton("设置点位")
         self._btn_mark.clicked.connect(self._on_mark)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(self._btn_preview)
+        row.addWidget(self._btn_mark)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
         lay.addWidget(hint)
-        lay.addWidget(self._preview)
-        lay.addWidget(self._btn_mark)
+        lay.addLayout(row)
 
         self_ref = weakref.ref(self)                 # 弱引用：监听器不持视图强引用
         self._weak_cb = lambda r=self_ref: _notify_preview_weak(r)
@@ -176,30 +194,19 @@ class _MouseInfoView(QWidget):
         pix.loadFromData(bytes(data))
         return pix
 
-    def _refresh_preview(self) -> None:
-        pix = self._preview_pixmap()
-        if pix.isNull():
-            self._preview.setText("无素材")
-        else:
-            self._preview.setText("")
-            self._preview.setPixmap(pix.scaledToHeight(
-                _PREVIEW_H - 8, Qt.SmoothTransformation))
-
-    def _open_overlay(self) -> None:
+    def _open_preview(self) -> None:
+        """弹出窗口查看当前预览（标注图优先，否则素材原图）；无素材不弹。"""
         pix = self._preview_pixmap()
         if pix.isNull():
             return
-        from widgets.image_overlay import ImageOverlay
-        host = self.window() or self
-        ov = ImageOverlay(pix, host)
-        ov.show_overlay()
-        self._overlay = ov                      # 持有引用防回收（关闭后由用户行为自然释放）
+        dlg = _ImagePreviewDialog(pix, self.window())
+        dlg.exec_()
 
     # ---- 槽变化 ----
     def _on_io_changed(self) -> None:
-        # 素材槽变化 → 标注结果失效，回到原图预览
+        # 素材槽变化 → 标注结果失效；预览按钮可用性随素材有无刷新
         self._marked = None
-        self._refresh_preview()
+        self._btn_preview.setEnabled(not self._preview_pixmap().isNull())
 
     # ---- 设置点位 ----
     def _on_mark(self) -> None:
@@ -223,7 +230,7 @@ class _MouseInfoView(QWidget):
         pix = _to_pixmap(marked_img)
         if pix is not None and not pix.isNull():
             self._marked = pix
-        self._refresh_preview()
+        self._btn_preview.setEnabled(not self._preview_pixmap().isNull())
 
 
 # ================================================================
@@ -289,7 +296,7 @@ if __name__ == "__main__":
     assert isinstance(m2, MouseClick)
     assert m2.io.to_format_string() == m.io.to_format_string()
 
-    # ---- info_widget：提示标签 + 预览 + 设置点位 ----
+    # ---- info_widget：提示标签 + 预览按钮 + 设置点位 ----
     pkg.write_file("assets/底图.png", _b64.b64decode(
         # 注：简报原 base64（...FQABh6FO1A...）IDAT CRC 损坏且 zlib 校验失败，
         # 无法被 libpng 解码；此处为等价有效 1x1 RGBA 透明 PNG（同尺寸同格式）。
@@ -301,19 +308,31 @@ if __name__ == "__main__":
     m3.io.change_value("input", 3, "{{图}}")
     view = m3.info_widget()
     assert view is not None
-    # 三个要素：提示标签文字、预览、设置点位按钮
+    # 三个要素：提示标签文字、预览按钮、设置点位按钮（查看器不嵌入卡片）
     from PyQt5.QtWidgets import QLabel, QPushButton
     labels = view.findChildren(QLabel)
     btns = view.findChildren(QPushButton)
     assert any("预览图的画面是通过读输入GUI的参数来生成" in l.text() for l in labels)
     assert any(b.text() == "设置点位" for b in btns)
+    assert any(b.text() == "预览" for b in btns)
     btn = [b for b in btns if b.text() == "设置点位"][0]
-    # 素材槽变化 → 预览刷新（占位 → 真图）
+    pbtn = [b for b in btns if b.text() == "预览"][0]
+    # 素材槽变化 → 预览按钮可用性跟随（有素材可点、空槽禁用）
     assert not view._preview_pixmap().isNull()   # 已有 {{图}} → 非占位
+    assert pbtn.isEnabled()
     m3.io.change_value("input", 3, "")
     assert view._preview_pixmap().isNull()       # 空槽 → 占位（null 图）
+    assert not pbtn.isEnabled()                  # 无素材 → 预览不可点
     m3.io.change_value("input", 3, "{{图}}")
     assert not view._preview_pixmap().isNull()
+    assert pbtn.isEnabled()
+
+    # 预览弹窗：独立 QDialog，背景 = 应用背景色（浅色，非黑）
+    dlg = _ImagePreviewDialog(view._preview_pixmap(), None)
+    assert dlg._view.scene() is dlg._scene
+    assert dlg._view.backgroundBrush().color().name() == "#f4f7fc"
+    items = dlg._scene.items()
+    assert len(items) == 1 and not items[0].pixmap().isNull()
 
     # 设置点位：桩替换 mark_image，坐标回写 x/y 槽
     import tools.image_marker as _im

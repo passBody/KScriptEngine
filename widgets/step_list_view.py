@@ -643,8 +643,8 @@ class StepListView(QGraphicsView):
     def _card_menu(self, card: StepCard, global_pos) -> None:
         """卡片右键菜单；``global_pos`` 为全局坐标（exec_ 弹出位置 = 鼠标处）。
 
-        多选（>1 张）时只留「复制」：添加/剪切/粘贴/删除都依赖单卡锚点，
-        多选无锚点语义 → 全部禁用，仅批量复制。
+        多选（>1 张）时「删除」= 批量删除全部选中卡（列表保留）；添加/剪切/
+        粘贴依赖单卡锚点、多选无锚点语义 → 禁用。
         """
         if card not in self._multi:      # 右键未选中卡 → 单选它（保持多选时不动选择）
             self._select(card)
@@ -658,10 +658,11 @@ class StepListView(QGraphicsView):
         a_cut = menu.addAction("剪切")
         a_paste = menu.addAction("粘贴")
         menu.addSeparator()
-        a_del = menu.addAction("删除")
+        a_del = menu.addAction(
+            "删除选中（%d 个）" % len(self._multi) if multi else "删除")
         a_paste.setEnabled(bool(self._clipboard.steps))
         if multi:                        # 禁用项在设置默认可用性之后覆盖
-            for a in (a_before, a_after, a_cut, a_paste, a_del):
+            for a in (a_before, a_after, a_cut, a_paste):
                 a.setEnabled(False)
         action = menu.exec_(global_pos)
         if action is a_before:
@@ -676,7 +677,10 @@ class StepListView(QGraphicsView):
         elif action is a_paste:
             self._paste(idx + 1)
         elif action is a_del:
-            self._delete_step(idx)
+            if multi:
+                self._delete_selected()   # 批量删除全部选中卡
+            else:
+                self._delete_step(idx)
 
     def _card_at(self, pos) -> Optional[StepCard]:
         item = self.itemAt(pos)
@@ -1031,6 +1035,67 @@ class DemoStep(Step):
     finally:
         globals()["QMenu"] = _orig_qmenu
 
+    # ---- J-5：多选右键菜单「删除选中（N 个）」→ 批量删除（列表保留） ----
+    class _MenuPick(_W.QMenu):
+        """记录动作列表；exec_ 按 chosen_text 返回**本实例**的动作（模拟点选）。
+
+        每次 _on_card_menu 都会新建菜单实例，chosen 必须是当前实例的动作
+        （身份比较），故按文本在本实例 actions_made 中查找。
+        """
+        instance = None
+        chosen_text = None
+
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.actions_made = []
+            _MenuPick.instance = self
+
+        def addAction(self, text):      # noqa: N802 (Qt 命名)
+            act = _W.QAction(text, self)
+            self.actions_made.append(act)
+            return act
+
+        def addSeparator(self):         # noqa: N802 (Qt 命名)
+            return None
+
+        def exec_(self, *args):
+            for a in self.actions_made:
+                if a.text() == _MenuPick.chosen_text:
+                    return a
+            return None
+
+    globals()["QMenu"] = _MenuPick
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+    try:
+        mv = StepListView(mgr, StepClipboard())
+        msl = StepList.create_empty()
+        for _ in range(3):
+            msl.add(make_step())
+        mv.set_list(msl, mgr)
+        mv._multi = [mv._cards[0], mv._cards[2]]
+        mv._selected = mv._cards[0]
+        _MenuPick.chosen_text = None
+        mv._on_card_menu(mv._cards[0], QPoint(0, 0))   # 多选右键 → 菜单构建
+        acts = _MenuPick.instance.actions_made
+        del_acts = [a for a in acts if "删除选中" in a.text()]
+        assert len(del_acts) == 1 and del_acts[0].isEnabled(), acts
+        assert del_acts[0].text() == "删除选中（2 个）"
+        _MenuPick.chosen_text = "删除选中（2 个）"
+        mv._on_card_menu(mv._cards[0], QPoint(0, 0))   # 点选 → 批量删除
+        assert len(msl) == 1                            # 两张选中卡被删，列表保留
+        # 单选右键菜单仍为「删除」单卡路径
+        _MenuPick.chosen_text = None
+        mv._on_card_menu(mv._cards[0], QPoint(0, 0))
+        single_del = [a for a in _MenuPick.instance.actions_made
+                      if a.text() == "删除"]
+        assert single_del and single_del[0].isEnabled()
+        _MenuPick.chosen_text = "删除"
+        mv._on_card_menu(mv._cards[0], QPoint(0, 0))
+        assert len(msl) == 0                            # 空列表仍保留（不误删列表）
+    finally:
+        globals()["QMenu"] = _orig_qmenu
+        QMessageBox.question = orig_q
+
     # ---- J-4：空列表提示居中 + 22 号宋体 ----
     view.set_list(StepList.create_empty(), mgr)   # 空列表 → hint 提示
     view.show()                                  # 未显示时 viewport 布局事件不派发，
@@ -1280,7 +1345,7 @@ class DemoStep(Step):
     view.eventFilter(c1, me_s)
     assert view._multi == [c0, c1] and view._selected is c1 and view._anchor is None
 
-    # 菜单多选态：只留「复制」，添加/剪切/粘贴/删除禁用；右键已选卡保持多选
+    # 菜单多选态：复制 + 批量删除可用；添加/剪切/粘贴禁用；右键已选卡保持多选
     view._select(c0)
     view._select_toggle(c1)
     assert view._multi == [c0, c1]
@@ -1299,8 +1364,9 @@ class DemoStep(Step):
         view._card_menu(c0, QPoint(1, 1))
         texts = dict(_MenuRec3.last)
         assert texts["复制"] is True
+        assert texts["删除选中（2 个）"] is True      # 多选 → 批量删除入口
         for t in ("添加到此步骤前方…", "添加到此步骤后方…",
-                  "剪切", "粘贴", "删除"):
+                  "剪切", "粘贴"):
             assert texts[t] is False, texts
         assert view._multi == [c0, c1]           # 右键已选卡 → 选择不动
         # 单卡菜单回归：全部可用（粘贴随剪贴板非空）

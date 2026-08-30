@@ -3,8 +3,12 @@
 图片遮罩预览（可复用控件）
 ========================
 
-:class:`ImageOverlay` 在父窗口上盖一层半透明黑色遮罩，居中显示一张可滚轮缩放、
+:class:`ImageOverlay` 在父窗口上盖一层半透明遮罩，居中显示一张可滚轮缩放、
 拖拽平移、双击关闭的图片。资源树预览、image 变量预览共用本控件。
+背景为应用背景色（浅色）而非黑色（用户反馈黑色突兀）。
+
+:class:`ZoomGraphicsView` 为可单独复用的缩放/平移图片视图（背景同浅色），
+供弹出式预览窗口（如「鼠标点击」素材预览）嵌入使用。
 
 基本用法
 --------
@@ -27,11 +31,14 @@ from PyQt5.QtWidgets import (
     QLabel, QVBoxLayout, QWidget,
 )
 
-__all__ = ["ImageOverlay"]
+__all__ = ["ImageOverlay", "ZoomGraphicsView"]
+
+# 查看器背景：与应用浅色主题一致（黑色突兀，用户反馈）
+_VIEW_BG = "#f4f7fc"
 
 
-class _ZoomGraphicsView(QGraphicsView):
-    """滚轮缩放 + 拖拽平移的图片视图；双击关闭遮罩。"""
+class ZoomGraphicsView(QGraphicsView):
+    """滚轮缩放 + 拖拽平移的图片视图；双击发出 :data:`doubleClicked`。"""
 
     doubleClicked = pyqtSignal()
 
@@ -40,7 +47,7 @@ class _ZoomGraphicsView(QGraphicsView):
         self.setDragMode(QGraphicsView.ScrollHandDrag)   # 鼠标拖拽平移
         self.setRenderHint(QPainter.Antialiasing)
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
-        self.setBackgroundBrush(QColor("#1e1e1e"))
+        self.setBackgroundBrush(QColor(_VIEW_BG))
         self._zoom = 1.0
 
     def wheelEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
@@ -61,7 +68,7 @@ class _ZoomGraphicsView(QGraphicsView):
 
 
 class ImageOverlay(QWidget):
-    """半透明黑色遮罩 + 居中可缩放拖拽图片（可复用）。"""
+    """半透明遮罩（浅色）+ 居中可缩放拖拽图片（可复用）。"""
 
     def __init__(self, pixmap: QPixmap, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -69,7 +76,7 @@ class ImageOverlay(QWidget):
         self.setWindowFlags(Qt.SubWindow)        # 仍属父窗口，但能盖在兄弟控件之上
         self.setFocusPolicy(Qt.StrongFocus)
 
-        self._view = _ZoomGraphicsView(self)
+        self._view = ZoomGraphicsView(self)
         self._scene = QGraphicsScene(self)
         self._item = QGraphicsPixmapItem(pixmap)
         self._scene.addItem(self._item)
@@ -83,7 +90,7 @@ class ImageOverlay(QWidget):
         bar.setContentsMargins(6, 4, 6, 4)
         self._hint = QLabel("滚轮缩放 · 拖拽平移 · 双击关闭 · Esc/点击空白 关闭")
         self._hint.setAlignment(Qt.AlignCenter)
-        self._hint.setStyleSheet("color:#aaa; background:#1e1e1e; padding:3px;")
+        self._hint.setStyleSheet("color:#666; background:#eef1f6; padding:3px;")
         bar.addWidget(self._hint)
         lay.addLayout(bar)
         lay.addWidget(self._view, 1)
@@ -119,10 +126,10 @@ class ImageOverlay(QWidget):
             super().keyPressEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
-        # 半透明黑色遮罩底色（_view 自有不透明背景盖住中心，四周呈遮罩色）
+        # 半透明白色遮罩底色（浅色主题；_view 自有不透明背景盖住中心，四周呈遮罩色）
         from PyQt5.QtGui import QPainter
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 160))
+        painter.fillRect(self.rect(), QColor(255, 255, 255, 170))
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         # 点击遮罩空白（_view 之外）→ 关闭；_view 内部点击由其自行处理不冒泡
@@ -154,6 +161,9 @@ if __name__ == "__main__":
     ov = ImageOverlay(pix, host)
     assert ov._item in ov._scene.items()
     assert not ov._item.pixmap().isNull()
+    # 查看器背景 = 应用背景色（浅色），非黑（用户反馈黑色突兀）
+    assert isinstance(ov._view, ZoomGraphicsView)
+    assert ov._view.backgroundBrush().color().name() == "#f4f7fc"
     ov.show_overlay()        # 不抛错（父窗口未 show，实际可见需运行时父窗口可见）
     assert not ov.isHidden()
     ov.close_overlay()
