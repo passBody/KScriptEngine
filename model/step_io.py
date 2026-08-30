@@ -104,6 +104,8 @@ class StepIOWidget:
         self._output_values: List[str] = [""] * len(self._output_type)
         self._input_names: Optional[List[str]] = None    # 参数名（Step 签名注入；None=无名字）
         self._output_names: Optional[List[str]] = None
+        self._input_optional: List[bool] = [False] * len(self._input_type)
+        # 可选输入标记（Step 签名注入）：可选槽空值不校验、解析为 None
         self._picker: Optional[Callable[..., Optional[str]]] = None  # None -> 内置默认
         self._widgets: List["weakref.ref[QWidget]"] = []  # 已生成控件弱引用
         self._listeners: List[Callable[[], None]] = []  # 槽值变更监听（任意写入路径均通知）
@@ -176,6 +178,17 @@ class StepIOWidget:
         """关联的变量树（自定义视图解析 ``{{变量}}`` 引用用）。"""
         return self._tree
 
+    def set_optional_inputs(self, flags: List[bool]) -> None:
+        """设置输入槽可选标记（Step 签名注入；不足补 False、多余忽略）。
+
+        可选槽语义：空值合规（校验/错误原因跳过）、解析为 None；一旦填值
+        仍按类型正常校验。输出槽恒为必须。
+        """
+        self._input_optional = list(flags[:len(self._input_type)])
+        if len(self._input_optional) < len(self._input_type):
+            self._input_optional += [False] * (
+                len(self._input_type) - len(self._input_optional))
+
     def set_slot_names(self, input_names: Optional[List[str]],
                        output_names: Optional[List[str]]) -> None:
         """设置槽标签用的参数名（来自 Step 的输入/输出 dataclass 字段名）。
@@ -200,6 +213,9 @@ class StepIOWidget:
 
     def _is_input_valid(self, i: int, vtype: str) -> bool:
         text = self._input_values[i]
+        if self._input_optional[i] and (
+                not isinstance(text, str) or not text.strip()):
+            return True   # 可选槽为空 → 合规（跳过类型/引用校验）
         if not isinstance(text, str):
             return False  # 槽值非 str（程序性注入）：视为不合规，不崩溃
         m = _VAR_REF.match(text)
@@ -250,6 +266,9 @@ class StepIOWidget:
         out: List[str] = []
         for i, vtype in enumerate(self._input_type):
             text = self._input_values[i]
+            if self._input_optional[i] and (
+                    not isinstance(text, str) or not text.strip()):
+                continue                       # 可选槽为空 → 无错误
             if not isinstance(text, str):
                 out.append("输入参数为空")      # 槽值非 str：按空处理，不崩溃
                 continue
@@ -301,6 +320,10 @@ class StepIOWidget:
         out: List[Any] = []
         for i, vtype in enumerate(self._input_type):
             text = self._input_values[i]
+            if self._input_optional[i] and (
+                    not isinstance(text, str) or not text.strip()):
+                out.append(None)          # 可选槽为空 → 解析为 None
+                continue
             m = _VAR_REF.match(text)
             if m:
                 var = self._tree.get(m.group(1))
@@ -475,15 +498,18 @@ class StepIOWidget:
         widget.input_labels.append(lbl)
         if self._type_is_resource(vtype):
             # 资源类：仅一个按钮（只能选择变量）
+            fallback = ("（可选）选择变量…" if self._input_optional[i]
+                        else "选择变量…")
             btn = QPushButton(self._display_name(self._input_values[i])
-                              or "选择变量…")
+                              or fallback)
             btn.clicked.connect(lambda _=False, wd=widget, i=i: self._pick_input(wd, i))
             row.addWidget(btn, 1)
             widget.input_fields.append(btn)
             return row
         # 可编辑类型：QLineEdit + 选择按钮
         edit = QLineEdit()
-        edit.setPlaceholderText("常量 或 {{变量名}}")
+        edit.setPlaceholderText(
+            ("（可选）" if self._input_optional[i] else "") + "常量 或 {{变量名}}")
         edit.blockSignals(True)
         edit.setText(self._input_values[i])  # 初始值不触发同步
         edit.blockSignals(False)
@@ -550,7 +576,8 @@ class StepIOWidget:
         else:
             shown = value if value else "未指定"
         current = self._display_name(value) if value else "（空）"
-        return shown, "类型: %s | 当前: %s" % (vtype, current)
+        opt = " | 可选" if (kind == "input" and self._input_optional[i]) else ""
+        return shown, "类型: %s | 当前: %s%s" % (vtype, current, opt)
 
     def _apply_row_label(self, lbl: QLabel, kind: str, i: int) -> None:
         """把槽标签写到 QLabel：超宽省略（80px），tooltip 放完整信息。"""
@@ -572,7 +599,9 @@ class StepIOWidget:
             field.setText(value)
             field.blockSignals(False)
         elif isinstance(field, QPushButton):
-            field.setText(self._display_name(value) or "选择变量…")
+            fallback = ("（可选）选择变量…" if self._input_optional[i]
+                        else "选择变量…")
+            field.setText(self._display_name(value) or fallback)
         if len(widget.input_labels) > i:      # 标签随值变化同步（变量名/常量值）
             self._apply_row_label(widget.input_labels[i], "input", i)
 
@@ -1066,6 +1095,19 @@ if __name__ == "__main__":
     w17 = StepIOWidget(["number"], ["number"], tree, pkg)
     w17.change_value("input", 0, "{{不存在}}")
     assert w17.error_reasons() == ["变量不存在: 不存在", "输出变量未指定"]
+
+    # ---- 可选输入槽：空值合法、解析 None、error_reasons 跳过（非必须参数机制） ----
+    w21 = StepIOWidget(["number", "string"], [], tree, pkg)
+    w21.set_optional_inputs([False, True])
+    w21.change_value("input", 0, "5")
+    assert w21.is_valid                  # 第二个槽可选且为空 → 合法
+    assert w21.resolve_inputs() == [5, None]
+    assert w21.error_reasons() == []
+    w21.change_value("input", 1, "{{不存在}}")
+    assert not w21.is_valid              # 可选槽一旦填了值仍须合规
+    assert w21.error_reasons() == ["变量不存在: 不存在"]
+    w21.change_value("input", 1, "")
+    assert w21.is_valid
 
     # ---- 槽值变更监听 + 读取接口 ----
     # add_listener：change_value 与 GUI 编辑两路写入都通知；remove 后不通知

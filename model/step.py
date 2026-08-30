@@ -35,7 +35,7 @@
 """
 import base64
 import json
-from dataclasses import fields
+from dataclasses import field, fields
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
@@ -49,7 +49,24 @@ if TYPE_CHECKING:
     from model.kscp_package import KscpPackage
     from model.variable_tree import VariableTree
 
-__all__ = ["Step", "StepStatus"]
+__all__ = ["Step", "StepStatus", "optional"]
+
+
+def optional(default: Any) -> Any:
+    """dataclass 字段标记：该输入参数**非必须**（可选槽）。
+
+    语义：空值不参与校验（卡片不报错）、解析为 ``None`` 传入 run()；
+    一旦填写仍按类型正常校验。仅输入槽支持，输出槽恒为必须。
+    标记经 ``dataclasses.field(metadata={"optional": True})`` 传递。
+
+    用法::
+
+        @dataclass
+        class Input:
+            x: "number" = 0
+            素材图片: "image" = optional("")   # 编辑期辅助，可空
+    """
+    return field(default=default, metadata={"optional": True})
 
 
 class StepStatus(Enum):
@@ -75,6 +92,8 @@ class Step:
         self.io.set_slot_names(
             [f.name for f in fields(self.input_class)] if self.input_class is not object else None,
             [f.name for f in fields(self.output_class)] if self.output_class is not object else None)
+        # 可选输入标记（optional() 字段；空值不校验、解析为 None）
+        self.io.set_optional_inputs(self._optional_inputs())
         self.enabled = enabled           # 是否运行（勾选运行；默认运行）
         self.tag = tag                   # 标签/签名（用户标记；卡片上方可编辑）
         self._status = StepStatus.PENDING    # 经 status 属性读写（变更即通知监听者）
@@ -159,6 +178,12 @@ class Step:
     def _signature(cls, klass: type) -> List[List[str]]:
         """dataclass 签名：[(字段名, 类型注解), ...]。"""
         return [[f.name, f.type] for f in cls._safe_fields(klass)]
+
+    @classmethod
+    def _optional_inputs(cls) -> List[bool]:
+        """输入槽可选标记列表（来自字段 ``metadata={"optional": True}``）。"""
+        return [bool(f.metadata.get("optional"))
+                for f in cls._safe_fields(cls.input_class)]
 
     # ================================================================
     # 工厂
@@ -366,6 +391,39 @@ if __name__ == "__main__":
         raise AssertionError("非 dataclass 输入类应抛 ValueError")
     except ValueError:
         pass
+
+    # ---- optional()：非必须输入标记——空值合法/解析 None；填值仍校验 ----
+    @dataclass
+    class _OptIn:
+        a: "number" = 0
+        note: "string" = optional("")
+
+    @dataclass
+    class _OptOut:
+        pass
+
+    class _OptStep(Step):
+        name = "可选步骤"
+        description = "可选输入标记测试"
+        input_class = _OptIn
+        output_class = _OptOut
+
+        def run(self) -> int:
+            return 1
+
+    so = _OptStep.create_default(tree, pkg)
+    assert so.io._input_optional == [False, True]
+    so.io.change_value("input", 0, "1")
+    assert so.io.is_valid                       # note 槽空 → 合法
+    assert so.io.resolve_inputs()[1] is None
+    assert so.do() == 1                          # run 不依赖可选槽
+    # 往返：可选标记经类签名重建（格式串不含标记，与旧工程格式串兼容）
+    so2 = _OptStep.from_format_string(so.to_format_string(), tree, pkg)
+    assert so2.io._input_optional == [False, True]
+    assert so2.io.is_valid
+    # 可选槽填了非法值 → 仍按类型校验
+    so.io.change_value("input", 1, "{{不存在}}")
+    assert not so.io.is_valid
 
     # do() 全流程：输入解析 → run → 输出写回变量树
     s.io.change_value("input", 0, "5")          # number 常量

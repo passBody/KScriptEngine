@@ -15,6 +15,10 @@ KScript 的 action = `Step` 子类模板（`actions/<类别>/<名字>.py`），�
 **1. 文件骨架**（仿照 `actions/输入/多次点击.py` 与 `actions/输入/按键.py`）：
 - 模块 docstring 分「输入槽 / 运行规则」两段；类 `name`/`description`/`input_class`/`output_class`
 - 输入/输出 dataclass 的字段**注解必须是已注册的变量类型名**（`"number"`/`"string"`/`"image"` 等，未知类型在加载时被 StepManager 跳过并记日志）
+- **非必须参数**用 `optional(default)` 标记（`from model.step import Step, optional`）：
+  `素材图片: "image" = optional("")` —— 可选槽**空值不校验**（卡片不报错）、
+  **解析为 None** 传入 run()、一旦填值仍按类型校验；仅输入槽支持、输出槽恒必须；
+  **run() 必须容忍可选槽的 None**（典型：编辑期辅助参数，如鼠标点击的素材图片）
 - 输入模拟类模板必须提供 `_new_control()` 桩工厂（冒烟替换用，仿 `按键.py`）
 - `__all__ = ["类名"]`
 - `run()` 错误路径：置 `StepStatus.ERROR` + `LogModel.instance().error(...)`，**不抛异常**，返回 1；
@@ -54,5 +58,6 @@ KScript 的 action = `Step` 子类模板（`actions/<类别>/<名字>.py`），�
 | 冒烟输出走管道 | EXIT=139 段错误 | 直跑 |
 | 忘更新 smoke_all 的 MODULES | 回归漏测 | 顺手加 |
 | 次数/数值直接传入 | 小数未定义语义 | `int()` 并注明向下取整 |
+| 可选槽的 run() 未处理 None | 空值执行即崩溃 | 判断 None 或只读不依赖 |
 | 间隔语义不清 | 末次多等待 | 与多次点击一致：两次之间等待、末次后不等待 |
 | `tools/image_marker` 冒烟挂起 | smoke_all 超时 | 该模块是交互 demo，不在回归清单内，勿改动它 |

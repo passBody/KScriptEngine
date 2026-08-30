@@ -10,8 +10,8 @@
 ------
 * ``x`` / ``y``（number）：点击坐标（可引用变量，接 image_marker 标注坐标流）。
 * ``按住时长``（number，秒）：按下后多久松开。
-* ``素材图片``（image）：**编辑期辅助**，仅用于自定义视图的点位标注与预览；
-  ``run()`` 不读取它。
+* ``素材图片``（image，**可选**）：**编辑期辅助**，仅用于自定义视图的点位标注
+  与预览；可空（可选槽不校验、解析为 None），``run()`` 不读取它。
 
 > 模拟输入到游戏窗口需以管理员身份运行 KScript。
 """
@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
 )
 
 from libs.key_control import InputControl
-from model.step import Step
+from model.step import Step, optional
 
 __all__ = ["MouseClick"]
 
@@ -44,7 +44,7 @@ class MouseClickInput:
     x: "number" = 0        # type: ignore
     y: "number" = 0        # type: ignore
     按住时长: "number" = 0.05 # type: ignore
-    素材图片: "image" = ""  # type: ignore
+    素材图片: "image" = optional("")  # type: ignore  # 非必须：编辑期辅助，可空
 
 
 @dataclass
@@ -314,8 +314,8 @@ if __name__ == "__main__":
     assert m.io._output_type == []
     assert m.name == "鼠标点击" and m.status is not None
 
-    # 素材图片槽是 image 资源：空值过不了 StepIOWidget 校验（input() 先于 run()
-    # 抛 ValueError），必须引用工程资源变量（run() 不读取它，仅满足槽校验）
+    # 素材图片为可选输入槽（optional("")）：空值即可执行；此处先设引用供后续
+    # 冒烟（预览/设置点位）使用
     pkg.write_file("assets/1.png", b"\x89PNG\r\n\x1a\n")
     tree.add("img", ProjectVariable.create("image", "assets/1.png", pkg))
     m.io.change_value("input", 3, "{{img}}")
@@ -340,6 +340,16 @@ if __name__ == "__main__":
     m.io.change_value("input", 2, "0")
     assert m.do() == 1
     assert called == [(100.0, 200.0, None)], called
+
+    # 素材图片为可选输入（optional("") 标记）：空值合法、解析为 None，run 不依赖
+    m.io.change_value("input", 3, "")
+    assert m.io.is_valid
+    called.clear()
+    m.io.change_value("input", 2, "0.1")
+    assert m.do() == 1
+    assert called == [(100.0, 200.0, 0.1)], called      # run 只消费 x/y/时长
+    assert m.inputs.素材图片 is None
+    m.io.change_value("input", 3, "{{img}}")            # 复位（后续预览用例需要）
 
     # 往返
     fmt = m.to_format_string()
