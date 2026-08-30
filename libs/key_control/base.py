@@ -107,6 +107,33 @@ class InputControl:
         """当前鼠标坐标 (x, y)。"""
         return self.mouse_control.position
 
+    def mouse_move(self, x, y):
+        """把鼠标移动到坐标 (x, y)（不按键）。"""
+        self.mouse_control.position = (x, y)
+
+    def mouse_scroll(self, dx, dy):
+        """滚动鼠标滚轮。dx>0 向右、dy>0 向上（pynput 语义）。"""
+        self.mouse_control.scroll(dx, dy)
+
+    def mouse_drag(self, x1, y1, x2, y2, duration=None, steps=None):
+        """从 (x1, y1) 按住左键平滑拖拽到 (x2, y2)。
+
+        :param duration: 拖拽总耗时（秒）；None/<=0 时瞬间到位（立即按下-移动-松开）。
+        :param steps: 插值步数（默认按距离每约 5px 一步；瞬间模式忽略）。
+        """
+        self.mouse_control.position = (x1, y1)
+        self.mouse_control.press(mouse.Button.left)
+        if duration:
+            dist = max(abs(x2 - x1), abs(y2 - y1))
+            n = steps or max(1, int(dist // 5))
+            sx = (x2 - x1) / n
+            sy = (y2 - y1) / n
+            t = duration / n
+            for i in range(1, n + 1):
+                time.sleep(t)
+                self.mouse_control.position = (round(x1 + sx * i), round(y1 + sy * i))
+        self.mouse_control.release(mouse.Button.left)
+
     # --- 全局监听 ---
 
     def _create_keyboard_listener(self, on_press=None, on_release=None):
@@ -161,6 +188,9 @@ if __name__ == "__main__":
     ctl = InputControl()
     assert hasattr(ctl, "key_click") and hasattr(ctl, "mouse_click")
     assert hasattr(ctl, "keyboard_control") and hasattr(ctl, "mouse_control")
+    # 扩展原语（移动/滚轮/拖拽）：仅存在性断言，不做真实输入
+    assert hasattr(ctl, "mouse_move") and hasattr(ctl, "mouse_scroll")
+    assert hasattr(ctl, "mouse_drag")
     # NAMED_KEYS 覆盖 spec 需要的最小集合
     for k in ("space", "enter", "esc", "shift", "ctrl", "alt"):
         assert k in NAMED_KEYS
