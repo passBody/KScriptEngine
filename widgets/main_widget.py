@@ -6,12 +6,10 @@
 :class:`MainWindow` 是 KScript 的主窗口。无工程时显示「新建 / 打开」两个大卡片；
 打开 ``.kscp`` 后，左侧是管理树切换栏 + 当前管理树，中间是当前管理树的大预览。
 
-管理树经 :class:`ManagementTree` 抽象（预留接口）：每个管理树提供左侧树控件
-``tree_widget()`` 与中间预览 ``preview_widget()``。当前实现资源 / 变量 /
-步骤列表 / 步骤模板四棵管理树；步骤列表管理树（:class:`StepListManagementTree`）
-= 左侧 :class:`StepListTreeWidget` + 宿主 :class:`_StepListHost`（承载
-:class:`StepListView`），与变量管理树共享同一棵变量树（变量变更 → 卡片重检
-颜色），不再有占位「步骤」项。
+界面组件按职责拆分：管理树簇见 :mod:`widgets.management_trees`，活动栏见
+:mod:`widgets.activity_bar`，设置弹窗见 :mod:`widgets.settings_dialog`，
+通用小件（图标/窗口尺寸/落地卡片/标题面板/占位）见 :mod:`widgets.ui_common`。
+本模块保留主窗口本体 + 执行器接线 + 程序入口。
 
 启动::
 
@@ -28,612 +26,39 @@ import platform
 import sys
 from typing import Callable, Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import QObject, QPoint, Qt, QSize, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygon
+from PyQt5.QtCore import QObject, Qt, QSize, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QIcon
 from PyQt5.QtWidgets import (
-    QAction, QApplication, QDialog, QDialogButtonBox, QFileDialog, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QSplitter, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
+    QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel,
+    QMainWindow, QMenu, QMessageBox, QSplitter, QStackedWidget, QToolButton,
+    QWidget,
 )
 
+from model.hotkey import HotkeyListener
 from model.kscp_package import KscpPackage
 from model.log_model import LogLevel, LogModel
 from model.step import StepStatus
-from widgets.resource_tree_widget import ResourceTreeWidget
-from widgets.log_widget import LogWidget
-from widgets.variable_tree_widget import VariableTreeWidget
-from model.step_list import StepList
-from model.step_list_store import StepListStore
 from model.step_manager import StepManager
-from model.variable_tree import VariableTree
-from model.hotkey import HotkeyListener
 from model.step_runner import StepRunner, StepRunnerState
-from widgets.step_list_view import StepClipboard, StepListView
+from model.variable_tree import VariableTree
+from widgets.log_widget import LogWidget
 from widgets.step_list_tree_widget import StepListTreeWidget
 from widgets.step_tree_widget import StepTreeWidget
+from widgets.variable_tree_widget import VariableTreeWidget
+from widgets.activity_bar import ActivityBar
+from widgets.management_trees import (
+    ManagementTree, ResourceManagementTree, StepListHost,
+    StepListManagementTree, StepManagementTree, VariableManagementTree,
+)
+from widgets.settings_dialog import SettingsDialog
+from widgets.ui_common import LandingCard, TitledPanel, make_icon, window_size
 
-__all__ = ["ManagementTree", "MainWindow", "main"]
+__all__ = ["MainWindow", "main"]
 
 
-# ================================================================
-# 活动栏图标（自绘，避免 QStyle 枚举 stub 问题）
-# ================================================================
+# 程序图标路径（main() 应用）
 _ICON_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "icon", "kscript.ico")
-
-
-def _window_size() -> Tuple[int, int]:
-    """程序窗口尺寸：当前屏幕可用区域的 2/3（宽、高）。
-
-    多屏时取光标所在屏（窗口出现在用户当前所在屏幕），无则主屏。
-    """
-    app = QApplication.instance()
-    screen = app.screenAt(QCursor.pos()) if app is not None else None
-    if screen is None and app is not None:
-        screen = app.primaryScreen()
-    if screen is None:
-        return (1280, 720)          # 兜底（无屏幕环境）
-    g = screen.availableGeometry()
-    return g.width() * 2 // 3, g.height() * 2 // 3
-
-
-def _make_icon(kind: str) -> QIcon:
-    """按类别绘制简洁图标：resource=文件夹、variable={ }、step=列表、default=方块。
-
-    exec/settings 为活动栏底部功能按钮绘制，放大到 48px（用户反馈图标太小）。
-    """
-    pm = QPixmap(32, 32)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.Antialiasing)
-    if kind == "resource":
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#2b5fa0"))
-        p.drawRoundedRect(3, 5, 13, 7, 2, 2)        # 文件夹标签
-        p.setBrush(QColor("#3a7bd5"))
-        p.drawRoundedRect(3, 9, 26, 18, 3, 3)        # 文件夹主体
-    elif kind == "variable":
-        p.setPen(QPen(QColor("#27ae60"), 2))
-        p.setFont(QFont("Consolas", 14, QFont.Bold))
-        p.drawText(pm.rect(), Qt.AlignCenter, "{ }")
-    elif kind == "step":
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#e67e22"))
-        for y in (7, 14, 21):
-            p.drawRoundedRect(4, y, 24, 5, 2, 2)
-    elif kind == "template":
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#e67e22"))
-        p.drawRoundedRect(5, 5, 22, 22, 4, 4)      # 橙色方块（与占位「步骤」裸三横线区分）
-        p.setBrush(QColor("#fff3e0"))
-        for y in (12, 18, 24):
-            p.drawRoundedRect(9, y, 14, 3, 1, 1)   # 方块内三条横线
-    elif kind == "exec":
-        # 绿色播放三角（执行语义）
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#27ae60"))
-        p.drawPolygon(QPolygon([QPoint(10, 8), QPoint(10, 24), QPoint(25, 16)]))
-    elif kind == "settings":
-        # 齿轮：外环 + 内圆
-        p.setPen(QPen(QColor("#888888"), 2.5))
-        p.setBrush(Qt.NoBrush)
-        p.drawEllipse(QPoint(16, 16), 9, 9)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#888888"))
-        p.drawEllipse(QPoint(16, 16), 3.5, 3.5)
-    else:
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#888888"))
-        p.drawRoundedRect(5, 5, 22, 22, 4, 4)
-    p.end()
-    if kind in ("exec", "settings"):
-        pm = pm.scaled(48, 48, transformMode=Qt.SmoothTransformation)  # 底部功能按钮图标放大
-    return QIcon(pm)
-
-
-# ================================================================
-# 管理树接口（预留）
-# ================================================================
-class ManagementTree:
-    """管理树基类（预留接口）：提供左侧树控件 + 中间预览控件。
-
-    子类实现 :meth:`_build_tree` / :meth:`_build_preview`（或重写
-    :meth:`tree_widget` / :meth:`preview_widget`）。控件懒构建并缓存。
-    """
-
-    def __init__(self, name: str) -> None:
-        self._name = name
-        self._tree: Optional[QWidget] = None
-        self._preview: Optional[QWidget] = None
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    def icon(self) -> QIcon:
-        """管理树图标（活动栏用）。子类可重写以提供专属图标。"""
-        return _make_icon("default")
-
-    def tree_widget(self) -> QWidget:
-        if self._tree is None:
-            self._tree = self._build_tree()
-        return self._tree
-
-    def preview_widget(self) -> QWidget:
-        if self._preview is None:
-            self._preview = self._build_preview()
-        return self._preview
-
-    def _build_tree(self) -> QWidget:
-        raise NotImplementedError
-
-    def _build_preview(self) -> QWidget:
-        raise NotImplementedError
-
-
-class ResourceManagementTree(ManagementTree):
-    """资源管理树：``ResourceTreeWidget`` + 其预览面板。"""
-
-    def __init__(self, package: KscpPackage) -> None:
-        super().__init__("资源")
-        self._package = package
-        self._rtree: Optional[ResourceTreeWidget] = None
-
-    def icon(self) -> QIcon:
-        return _make_icon("resource")
-
-    def tree_widget(self) -> QWidget:
-        if self._rtree is None:
-            self._rtree = ResourceTreeWidget(self._package)
-        assert self._rtree is not None
-        return self._rtree
-
-    def preview_widget(self) -> QWidget:
-        if self._rtree is None:
-            self._rtree = ResourceTreeWidget(self._package)
-        assert self._rtree is not None
-        if self._preview is None:
-            self._preview = self._rtree.preview_widget()
-        assert self._preview is not None
-        return self._preview
-
-
-class VariableManagementTree(ManagementTree):
-    """变量管理树：``VariableTreeWidget`` + 其编辑卡。"""
-
-    def __init__(self, package: KscpPackage,
-                 tree: Optional[VariableTree] = None) -> None:
-        super().__init__("变量")
-        self._package = package
-        self._tree = tree
-        self._vtree: Optional[VariableTreeWidget] = None
-
-    def icon(self) -> QIcon:
-        return _make_icon("variable")
-
-    def tree_widget(self) -> QWidget:
-        if self._vtree is None:
-            self._vtree = VariableTreeWidget(self._package, self._tree)
-        assert self._vtree is not None
-        return self._vtree
-
-    def preview_widget(self) -> QWidget:
-        if self._vtree is None:
-            self._vtree = VariableTreeWidget(self._package, self._tree)
-        assert self._vtree is not None
-        if self._preview is None:
-            self._preview = self._vtree.preview_widget()
-        assert self._preview is not None
-        return self._preview
-
-
-class StepManagementTree(ManagementTree):
-    """步骤模板管理树：``StepTreeWidget`` + 其只读信息面板。"""
-
-    def __init__(self, package: KscpPackage,
-                 mgr: Optional[StepManager] = None) -> None:
-        super().__init__("步骤模板")
-        self._package = package
-        self._mgr = mgr   # None → StepTreeWidget 自建工厂（独立使用场景）
-        self._stree: Optional[StepTreeWidget] = None
-
-    def icon(self) -> QIcon:
-        return _make_icon("template")
-
-    def tree_widget(self) -> QWidget:
-        if self._stree is None:
-            self._stree = StepTreeWidget(self._package, self._mgr)
-        assert self._stree is not None
-        return self._stree
-
-    def preview_widget(self) -> QWidget:
-        if self._stree is None:
-            self._stree = StepTreeWidget(self._package, self._mgr)
-        assert self._stree is not None
-        if self._preview is None:
-            self._preview = self._stree.preview_widget()
-        assert self._preview is not None
-        return self._preview
-
-
-class StepListManagementTree(ManagementTree):
-    """步骤列表管理树：StepListTreeWidget + 宿主（占位/列表视图）。"""
-
-    def __init__(self, package: KscpPackage, tree: VariableTree,
-                 mgr: Optional[StepManager] = None) -> None:
-        super().__init__("步骤列表")
-        self._package = package
-        self._tree = tree
-        if mgr is not None:
-            self._mgr = mgr   # 与步骤模板树共享同一工厂（模板只加载一次）
-        else:
-            self._mgr = StepManager(package, tree)
-            self._mgr.load()
-        if package.exists("step_list.json"):
-            self._store = StepListStore.from_json(
-                package.read_file("step_list.json"), self._mgr)
-        else:
-            self._store = StepListStore.create_empty()
-            self._save_store()
-        self._clipboard = StepClipboard()
-        self._sl_tree: Optional[StepListTreeWidget] = None
-        self._host: Optional[_StepListHost] = None
-        self._current: Optional[str] = None
-
-    @property
-    def store(self) -> StepListStore:
-        """步骤列表存储（执行器数据源）。"""
-        return self._store
-
-    def set_read_only(self, ro: bool) -> None:
-        """执行期只读：树可点击切换查看列表（禁拖拽/右键/快捷键/勾选），
-        卡片视图禁编辑保留悬停动画。"""
-        if self._sl_tree is not None:
-            self._sl_tree.set_read_only(ro)
-        if self._host is not None:
-            self._host.set_read_only(ro)
-
-    def icon(self) -> QIcon:
-        return _make_icon("step")
-
-    def _save_store(self) -> None:
-        self._package.write_file("step_list.json", self._store.to_json_bytes())
-
-    def refresh_cards(self) -> None:
-        """变量树变化 → 宿主重检卡片颜色（不重建）。"""
-        if self._host is not None:
-            self._host.refresh_validity()
-
-    def tree_widget(self) -> QWidget:
-        if self._sl_tree is None:
-            self._sl_tree = StepListTreeWidget(
-                self._store, self._mgr, self._clipboard,
-                self._save_store, None)
-            self._sl_tree.list_selected.connect(self._on_list_selected)
-            self._sl_tree.store_changed.connect(self._on_store_changed)
-        assert self._sl_tree is not None
-        return self._sl_tree
-
-    def _on_edited(self) -> None:
-        """视图内容编辑（io/签名/激活切换）→ 保存 + 树勾选框同步激活态。"""
-        self._save_store()
-        if self._sl_tree is not None:
-            self._sl_tree.refresh_active_marks()
-
-    def preview_widget(self) -> QWidget:
-        if self._host is None:
-            self._host = _StepListHost(
-                self._mgr, self._clipboard, self._on_edited, None)
-            # 视图错误数变化 → 重标左侧树错误条目（树可能尚未构建，判空）
-            self._host.errors_changed.connect(self._refresh_tree_marks)
-        assert self._host is not None
-        return self._host
-
-    def _refresh_tree_marks(self, _n: int) -> None:
-        """卡片错误数变化 → 按列表 io 校验重标树错误条目（红加粗，见 refresh_error_marks）。"""
-        if self._sl_tree is not None:
-            self._sl_tree.refresh_error_marks()
-
-    # ---- 宿主联动 ----
-    def _on_list_selected(self, path: str) -> None:
-        self._current = path
-        if self._host is not None:
-            try:
-                self._host.set_list(self._store.get(path), self._mgr)
-            except FileNotFoundError:
-                self._host.set_list(None)
-
-    def _on_store_changed(self) -> None:
-        """树内容变更（勾选激活/添加/粘贴/删除）→ 宿主同步当前列表。
-
-        删除 → 占位页；其余（尤其树勾选框切换激活，list_selected 不触发）
-        → 重建卡片画面，激活切换立即刷新视图。
-        """
-        if self._host is None or self._current is None:
-            return
-        try:
-            lst = self._store.get(self._current)
-        except FileNotFoundError:
-            self._host.set_list(None)
-        else:
-            self._host.set_list(lst, self._mgr)
-
-
-class _StepListHost(QStackedWidget):
-    """步骤列表视图宿主：占位页 + 工具栏 + StepListView（视图编辑 → 保存回调）。
-
-    工具栏两行：「跳转序号 / 搜索标签定位」（卡片过多时定位用，
-    经 :meth:`StepListView.jump_to_index` / :meth:`StepListView.locate_by_tag`）；
-    下方「错误卡片: N + 跳转错误」（错误数随视图刷新经
-    :attr:`StepListView.errors_changed` 同步，跳转经 :meth:`StepListView.jump_to_error`）。
-    错误数同时经 :attr:`errors_changed` 转发给宿主（步骤列表管理树 → 树条目红标记）。
-    """
-
-    errors_changed = pyqtSignal(int)   # 错误卡片数（转发自 StepListView）
-
-    def __init__(self, mgr: StepManager, clipboard: StepClipboard,
-                 on_edited: Callable[[], None],
-                 parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self._placeholder = QLabel("从左侧选择一个步骤列表")
-        self._placeholder.setAlignment(Qt.AlignCenter)
-        self._placeholder.setStyleSheet("color:#999; font-size:15px;")
-        self.addWidget(self._placeholder)          # 0
-        self._view = StepListView(mgr, clipboard, None)
-        self._view.edited.connect(on_edited)
-        self._view.errors_changed.connect(self._on_errors_changed)
-        self._view.errors_changed.connect(self.errors_changed)
-        page1 = QWidget()
-        lay = QVBoxLayout(page1)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        lay.addWidget(self._build_toolbar())
-        lay.addWidget(self._view)
-        self.addWidget(page1)                      # 1
-        self.setCurrentIndex(0)
-
-    def _build_toolbar(self) -> QWidget:
-        bar = QWidget()
-        bar.setObjectName("viewToolbar")
-        bar.setStyleSheet(
-            "#viewToolbar { background: rgba(244, 247, 252, 0.9);"
-            " border-bottom: 1px solid rgba(128, 148, 178, 0.4); }")
-        lay = QVBoxLayout(bar)
-        lay.setContentsMargins(8, 4, 8, 4)
-        lay.setSpacing(2)
-        row1 = QHBoxLayout()
-        row1.setSpacing(6)
-        row1.addWidget(QLabel("跳转"))
-        self._jump_edit = QLineEdit()
-        self._jump_edit.setFixedWidth(64)
-        self._jump_edit.setPlaceholderText("序号")
-        self._jump_edit.returnPressed.connect(self._on_jump)
-        row1.addWidget(self._jump_edit)
-        btn_jump = QPushButton("定位")
-        btn_jump.clicked.connect(self._on_jump)
-        row1.addWidget(btn_jump)
-        row1.addSpacing(12)
-        row1.addWidget(QLabel("搜索标签"))
-        self._search_edit = QLineEdit()
-        self._search_edit.setPlaceholderText("关键词")
-        self._search_edit.returnPressed.connect(self._on_search)
-        row1.addWidget(self._search_edit, 1)
-        btn_search = QPushButton("搜索")
-        btn_search.clicked.connect(self._on_search)
-        row1.addWidget(btn_search)
-        self._toolbar_status = QLabel("")
-        self._toolbar_status.setStyleSheet("color:#888;")
-        row1.addWidget(self._toolbar_status)
-        lay.addLayout(row1)
-        # 第二行：错误卡片信息（数量随视图 errors_changed 同步）+ 跳转错误
-        row2 = QHBoxLayout()
-        row2.setSpacing(6)
-        self._error_count = QLabel("错误卡片: 0")
-        self._error_count.setStyleSheet("color:#c8564c;")
-        row2.addWidget(self._error_count)
-        btn_errors = QPushButton("跳转错误")
-        btn_errors.clicked.connect(self._on_jump_error)
-        row2.addWidget(btn_errors)
-        row2.addStretch(1)
-        lay.addLayout(row2)
-        return bar
-
-    def _on_errors_changed(self, n: int) -> None:
-        self._error_count.setText("错误卡片: %d" % n)
-
-    def _on_jump_error(self) -> None:
-        """跳转到下一张错误卡片（视图循环定位）；无错误卡 → 提示。"""
-        if self._view.jump_to_error():
-            self._toolbar_status.setText("已定位错误卡片")
-        else:
-            self._toolbar_status.setText("无错误卡片")
-
-    def _on_jump(self) -> None:
-        text = self._jump_edit.text().strip()
-        try:
-            n = int(text)
-        except ValueError:
-            self._toolbar_status.setText("序号需为数字")
-            return
-        total = len(self._view._cards)
-        if self._view.jump_to_index(n):
-            self._toolbar_status.setText("已定位 %d/%d" % (n, total))
-        else:
-            self._toolbar_status.setText("序号越界（1-%d）" % total)
-
-    def _on_search(self) -> None:
-        if self._view.locate_by_tag(self._search_edit.text()):
-            self._toolbar_status.setText("已定位")
-        else:
-            self._toolbar_status.setText("未找到匹配标签")
-
-    def set_list(self, step_list: Optional[StepList],
-                 mgr: Optional[StepManager] = None) -> None:
-        self._view.set_list(step_list, mgr)
-        self.setCurrentIndex(1 if step_list is not None else 0)
-
-    def refresh_validity(self) -> None:
-        self._view.refresh_validity()
-
-    def set_read_only(self, ro: bool) -> None:
-        """执行期只读转发：卡片视图禁编辑但保留悬停动画。"""
-        self._view.set_read_only(ro)
-
-
-class PlaceholderManagementTree(ManagementTree):
-    """占位管理树：演示切换 + 预留接口，后续替换为真实实现。"""
-
-    def __init__(self, name: str, icon_kind: str = "default") -> None:
-        super().__init__(name)
-        self._icon_kind = icon_kind
-
-    def icon(self) -> QIcon:
-        return _make_icon(self._icon_kind)
-
-    def _build_tree(self) -> QWidget:
-        return self._placeholder("「%s管理树」待实现" % self._name)
-
-    def _build_preview(self) -> QWidget:
-        return self._placeholder("「%s管理树」预览 待实现" % self._name)
-
-    @staticmethod
-    def _placeholder(text: str) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lbl = QLabel(text)
-        lbl.setAlignment(Qt.AlignCenter)
-        lbl.setStyleSheet("color:#999; font-size:16px;")
-        lay.addWidget(lbl)
-        return w
-
-
-# ================================================================
-# landing 卡片
-# ================================================================
-class _LandingCard(QFrame):
-    """可点击的大卡片；左键点击发出 ``clicked``。"""
-
-    clicked = pyqtSignal()
-
-    def __init__(self, title: str, desc: str, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setMinimumWidth(240)
-        self.setMinimumHeight(240)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet(
-            "QFrame { background:#fafafa; border:2px solid #ccc; border-radius:14px; }"
-            "QFrame:hover { border-color:#3a7bd5; background:#fff; }")
-        lay = QVBoxLayout(self)
-        lay.addStretch()
-        t = QLabel(title)
-        t.setAlignment(Qt.AlignCenter)
-        t.setStyleSheet("font-size:30px; font-weight:bold; color:#333; background:transparent; border:none;")
-        d = QLabel(desc)
-        d.setAlignment(Qt.AlignCenter)
-        d.setStyleSheet("font-size:13px; color:#888; background:transparent; border:none;")
-        lay.addWidget(t)
-        lay.addWidget(d)
-        lay.addStretch()
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
-
-
-class _TitledPanel(QWidget):
-    """带标题的栏容器（预留：日志栏等后续面板复用本类）。"""
-
-    def __init__(self, title: str, content: QWidget,
-                 parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self._title = QLabel(title)
-        self._title.setStyleSheet(
-            "background:#eaeaea; color:#333;"
-            " padding:4px 8px; border-bottom:1px solid #ccc;")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        lay.addWidget(self._title)
-        lay.addWidget(content, 1)
-
-    def set_title(self, title: str) -> None:
-        self._title.setText(title)
-
-
-class _ActivityBar(QWidget):
-    """VSCode 风格活动栏：竖排图标按钮，悬停 tooltip 显示功能名。"""
-
-    currentChanged = pyqtSignal(int)
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setFixedWidth(56)
-        self._lay = QVBoxLayout(self)
-        self._lay.setContentsMargins(4, 8, 4, 8)
-        self._lay.setSpacing(6)
-        self._lay.addStretch()
-        self._buttons: List[QToolButton] = []
-        self._bottom_buttons: List[QToolButton] = []   # 底部功能按钮（clear 不清）
-
-    def add_item(self, name: str, icon: QIcon) -> None:
-        btn = QToolButton(self)
-        btn.setCheckable(True)
-        btn.setAutoExclusive(True)
-        btn.setAutoRaise(True)
-        btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        btn.setIcon(icon)
-        btn.setIconSize(QSize(26, 26))
-        btn.setFixedSize(44, 44)
-        btn.setToolTip(name)                       # 悬停显示功能名
-        btn.setStyleSheet(
-            "QToolButton { border:none; border-radius:6px; background:transparent; }"
-            "QToolButton:hover { background:#e3e3e3; }"
-            "QToolButton:checked { background:#cfe0f5; }"
-            "QToolButton:checked:hover { background:#bfd5f0; }")
-        idx = len(self._buttons)
-
-        def _on_toggled(checked: bool, i: int = idx) -> None:
-            if checked:
-                self.currentChanged.emit(i)
-
-        btn.toggled.connect(_on_toggled)
-        self._lay.insertWidget(self._lay.count() - 1 - len(self._bottom_buttons), btn)
-        self._buttons.append(btn)
-
-    def add_bottom_button(self, name: str, icon: QIcon, on_click,
-                          checkable: bool = False) -> QToolButton:
-        """底部功能按钮（stretch 之下；``clear()`` 不清除——非管理树切换项）。
-
-        ``checkable``：状态按钮（如执行待命态绿色高亮）；瞬时按钮（如设置）
-        用 False——否则点击后 checked 样式残留（悬停/按压高亮不退）。
-        """
-        btn = QToolButton(self)
-        btn.setCheckable(checkable)
-        btn.setAutoRaise(True)
-        btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        btn.setIcon(icon)
-        btn.setIconSize(QSize(36, 36))   # 功能按钮图标大于导航项（用户反馈）
-        btn.setFixedSize(48, 48)
-        btn.setToolTip(name)
-        btn.setStyleSheet(
-            "QToolButton { border:none; border-radius:6px; background:transparent; }"
-            "QToolButton:hover { background:#e3e3e3; }"
-            "QToolButton:checked { background:#c8e6c9; }"
-            "QToolButton:checked:hover { background:#b7dcba; }")
-        btn.clicked.connect(on_click)
-        self._lay.addWidget(btn)                   # stretch 之后 = 栏位最底
-        self._bottom_buttons.append(btn)
-        return btn
-
-    def clear(self) -> None:
-        for btn in self._buttons:
-            btn.deleteLater()
-        self._buttons.clear()
-
-    def set_current_row(self, row: int) -> None:
-        if 0 <= row < len(self._buttons):
-            self._buttons[row].setChecked(True)
 
 
 class _ExecBridge(QObject):
@@ -651,75 +76,6 @@ def _make_step_runner(store):
 
 def _make_hotkey_listener(hotkey, on_toggle):
     return HotkeyListener(hotkey, on_toggle)
-
-
-class _HotkeyEdit(QLineEdit):
-    """热键编辑框（设置弹窗内）：聚焦后按任意键完成绑定（保存由弹窗按钮统一执行）。"""
-
-    def __init__(self, initial: str, parent=None) -> None:
-        super().__init__(parent)
-        self._hotkey = initial
-        self.setReadOnly(True)
-        self.setFixedWidth(42)
-        self.setAlignment(Qt.AlignCenter)
-        self.setToolTip(
-            "点击后按下任意单字符键绑定执行热键。\n"
-            "热键勿与步骤按键冲突（模拟按键也会被监听）。")
-        self.setText(self._hotkey)
-
-    def hotkey(self) -> str:
-        return self._hotkey
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
-        self.setText("…")                     # 提示等待按键
-        super().mousePressEvent(event)
-
-    def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
-        if event.key() == Qt.Key_Escape:
-            self.setText(self._hotkey)           # 取消还原
-            return
-        ch = event.text()
-        if ch:
-            self._apply_key(ch)
-
-    def _apply_key(self, key: str) -> bool:
-        """校验并记录待绑定热键；非法（非单字符）→ False 且还原显示。"""
-        if not isinstance(key, str) or len(key) != 1:
-            self.setText(self._hotkey)
-            return False
-        self._hotkey = key
-        self.setText(key)
-        return True
-
-
-class _SettingsDialog(QDialog):
-    """设置弹窗：触发热键配置；右下角「保存/取消」按钮。"""
-
-    def __init__(self, hotkey: str, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("设置")
-        self.resize(320, 140)
-        self._hotkey_edit = _HotkeyEdit(hotkey, self)
-
-        lay = QVBoxLayout(self)
-        row = QHBoxLayout()
-        lbl = QLabel("触发热键")
-        row.addWidget(lbl)
-        row.addStretch()
-        row.addWidget(self._hotkey_edit)
-        lay.addLayout(row)
-        tip = QLabel("热键勿与步骤按键冲突（模拟按键也会被监听）；\n模拟输入到游戏窗口需管理员运行。")
-        tip.setStyleSheet("color:#888;")
-        lay.addWidget(tip)
-        btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        btns.button(QDialogButtonBox.Save).setText("保存")
-        btns.button(QDialogButtonBox.Cancel).setText("取消")
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
-
-    def hotkey(self) -> str:
-        return self._hotkey_edit.hotkey()
 
 
 # ================================================================
@@ -761,10 +117,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._central)
         self._central.addWidget(self._build_landing())    # page 0
         self._project_widget: Optional[QWidget] = None
-        self._switcher: Optional[_ActivityBar] = None
+        self._switcher: Optional[ActivityBar] = None
         self._tree_stack: Optional[QStackedWidget] = None
         self._preview_stack: Optional[QStackedWidget] = None
-        self._tree_panel: Optional[_TitledPanel] = None
+        self._tree_panel: Optional[TitledPanel] = None
 
         self._build_toolbar()
         self._setup_statusbar()
@@ -1019,7 +375,7 @@ class MainWindow(QMainWindow):
         """打开设置弹窗（触发热键配置）；保存 → setting.json + .kscp/executor.json。"""
         if self._package is None:
             return
-        dlg = _SettingsDialog(self._current_hotkey(), self)
+        dlg = SettingsDialog(self._current_hotkey(), self)
         if dlg.exec_() != QDialog.Accepted:
             return
         self._apply_hotkey(dlg.hotkey())
@@ -1155,9 +511,9 @@ class MainWindow(QMainWindow):
         lay = QHBoxLayout(page)
         lay.setContentsMargins(40, 40, 40, 40)
         lay.setSpacing(30)
-        card_new = _LandingCard("新建", "创建一个空工程")
+        card_new = LandingCard("新建", "创建一个空工程")
         card_new.clicked.connect(self._on_new)
-        card_open = _LandingCard("打开", "打开一个 .kscp 文件")
+        card_open = LandingCard("打开", "打开一个 .kscp 文件")
         card_open.clicked.connect(self._on_open)
         lay.addStretch()
         lay.addWidget(card_new)
@@ -1171,23 +527,23 @@ class MainWindow(QMainWindow):
         sp.setChildrenCollapsible(False)      # 防止拖到极小时栏「突然消失」
 
         # 切换栏（VSCode 风格图标条，无标题，悬停显示功能名）
-        self._switcher = _ActivityBar()
+        self._switcher = ActivityBar()
         self._switcher.currentChanged.connect(self._on_switch)
         # 栏位最底：执行（待命/停止监听，checkable 状态钮）与设置（瞬时按钮）
         self._exec_btn = self._switcher.add_bottom_button(
-            "执行", _make_icon("exec"), self._on_exec_clicked, checkable=True)
+            "执行", make_icon("exec"), self._on_exec_clicked, checkable=True)
         self._update_exec_button()
         self._settings_btn = self._switcher.add_bottom_button(
-            "设置", _make_icon("settings"), self._on_settings_clicked)
+            "设置", make_icon("settings"), self._on_settings_clicked)
 
         # 树栏（标题随当前管理树变化）
         self._tree_stack = QStackedWidget()
-        self._tree_panel = _TitledPanel("资源树栏", self._tree_stack)
+        self._tree_panel = TitledPanel("资源树栏", self._tree_stack)
         self._tree_panel.setMinimumWidth(180)
 
         # 右栏：视图栏在上、日志栏在下（树栏右边、视图栏下边）
         self._preview_stack = QStackedWidget()
-        preview_panel = _TitledPanel("视图栏", self._preview_stack)
+        preview_panel = TitledPanel("视图栏", self._preview_stack)
         preview_panel.setMinimumWidth(200)
         self._log_widget = LogWidget()
         right = QSplitter(Qt.Vertical)
@@ -1276,7 +632,7 @@ class MainWindow(QMainWindow):
         self._central.setCurrentWidget(self._project_widget)
         self.setWindowTitle("KScript — %s" % (path or "新工程"))
         if not self._project_sized:          # 首次进入工程视图：窗口 = 屏幕 2/3 并居中
-            self.resize(*_window_size())
+            self.resize(*window_size())
             screen = QApplication.primaryScreen()
             if screen is not None:
                 g = screen.availableGeometry()
@@ -1378,7 +734,7 @@ class DemoStep(Step):
     assert isinstance(vtw, VariableTreeWidget)
     assert vtw._tree is sl_mgr._tree
     host = sl_mgr.preview_widget()
-    assert isinstance(host, _StepListHost)
+    assert isinstance(host, StepListHost)
     assert isinstance(sl_mgr.tree_widget(), StepListTreeWidget)
 
     # 空 store → step_list.json 已写盘（镜像 variables.json 模式）
@@ -1479,7 +835,7 @@ class DemoStep(Step):
     assert isinstance(tw2, StepListTreeWidget)
     assert tw2.first_list_path() == "乙"                # walk 序（= 显示序 = 执行序）首个列表
     host2 = sl_mgr2.preview_widget()
-    assert isinstance(host2, _StepListHost)
+    assert isinstance(host2, StepListHost)
     assert host2.currentIndex() == 1                    # 非占位：自动切到列表视图
     assert len(host2._view._cards) == 0                 # 「乙」为空列表 → 无卡片
     assert sl_mgr2._current == "乙"                     # 树中选中项 = 第一个列表
@@ -1512,7 +868,7 @@ class DemoStep(Step):
     card2._on_active_toggled(True)               # 复位，不影响后续用例
 
     # 程序窗口 = 当前屏幕可用区 2/3（用户需求：2/3 显示器宽高）
-    win_w, win_h = _window_size()
+    win_w, win_h = window_size()
     assert win.width() == win_w and win.height() == win_h
 
     # 程序图标：icon/kscript.ico 存在且可加载（应用到所有窗口/弹窗）
@@ -1749,21 +1105,9 @@ class DemoStep(Step):
     finally:
         _make_hotkey_listener = _orig_mk_listener
 
-    # ---- 设置弹窗 + 热键编辑框 ----
-    # 编辑框：点击后按键绑定（不真实按键，直接调 _apply_key）；非法拒绝并还原
-    dlg = _SettingsDialog("`")
-    assert dlg._hotkey_edit.text() == "`"
-    # 按钮中文 + 设置按钮非 checkable（点击后无样式残留）
-    from PyQt5.QtWidgets import QDialogButtonBox as _QDBB
-    _bb = dlg.findChild(_QDBB)
-    assert _bb is not None
-    assert _bb.button(_QDBB.Save).text() == "保存"
-    assert _bb.button(_QDBB.Cancel).text() == "取消"
+    # ---- 设置按钮（活动栏底部）与热键落盘 ----
+    # 设置按钮 = 瞬时按钮（点击后无样式残留）；弹窗细节冒烟见 widgets.settings_dialog
     assert not win_exec._settings_btn.isCheckable()
-    assert dlg._hotkey_edit._apply_key("f")
-    assert dlg._hotkey_edit.text() == "f" and dlg.hotkey() == "f"
-    assert not dlg._hotkey_edit._apply_key("ab")
-    assert dlg._hotkey_edit.text() == "f" and dlg.hotkey() == "f"   # 非法不落盘、显示还原
     # _apply_hotkey：只写工程包 executor.json（不碰 setting.json——executor.json 唯一来源）
     win_exec._apply_hotkey("g")
     assert win_exec._package.exists("executor.json")
