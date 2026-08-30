@@ -20,10 +20,9 @@ import weakref
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
-    QDialog, QGraphicsPixmapItem, QGraphicsScene, QLabel,
+    QDialog, QGraphicsPixmapItem, QGraphicsScene, QHBoxLayout, QLabel,
     QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -70,12 +69,11 @@ class MouseClick(Step):
     IMAGE_SLOT = 3
 
     def info_widget(self, parent: Optional[QWidget] = None) -> QWidget:
-        """自定义视图：提示 + 标注预览 + 设置点位按钮（见 _MouseInfoView）。"""
+        """自定义视图：提示 + 预览/设置点位按钮（见 _MouseInfoView）。"""
         return _MouseInfoView(self, parent)
 
 
 _VAR_REF = re.compile(r"^\{\{(.+)\}\}$")
-_PREVIEW_H = 120   # 卡片内缩略图高度（点击 → 弹出窗口查看）
 
 
 def _to_pixmap(image: Any) -> Optional[QPixmap]:
@@ -101,17 +99,6 @@ def _notify_preview_weak(view_ref) -> None:
     view = view_ref()
     if view is not None:
         view._on_io_changed()
-
-
-class _ClickPreview(QLabel):
-    """可点击预览缩略图：左键点击发出 :data:`clicked`（→ 弹出窗口查看）。"""
-
-    clicked = pyqtSignal()
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
 
 
 class _ImagePreviewDialog(QDialog):
@@ -145,9 +132,9 @@ class _ImagePreviewDialog(QDialog):
 class _MouseInfoView(QWidget):
     """鼠标点击步骤的自定义卡片视图。
 
-    布局：
+    布局（卡片内**不显示**任何预览画面——预览只存在于独立弹窗中）：
     * 提示标签：「自定义视图中的预览图的画面是通过读输入GUI的参数来生成」
-    * 预览缩略图（点击 → _ImagePreviewDialog **弹出窗口**查看；查看器不嵌入卡片）
+    * 「预览」按钮 → _ImagePreviewDialog 独立弹窗查看（数据源 = 素材图片输入槽）
     * 「设置点位」按钮 → mark_image('dot') → 坐标回写 x/y 输入槽
     """
 
@@ -160,22 +147,23 @@ class _MouseInfoView(QWidget):
         hint.setStyleSheet("color:#888;")
         hint.setWordWrap(True)
 
-        self._preview = _ClickPreview()
-        self._preview.setAlignment(Qt.AlignCenter)
-        self._preview.setMinimumHeight(_PREVIEW_H)
-        self._preview.setStyleSheet("background:#f4f7fc; border:1px solid #d5dbe3;")
-        self._preview.setToolTip("点击弹出窗口查看")
-        self._preview.clicked.connect(self._open_preview)
+        self._btn_preview = QPushButton("预览")
+        self._btn_preview.setToolTip("弹出独立窗口查看素材预览")
+        self._btn_preview.clicked.connect(self._open_preview)
 
         self._btn_mark = QPushButton("设置点位")
         self._btn_mark.clicked.connect(self._on_mark)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(self._btn_preview)
+        row.addWidget(self._btn_mark)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
         lay.addWidget(hint)
-        lay.addWidget(self._preview)
-        lay.addWidget(self._btn_mark)
+        lay.addLayout(row)
 
         self_ref = weakref.ref(self)                 # 弱引用：监听器不持视图强引用
         self._weak_cb = lambda r=self_ref: _notify_preview_weak(r)
@@ -208,16 +196,6 @@ class _MouseInfoView(QWidget):
         pix.loadFromData(bytes(data))
         return pix
 
-    def _refresh_preview(self) -> None:
-        """缩略图随当前预览刷新：无素材 → 占位文字；有 → 等比缩放缩略图。"""
-        pix = self._preview_pixmap()
-        if pix.isNull():
-            self._preview.setText("无素材")
-        else:
-            self._preview.setText("")
-            self._preview.setPixmap(pix.scaledToHeight(
-                _PREVIEW_H - 8, Qt.SmoothTransformation))
-
     def _open_preview(self) -> None:
         """独立弹窗查看当前预览（标注图优先，否则素材原图）；无素材不弹。
 
@@ -231,9 +209,9 @@ class _MouseInfoView(QWidget):
 
     # ---- 槽变化 ----
     def _on_io_changed(self) -> None:
-        # 素材槽变化 → 标注结果失效，回到原图预览
+        # 素材槽变化 → 标注结果失效；预览按钮可用性随素材有无刷新
         self._marked = None
-        self._refresh_preview()
+        self._btn_preview.setEnabled(not self._preview_pixmap().isNull())
 
     # ---- 设置点位 ----
     def _on_mark(self) -> None:
@@ -258,7 +236,7 @@ class _MouseInfoView(QWidget):
         pix = _to_pixmap(marked_img)
         if pix is not None and not pix.isNull():
             self._marked = pix
-        self._refresh_preview()
+        self._btn_preview.setEnabled(not self._preview_pixmap().isNull())
 
 
 # ================================================================
@@ -336,33 +314,34 @@ if __name__ == "__main__":
     m3.io.change_value("input", 3, "{{图}}")
     view = m3.info_widget()
     assert view is not None
-    # 三个要素：提示标签文字、预览缩略图、设置点位按钮（查看器不嵌入卡片）
+    # 三个要素：提示标签、预览按钮、设置点位按钮；卡片内**不显示**预览画面
     from PyQt5.QtWidgets import QLabel, QPushButton
     labels = view.findChildren(QLabel)
     btns = view.findChildren(QPushButton)
     assert any("预览图的画面是通过读输入GUI的参数来生成" in l.text() for l in labels)
     assert any(b.text() == "设置点位" for b in btns)
-    assert not any(b.text() == "预览" for b in btns)   # 按钮已由缩略图取代
+    assert any(b.text() == "预览" for b in btns)
+    assert not hasattr(view, "_preview")             # 卡片内无嵌入的预览控件
     btn = [b for b in btns if b.text() == "设置点位"][0]
-    # 缩略图随素材槽变化（有素材 → 图，空槽 → 占位文字）
+    pbtn = [b for b in btns if b.text() == "预览"][0]
+    # 预览按钮可用性跟随素材槽（有素材可点、空槽禁用）
     assert not view._preview_pixmap().isNull()   # 已有 {{图}} → 非占位
-    assert view._preview.pixmap() is not None
-    assert not view._preview.pixmap().isNull()
-    assert view._preview.text() == ""
+    assert pbtn.isEnabled()
     m3.io.change_value("input", 3, "")
     assert view._preview_pixmap().isNull()       # 空槽 → 占位（null 图）
-    assert view._preview.text() == "无素材"
+    assert not pbtn.isEnabled()                  # 无素材 → 预览不可点
     m3.io.change_value("input", 3, "{{图}}")
     assert not view._preview_pixmap().isNull()
+    assert pbtn.isEnabled()
 
-    # 点击缩略图 → 独立弹窗：**无父窗口**（父窗口在 QGraphicsProxyWidget 内
-    # 会被 proxy 内嵌渲染、嵌在卡片里 —— 同 model.step_io 默认选择器的教训）
+    # 点击预览按钮 → 独立弹窗：**无父窗口**（带父的 QDialog 在
+    # QGraphicsProxyWidget 内会被内嵌渲染 —— 同 model.step_io 默认选择器教训）
     _captured = []
     from PyQt5.QtWidgets import QDialog
     _orig_exec = QDialog.exec_
     QDialog.exec_ = lambda self: (_captured.append(self), QDialog.Accepted)[1]
     try:
-        view._preview.clicked.emit()
+        pbtn.click()
     finally:
         QDialog.exec_ = _orig_exec
     assert len(_captured) == 1 and isinstance(_captured[0], _ImagePreviewDialog)
