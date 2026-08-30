@@ -120,13 +120,23 @@ class _ImagePreviewDialog(QDialog):
     **无父窗口**：卡片在 QGraphicsView 场景（QGraphicsProxyWidget）中，带父的
     QDialog 会被 proxy 内嵌渲染、嵌在卡片里（同 model.step_io 默认选择器的
     教训）——故构造不设父，exec_() 无父时应用模态、阻塞主窗口。背景为应用
-    背景色（浅色）而非黑色。每次打开新建，画面取当前预览（标注图优先，否则素材原图）。
+    背景色（浅色）而非黑色。初始尺寸 = 显示器可用区 2/3；窗口拉伸时图片
+    跟随适配缩放（ZoomGraphicsView.resizeEvent）。每次打开新建，画面取当前
+    预览（标注图优先，否则素材原图）。
     """
 
     def __init__(self, pixmap: QPixmap) -> None:
         super().__init__()          # 无父窗口 → 独立顶层弹窗
         self.setWindowTitle("素材预览")
-        self.resize(640, 480)
+        # 初始尺寸 = 显示器可用区 2/3（窗口拉伸时图片跟随适配，见 ZoomGraphicsView）
+        from PyQt5.QtWidgets import QApplication
+        _app = QApplication.instance()
+        _screen = _app.primaryScreen() if _app is not None else None
+        if _screen is not None:
+            _g = _screen.availableGeometry()
+            self.resize(_g.width() * 2 // 3, _g.height() * 2 // 3)
+        else:
+            self.resize(640, 480)
         from widgets.image_overlay import ZoomGraphicsView
         self._view = ZoomGraphicsView(self)
         self._scene = QGraphicsScene(self)
@@ -368,12 +378,18 @@ if __name__ == "__main__":
     assert len(_captured) == 1 and isinstance(_captured[0], _ImagePreviewDialog)
     assert _captured[0].parent() is None              # 独立顶层窗口，不嵌入卡片
 
-    # 预览弹窗：背景 = 应用背景色（浅色，非黑）
+    # 预览弹窗：背景 = 应用背景色（浅色，非黑）；初始尺寸 = 显示器可用区 2/3
     dlg = _ImagePreviewDialog(view._preview_pixmap())
     assert dlg._view.scene() is dlg._scene
     assert dlg._view.backgroundBrush().color().name() == "#f4f7fc"
     items = dlg._scene.items()
     assert len(items) == 1 and not items[0].pixmap().isNull()
+    from PyQt5.QtWidgets import QApplication
+    _scr = QApplication.instance().primaryScreen()
+    if _scr is not None:
+        _g = _scr.availableGeometry()
+        assert dlg.width() == _g.width() * 2 // 3, (dlg.width(), _g.width())
+        assert dlg.height() == _g.height() * 2 // 3
 
     # 设置点位：桩替换 mark_image，坐标回写 x/y 槽
     import tools.image_marker as _im

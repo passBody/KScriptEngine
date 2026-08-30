@@ -66,6 +66,13 @@ class ZoomGraphicsView(QGraphicsView):
         if self.scene() is not None:
             self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
 
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        super().resizeEvent(event)
+        # 窗口拉伸 → 图片跟随适配缩放（用户反馈：拉伸时图片原封不动）；
+        # 复位缩放并保持纵横比（滚轮缩放后拉伸窗口回到适配态）
+        if self.scene() is not None:
+            self.fit_view()
+
 
 class ImageOverlay(QWidget):
     """半透明遮罩（浅色）+ 居中可缩放拖拽图片（可复用）。"""
@@ -180,9 +187,12 @@ if __name__ == "__main__":
     # ---- 14e：宿主 resize → 遮罩跟随（修复「拉动窗口预览窗口不变、画面割裂」） ----
     ov.show_overlay()
     assert ov.geometry() == host.rect()
+    m11_before = ov._view.transform().m11()      # 适配后初始缩放
+    assert m11_before > 1.0
     host.resize(500, 400)
     app.processEvents()
     assert ov.geometry() == host.rect()          # 宿主变宽 → 遮罩同步拉伸
+    assert ov._view.transform().m11() > m11_before * 1.2   # 图片随窗口拉伸跟随缩放
     ov.close_overlay()
     assert ov.isHidden()
     host.resize(600, 450)                        # 已关闭 → 不再跟随、无副作用
