@@ -20,8 +20,8 @@ import weakref
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtCore import QPoint, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QDialog, QGraphicsPixmapItem, QGraphicsScene, QLabel,
     QMessageBox, QPushButton, QVBoxLayout, QWidget,
@@ -78,22 +78,26 @@ _VAR_REF = re.compile(r"^\{\{(.+)\}\}$")
 _PREVIEW_H = 120   # 卡片内缩略图高度（点击 → 弹出窗口查看）
 
 
-def _to_pixmap(image: Any) -> Optional[QPixmap]:
-    """mark_image 返回的多种类型 → QPixmap；不可解析 → None。"""
-    if isinstance(image, QPixmap):
-        return image
-    if isinstance(image, QImage):
-        return QPixmap.fromImage(image)
-    if isinstance(image, (bytes, bytearray)):
-        pix = QPixmap()
-        return pix if pix.loadFromData(bytes(image)) else None
-    # numpy.ndarray(HxWx3, uint8)：bytes 输入时 mark_image 优先返回该类型
-    if hasattr(image, "tobytes") and getattr(image, "ndim", 0) == 3:
-        h, w = image.shape[0], image.shape[1]
-        qimg = QImage(image.tobytes(), w, h, w * image.shape[2],
-                      QImage.Format_RGB888)
-        return QPixmap.fromImage(qimg.copy())
-    return None
+# 标注点样式：与 tools.image_marker 的 _DOT_COLOR / _DOT_RADIUS 保持一致
+_DOT_COLOR = QColor(255, 0, 0)
+_DOT_RADIUS = 6
+
+
+def _mark_dot_pixmap(src: QPixmap, x: int, y: int) -> QPixmap:
+    """在原图上叠加红点标注（**无灰色遮罩**），返回新位图；src 为 null 原样返回。
+
+    mark_image('dot') 返回的合成图带整图灰色遮罩——遮罩是标注过程的辅助视觉，
+    不应进入预览（用户反馈：预览图是加遮罩的版本）——故预览自行合成：原图 + 红点。
+    """
+    if src.isNull():
+        return src
+    out = QPixmap(src)
+    p = QPainter(out)
+    p.setPen(Qt.NoPen)
+    p.setBrush(_DOT_COLOR)
+    p.drawEllipse(QPoint(x, y), _DOT_RADIUS, _DOT_RADIUS)
+    p.end()
+    return out
 
 
 def _notify_preview_weak(view_ref) -> None:
@@ -254,20 +258,20 @@ class _MouseInfoView(QWidget):
             return
         from tools.image_marker import mark_image
         try:
-            marked_img, pos = mark_image(data, "dot")
+            _, pos = mark_image(data, "dot")   # 合成图（带灰色遮罩）弃用：预览自行画红点
         except (ValueError, TypeError) as e:
             QMessageBox.warning(None, "设置点位", "标注失败：%s" % e)
             return
         if pos is None or not pos.points:
             return                                   # 取消 / 尺寸超屏 → 数据不动
         x, y = pos.points[0]
-        # change_value 触发 io 监听 → _on_io_changed 先把 _marked 置空刷新原图，
-        # 随后用标注图覆盖（带红点回显）
+        # change_value 触发 io 监听 → _on_io_changed 先把 _marked 置空，
+        # 故随后取 _preview_pixmap() 得到素材原图 → 叠加红点（无遮罩）
         self._step.io.change_value("input", 0, str(int(x)))
         self._step.io.change_value("input", 1, str(int(y)))
-        pix = _to_pixmap(marked_img)
-        if pix is not None and not pix.isNull():
-            self._marked = pix
+        pix = _mark_dot_pixmap(self._preview_pixmap(), int(x), int(y))
+        if not pix.isNull():
+            self._marked = pix                       # 预览 = 原图 + 红点
         self._refresh_preview()
 
 
@@ -424,6 +428,47 @@ if __name__ == "__main__":
     assert warned == [1]
     assert warned_parents == [None]     # 无父：警告框不在卡片 proxy 内嵌
     assert m3.io.input_value(0) == "1" and m3.io.input_value(1) == "2"   # 未改写
+
+    # ---- 标注预览：原图+红点、无灰色遮罩（用户反馈：预览图是加遮罩的版本） ----
+    from PyQt5.QtCore import QBuffer, QRect
+    from PyQt5.QtGui import QColor, QImage as _QImage, QPainter as _QPainter
+    _big = _QImage(200, 200, _QImage.Format_RGB32)
+    _big.fill(QColor(255, 255, 255))
+    _buf = QBuffer()
+    _buf.open(QBuffer.ReadWrite)
+    _big.save(_buf, "PNG")
+    pkg.write_file("assets/大图.png", bytes(_buf.data()))
+    tree.add("大图", ProjectVariable.create("image", "assets/大图.png", pkg))
+    m4 = MouseClick.create_default(tree, pkg)
+    m4.io.change_value("input", 3, "{{大图}}")
+    view4 = m4.info_widget()
+
+    class _FakePos50:
+        points = [(50, 50)]
+
+    def _fake_mark_masked(data, mode):
+        """模拟真实 mark_image('dot')：返回整图灰色遮罩合成图 + 坐标。"""
+        _masked = _big.copy()
+        _pm = _QPainter(_masked)
+        _pm.fillRect(QRect(0, 0, 200, 200), QColor(128, 128, 128, 140))
+        _pm.end()
+        return _masked, _FakePos50()
+
+    _im.mark_image = _fake_mark_masked
+    try:
+        _btn4 = [b for b in view4.findChildren(QPushButton)
+                 if b.text() == "设置点位"][0]
+        _btn4.click()
+    finally:
+        _im.mark_image = _orig_mark
+    assert m4.io.input_value(0) == "50" and m4.io.input_value(1) == "50"
+    assert view4._marked is not None
+    _img4 = view4._marked.toImage()
+    _c_dot = _img4.pixelColor(50, 50)
+    assert _c_dot.red() > 200 and _c_dot.green() < 100, _c_dot.getRgb()   # 红点
+    _c_bg = _img4.pixelColor(10, 10)
+    assert (_c_bg.red() > 240 and _c_bg.green() > 240 and _c_bg.blue() > 240), \
+        _c_bg.getRgb()                                     # 无灰色遮罩（遮罩会压暗）
 
     # ---- I4: 视图销毁后监听器不泄漏（弱引用回调；触发 io 变更不崩） ----
     import weakref as _wr
