@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))   # 便于 import 项目包（如 widgets.ui_common）
 
 MODULES = [
     "actions.控制流程.time_delay", "actions.控制流程.输出日志",
@@ -27,7 +28,6 @@ MODULES = [
     "model.project_variable", "model.settings", "model.step", "model.step_io",
     "model.step_list", "model.step_list_store", "model.step_manager",
     "model.step_runner", "model.variable_tree",
-    "tools.image_marker",
     "widgets.activity_bar", "widgets.image_overlay", "widgets.log_widget",
     "widgets.main_widget", "widgets.management_trees",
     "widgets.resource_tree_widget", "widgets.settings_dialog",
@@ -35,6 +35,8 @@ MODULES = [
     "widgets.step_list_view", "widgets.step_tree_widget",
     "widgets.ui_common", "widgets.variable_tree_widget",
 ]
+# 注：tools.image_marker 的 __main__ 是**交互式全屏标注 demo**（QEventLoop 阻塞
+# 等待人工点击），无断言、无法无人值守运行——不纳入本清单，人工验证。
 
 CHECKS = [
     ["main.py", "sample.kscp", "--check"],
@@ -43,27 +45,43 @@ CHECKS = [
 ]
 
 
+def _safe_print(text: str) -> None:
+    """中文路径在 GBK 控制台下 print 会 UnicodeEncodeError → 安全降级打印。"""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(text.encode("unicode_escape").decode("ascii"))
+
+
 def _run(args, timeout: int) -> int:
-    r = subprocess.run([sys.executable] + args, cwd=str(ROOT),
-                       timeout=timeout, capture_output=True)
+    try:
+        r = subprocess.run([sys.executable] + args, cwd=str(ROOT),
+                           timeout=timeout, capture_output=True)
+    except subprocess.TimeoutExpired:
+        _safe_print("TIMEOUT(%ds): %s" % (timeout, " ".join(args)))
+        return 1
     if r.returncode != 0:
-        print("FAIL: %s" % " ".join(args))
+        _safe_print("FAIL: %s" % " ".join(args))
         tail = r.stderr.decode("utf-8", "replace").strip().splitlines()
         for line in tail[-8:]:
-            print("  " + line)
+            _safe_print("  " + line)
     return r.returncode
 
 
 def main() -> int:
+    # venv 等独立部署：先指路 Qt 插件（子进程继承环境变量，避免 Qt 冒烟挂起）
+    from widgets.ui_common import ensure_qt_plugin_path
+    ensure_qt_plugin_path()
+
     failed = 0
     for mod in MODULES:
         failed += 1 if _run(["-m", mod], 120) != 0 else 0
     for args in CHECKS:
         failed += 1 if _run(args, 120) != 0 else 0
     if failed:
-        print("\n%d FAILED" % failed)
+        _safe_print("\n%d FAILED" % failed)
         return 1
-    print("ALL %d SMOKE + %d CHECKS OK" % (len(MODULES), len(CHECKS)))
+    _safe_print("ALL %d SMOKE + %d CHECKS OK" % (len(MODULES), len(CHECKS)))
     return 0
 
 
