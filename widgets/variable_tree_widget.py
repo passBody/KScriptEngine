@@ -37,6 +37,7 @@ from model.project_variable import ProjectVariable
 from model.variable_tree import VariableTree
 from widgets.image_overlay import ImageOverlay
 from widgets.resource_tree_widget import ResourceTreeWidget
+from widgets.ui_common import ClickableLabel
 
 __all__ = ["VariableTreeWidget", "VariableEditPanel", "CreateVariableDialog"]
 
@@ -708,10 +709,8 @@ def _number_editor(var: ProjectVariable, package: KscpPackage,
     return w
 
 
-class _ClickableLabel(QLabel):
-    """可点击的图片缩略图：存原图，随自身尺寸缩放显示，左键点击发 ``clicked``。"""
-
-    clicked = pyqtSignal()
+class _ClickableLabel(ClickableLabel):
+    """可点击的图片缩略图：存原图，随自身尺寸缩放显示（共用 ui_common.ClickableLabel）。"""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)

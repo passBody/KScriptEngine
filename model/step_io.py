@@ -65,6 +65,9 @@ __all__ = ["StepIOWidget"]
 # 整串 {{变量名}} 才算变量引用（不支持串内插值/计算，留作后续）
 _VAR_REF = re.compile(r"^\{\{(.+)\}\}$")
 
+# 资源类槽可直接选择的图片扩展名（整合选择器：image 槽可选包内资源路径作常量）
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
+
 
 def _parse_number(text: str) -> Any:
     """把文本解析为 int 或 float；失败抛 :class:`ValueError`。"""
@@ -212,7 +215,10 @@ class StepIOWidget:
                 return False   # 根路径等非法引用：非法而非崩溃
         # 常量
         if self._type_is_resource(vtype):
-            return False  # 资源类不可为常量，只能选择
+            # 资源类常量 = 包内图片资源路径（整合选择器：image 槽可直接选资源）
+            return (bool(text.strip())
+                    and text.lower().endswith(_IMAGE_EXTS)
+                    and self._package.exists(text))
         if not text.strip():
             return False  # 为空
         parser = self._CONSTANT_PARSERS.get(vtype, lambda t: t)
@@ -259,7 +265,11 @@ class StepIOWidget:
                     out.append("变量不存在: %s" % name)
                 continue
             if self._type_is_resource(vtype):
-                out.append("输入参数为空")      # 资源类不可为常量，只能选择
+                if not text.strip():
+                    out.append("输入参数为空")
+                elif (not text.lower().endswith(_IMAGE_EXTS)
+                      or not self._package.exists(text)):
+                    out.append("资源不存在: %s" % text)  # 或非图片扩展名
             elif not text.strip():
                 out.append("输入参数为空")
             else:
@@ -298,6 +308,8 @@ class StepIOWidget:
                 if vtype == "string" and var.type == "number":
                     data = str(data)          # 数字变量 → 字符串（隐式转换）
                 out.append(data)
+            elif self._type_is_resource(vtype):
+                out.append(self._package.read_file(text))   # 资源常量 → 文件字节
             else:
                 parser = self._CONSTANT_PARSERS.get(vtype, lambda t: t)
                 out.append(parser(text))
@@ -626,7 +638,12 @@ class StepIOWidget:
         name = self.picker(self._tree, self._input_type[i], widget)
         if name is None:
             return
-        self._set_input(i, "{{%s}}" % name)  # 刷新所有控件（含触发的）
+        # 整合选择器：资源类槽选中「包内图片路径」→ 常量直写；否则视为变量引用
+        if self._type_is_resource(self._input_type[i]) \
+                and self._package.exists(name):
+            self._set_input(i, name)
+        else:
+            self._set_input(i, "{{%s}}" % name)  # 刷新所有控件（含触发的）
 
     def _pick_output(self, widget: QWidget, i: int, vtype: str) -> None:
         name = self.picker(self._tree, vtype, widget)
@@ -643,36 +660,61 @@ class StepIOWidget:
 
     def _default_picker(self, tree: "VariableTree", vtype: str,
                         parent: QWidget) -> Optional[str]:
-        """内置极简变量选择器：弹窗 QTreeWidget，按类型筛选，单选返回路径。
+        """变量选择器：弹窗树形列表，按类型筛选，单选返回路径。
 
-        string 槽同时列出 string 与 number 变量（数字可作字符串用）。
+        * string 槽同时列出 string 与 number 变量（数字可作字符串用）。
+        * 资源类槽（image）双页：变量页 + 资源页（包内图片，返回资源路径
+          作常量，与「整合选择器」需求一致）。
         """
         from PyQt5.QtWidgets import (
-            QDialog, QDialogButtonBox, QTreeWidget, QVBoxLayout,
+            QDialog, QDialogButtonBox, QTabWidget, QTreeWidget, QVBoxLayout,
         )
 
         # 顶层窗口而非 parent：卡片在 QGraphicsView 场景（QGraphicsProxyWidget）中时，
         # 带 parent 的 QDialog 会被 proxy 内嵌渲染、被相邻卡片遮挡 → 弹到外面
+        is_resource = self._type_is_resource(vtype)
         dlg = QDialog(None)
-        dlg.setWindowTitle("选择变量（%s）" % (
-            "string / number" if vtype == "string" else vtype))
+        dlg.setWindowTitle(("选择变量 / 资源（%s）" % vtype)
+                           if is_resource else "选择变量（%s）" % (
+                               "string / number" if vtype == "string" else vtype))
         dlg.resize(320, 400)
         lay = QVBoxLayout(dlg)
-        tw = QTreeWidget()
-        tw.setHeaderLabels(["变量", "类型"])   # 双列：名称 + 类型（picker 升级）
-        tw.setColumnWidth(0, 180)
+
+        var_tw = QTreeWidget()
+        var_tw.setHeaderLabels(["变量", "类型"])   # 双列：名称 + 类型（picker 升级）
+        var_tw.setColumnWidth(0, 180)
         sub = self._picker_tree(tree, vtype) if vtype else tree
-        root_item = tw.invisibleRootItem()
+        root_item = var_tw.invisibleRootItem()
         if root_item is not None:
             self._fill_tree(root_item, sub, "")
-        tw.expandAll()                         # 分组默认展开，变量一目了然
-        lay.addWidget(tw)
+        var_tw.expandAll()                         # 分组默认展开，变量一目了然
+
+        tabs = None
+        res_tw = None                              # 资源页（挂对话框上供断言）
+        if is_resource:
+            tabs = QTabWidget()
+            tabs.addTab(var_tw, "变量")
+            res_tw = QTreeWidget()
+            res_tw.setHeaderLabel("资源")
+            res_root = res_tw.invisibleRootItem()
+            if res_root is not None and self._package.is_dir("assets"):
+                self._fill_resources(res_root, "assets")
+            res_tw.expandAll()
+            tabs.addTab(res_tw, "资源")
+            dlg._res_tw = res_tw                   # 供冒烟断言
+            lay.addWidget(tabs)
+        else:
+            lay.addWidget(var_tw)
+
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         lay.addWidget(btns)
         chosen = {"path": None}
 
+        def _active_tree():
+            return (tabs.currentWidget() if tabs is not None else var_tw)
+
         def on_ok() -> None:
-            item = tw.currentItem()
+            item = _active_tree().currentItem()
             if item is not None:
                 chosen["path"] = item.data(0, _USER_ROLE)  # 叶子存路径，分组为 None
 
@@ -682,12 +724,29 @@ class StepIOWidget:
                 chosen["path"] = item.data(0, _USER_ROLE)
                 dlg.accept()
 
-        tw.itemDoubleClicked.connect(on_double)
+        for _tw in ((var_tw, res_tw) if res_tw is not None else (var_tw,)):
+            _tw.itemDoubleClicked.connect(on_double)
         btns.accepted.connect(on_ok)
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
         dlg.exec_()
         return chosen["path"]
+
+    def _fill_resources(self, parent_item: QTreeWidgetItem,
+                        dir_path: str) -> None:
+        """资源页树：目录递归，图片文件为叶子（UserRole=包内路径），其余文件不显示。"""
+        from PyQt5.QtWidgets import QTreeWidgetItem
+
+        for name in sorted(self._package.list_dir(dir_path)):
+            path = dir_path + "/" + name
+            if self._package.is_dir(path):
+                item = QTreeWidgetItem(parent_item)
+                item.setText(0, name)
+                self._fill_resources(item, path)
+            elif path.lower().endswith(_IMAGE_EXTS):
+                item = QTreeWidgetItem(parent_item)
+                item.setText(0, name)
+                item.setData(0, _USER_ROLE, path)
 
     @staticmethod
     def _fill_tree(parent_item: QTreeWidgetItem, var_tree: "VariableTree",
@@ -879,9 +938,14 @@ if __name__ == "__main__":
     assert w5.is_valid
     assert w5.resolve_inputs()[0] == str(tree.get("n1").data)  # 隐式转字符串
 
-    # 资源类不可为常量
+    # 资源类常量 = 包内图片路径（整合选择器）；不存在/非图片扩展名 → 不合规
     w6 = StepIOWidget(["image"], [], tree, pkg)
-    w6.change_value("input", 0, "assets/1.png")  # 常量（非引用）→ 不合规
+    w6.change_value("input", 0, "assets/不存在.png")
+    assert not w6.is_valid
+    w6.change_value("input", 0, "assets/1.png")   # 包内图片常量 → 合规
+    assert w6.is_valid
+    assert w6.resolve_inputs()[0] == b"\x89PNG-demo"
+    w6.change_value("input", 0, "assets/readme.txt")  # 非图片扩展名 → 不合规
     assert not w6.is_valid
     w6.change_value("input", 0, "{{img/pic}}")   # 引用 → 合规
     assert w6.is_valid
@@ -937,6 +1001,30 @@ if __name__ == "__main__":
     finally:
         QDialog.exec_ = _orig_exec
 
+    # ---- I-3b：整合选择器——image 槽弹窗含 变量/资源 双页；资源叶子=包内路径 ----
+    from PyQt5.QtWidgets import QTabWidget as _QTB
+    _cap2 = []
+    QDialog.exec_ = lambda self: (_cap2.append(self), QDialog.Accepted)[1]
+    try:
+        w_img = StepIOWidget(["image"], [], tree, pkg)
+        w_img._default_picker(tree, "image", None)
+        assert len(_cap2) == 1
+        _tabs = _cap2[0].findChild(_QTB)
+        assert _tabs is not None and _tabs.count() == 2
+        _res_tw = _cap2[0]._res_tw
+        assert _res_tw is not None and _res_tw.topLevelItemCount() >= 1
+        assert _res_tw.topLevelItem(0).data(0, _USER_ROLE) == "assets/1.png"
+    finally:
+        QDialog.exec_ = _orig_exec
+    # _pick_input：资源类槽选中包内路径 → 常量直写；变量引用 → 加 {{}}
+    w_img.picker = lambda t, vt, p: "assets/1.png"
+    c_img = w_img.gen_widget()
+    w_img._pick_input(c_img, 0)
+    assert w_img.input_value(0) == "assets/1.png"
+    w_img.picker = lambda t, vt, p: "img/pic"
+    w_img._pick_input(c_img, 0)
+    assert w_img.input_value(0) == "{{img/pic}}"
+
     # ---- K-1：error_reasons —— 卡片错误原因（卡片正下方提示用） ----
     # 全合规 → 空列表
     w10 = StepIOWidget(["number"], ["number"], tree, pkg)
@@ -962,10 +1050,14 @@ if __name__ == "__main__":
     w14 = StepIOWidget(["number"], [], tree, pkg)
     w14.change_value("input", 0, "abc")
     assert w14.error_reasons() == ["无法解析为 number"]
-    # 资源类不可为常量 → 视为空
+    # 资源类常量：空 → 空提示；包内不存在 → 资源不存在
     w15 = StepIOWidget(["image"], [], tree, pkg)
-    w15.change_value("input", 0, "assets/1.png")
+    w15.change_value("input", 0, "")
     assert w15.error_reasons() == ["输入参数为空"]
+    w15.change_value("input", 0, "assets/不存在.png")
+    assert w15.error_reasons() == ["资源不存在: assets/不存在.png"]
+    w15.change_value("input", 0, "assets/1.png")
+    assert w15.error_reasons() == []
     # 输出变量不存在
     w16 = StepIOWidget([], ["number"], tree, pkg)
     w16.change_value("output", 0, "不存在")

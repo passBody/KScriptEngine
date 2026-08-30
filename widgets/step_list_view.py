@@ -453,8 +453,10 @@ class StepListView(QGraphicsView):
             return False
         bad = set(self.error_card_indices())
         start = 0
-        if self._selected in self._cards:
+        try:                                      # 单次查找（评审#23：原 in+index 双重 O(n)）
             start = self._cards.index(self._selected) + 1
+        except ValueError:
+            pass                                  # 未选中 → 从 0 起
         for i in list(range(start, n)) + list(range(0, start)):
             if i + 1 in bad:
                 return self.jump_to_index(i + 1)
@@ -571,6 +573,11 @@ class StepListView(QGraphicsView):
         self._selected = card
         for c in sel:
             c.set_selected(True)
+
+    @property
+    def cards(self) -> List[StepCard]:
+        """当前卡片列表（只读视图；跨类访问避免 _cards 私有——评审#22）。"""
+        return self._cards
 
     def _selected_cards(self) -> List[StepCard]:
         """选中卡（含多选），按卡片显示顺序（= 复制批次序）。"""

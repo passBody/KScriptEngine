@@ -32,34 +32,19 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
-    QInputDialog, QLabel, QMenu, QMessageBox, QPushButton, QShortcut,
-    QStackedWidget, QStyle, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-    QWidget,
+    QInputDialog, QLabel, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
+    QShortcut, QStackedWidget, QStyle, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from model.kscp_package import KscpPackage
 from model.step_manager import StepManager
 from model.variable_tree import VariableTree
+from widgets.ui_common import make_icon
 
 __all__ = ["StepTreeWidget", "StepInfoPanel", "MoveStepDialog"]
 
 _PATH_ROLE = 0x0100   # Qt.UserRole（取整数值规避存根误报）
-
-
-def _make_step_icon() -> QIcon:
-    """叶子小图标：橙色圆角方块内三条浅色横线（与活动栏「步骤」图标同色系）。"""
-    pm = QPixmap(18, 18)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.Antialiasing)
-    p.setPen(Qt.NoPen)
-    p.setBrush(QColor("#e67e22"))
-    p.drawRoundedRect(2, 2, 14, 14, 3, 3)
-    p.setBrush(QColor("#fff3e0"))
-    for y in (6, 9, 12):
-        p.drawRoundedRect(5, y, 8, 2, 1, 1)
-    p.end()
-    return QIcon(pm)
 
 
 class StepTreeWidget(QTreeWidget):
@@ -160,7 +145,7 @@ class StepTreeWidget(QTreeWidget):
                 len(cls._signature(cls.input_class)),
                 len(cls._signature(cls.output_class))))
             item.setData(0, _PATH_ROLE, path)
-            item.setIcon(0, _make_step_icon())
+            item.setIcon(0, make_icon("template"))   # 评审#21：共用 ui_common 图标
 
     def _walk_items(self):
         def rec(item):
@@ -255,24 +240,56 @@ class StepTreeWidget(QTreeWidget):
 
         menu = QMenu(self)
         a_move = menu.addAction("移动到分组…")
+        a_edit = menu.addAction("编辑内容…")
         a_delete = menu.addAction("删除\tDel")
         menu.addSeparator()
         a_create = menu.addAction("创建组…")
         a_rename = menu.addAction("重命名组…\tF2")
 
         a_move.setEnabled(is_leaf and len(self.selectedItems()) == 1)
+        a_edit.setEnabled(is_leaf and len(self.selectedItems()) == 1)
         a_delete.setEnabled(bool(self._selected_paths_top()))
         a_rename.setEnabled(is_group and len(self.selectedItems()) == 1)
 
         action = menu.exec_(self.viewport().mapToGlobal(pos))
         if action is a_move:
             self._act_move()
+        elif action is a_edit:
+            self._act_edit_source()
         elif action is a_delete:
             self._act_delete()
         elif action is a_create:
             self._act_create_group(context_group)
         elif action is a_rename:
             self._act_rename_group()
+
+    def _act_edit_source(self) -> None:
+        """编辑模板源码：读包内源文件 → 对话框编辑 → 写回 + 重载注册表 + 刷新。"""
+        path = self._current_path()
+        if not path or path.startswith("actions/"):
+            return
+        rel = self._mgr.source_of(path)
+        if rel is None:
+            return
+        try:
+            src = self._package.read_file(rel).decode("utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            QMessageBox.warning(self, "编辑内容", "读取模板源码失败：%s" % e)
+            return
+        dlg = EditTemplateDialog(src, self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        new_src = dlg.source()
+        if new_src == src:
+            return
+        self._package.write_file(rel, new_src.encode("utf-8"))
+        self._mgr.load()                       # 重载注册表（坏语法模板在日志报错）
+        self.refresh(path)
+        if self._info_panel is not None:
+            try:
+                self._info_panel.load(path)
+            except ValueError:
+                self._info_panel.show_placeholder("（模板编辑后加载失败）")
 
     def _existing_groups(self) -> List[str]:
         """包内全部组目录（递归、排序），剥 ``actions/`` 前缀。"""
@@ -472,6 +489,27 @@ class StepInfoPanel(QStackedWidget):
         self.setCurrentIndex(0)
 
 
+class EditTemplateDialog(QDialog):
+    """模板源码编辑对话框：确认后经 :meth:`source` 取新内容（写回由调用方执行）。"""
+
+    def __init__(self, source: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("编辑模板内容")
+        self.resize(560, 480)
+        lay = QVBoxLayout(self)
+        self._edit = QPlainTextEdit(source)
+        lay.addWidget(self._edit)
+        btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Save).setText("保存")
+        btns.button(QDialogButtonBox.Cancel).setText("取消")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def source(self) -> str:
+        return self._edit.toPlainText()
+
+
 class MoveStepDialog(QDialog):
     """移动到分组：可编辑下拉框（现有组 + 可输入新组名）；确认返回目标分组。"""
 
@@ -614,6 +652,40 @@ class TimeDelayStep(Step):
     pv.add_requested.connect(_added.append)
     pv._btn_add.click()
     assert _added == ["控制流程/延时"]
+
+    # ---- 编辑内容：改源码 → 写回包 + 重载注册表 + 树/面板刷新 ----
+    _dlgs = []
+    _orig_edit_exec = EditTemplateDialog.exec_
+
+    def _exec_noop(self):
+        _dlgs.append(self)
+        return QDialog.Accepted
+
+    def _exec_edit(self):
+        # 模拟用户在对话框里改文本后点保存
+        _dlgs.append(self)
+        self._edit.setPlainText(
+            self._edit.toPlainText().replace("等待指定毫秒数", "新描述文本"))
+        return QDialog.Accepted
+
+    try:
+        EditTemplateDialog.exec_ = _exec_noop
+        tree._act_edit_source()
+        assert len(_dlgs) == 1 and "等待指定毫秒数" in _dlgs[0].source()
+        EditTemplateDialog.exec_ = _exec_edit
+        tree._act_edit_source()                    # 修改后再执行 → 写回
+    finally:
+        EditTemplateDialog.exec_ = _orig_edit_exec
+    _rel = tree._mgr.source_of("控制流程/延时")
+    assert _rel is not None
+    assert "新描述文本" in tree._package.read_file(_rel).decode("utf-8")
+    assert tree._mgr.template_class("控制流程/延时").description == "新描述文本"
+    assert pv._desc.text() == "新描述文本"          # 信息面板已刷新
+    # 编辑触发了树重建 → 旧 QTreeWidgetItem 已销毁，重新获取引用
+    delay = tree._find_item("控制流程/延时")
+    leaf = tree._find_item("示例")
+    group = tree._find_item("actions/控制流程")
+    assert delay is not None and leaf is not None and group is not None
     # 输入左栏、输出右栏；列内容 = 表头 + 每槽一行
     assert pv._in_col.layout().count() == 2
     assert pv._out_col.layout().count() == 2

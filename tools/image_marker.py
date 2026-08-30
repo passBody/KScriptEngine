@@ -84,9 +84,11 @@ import os
 import sys
 from typing import Any, Optional, Tuple
 
-# 允许 `python tools/image_marker.py` 直接运行时能 import 同级的 model 包
+# 允许 `python tools/image_marker.py` 直接运行时能 import 同级的 model 包。
+# 仅脚本直跑（__package__ is None）时插入；被 import 时不污染全局 sys.path
+# （评审#27）。
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _ROOT not in sys.path:
+if __package__ is None and _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 from model.point_timeline import PointTimeline
 

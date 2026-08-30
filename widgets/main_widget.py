@@ -716,7 +716,7 @@ class MainWindow(QMainWindow):
         sl_tree.list_selected.connect(self._on_exec_list_changed)   # 单列表范围跟随选中
         first_path = sl_tree.first_list_path()
         if first_path:
-            item = sl_tree._find_item(first_path)
+            item = sl_tree.find_item(first_path)
             if item is not None:
                 sl_tree.setCurrentItem(item)   # 触发 list_selected → 宿主显示
         if self._manage_btn is not None:
@@ -856,11 +856,11 @@ class DemoStep(Step):
     tw.refresh()                     # store 经 API 直改（950 行绕过树操作）→ 重建树含「主列表」
     tw.list_selected.emit("主列表")
     assert host.currentIndex() == 1
-    assert len(host._view._cards) == 1
+    assert len(host._view.cards) == 1
 
     # 变量 tree_changed → refresh_cards 不崩（已接线 host）
     vtw.tree_changed.emit()
-    assert len(host._view._cards) == 1
+    assert len(host._view.cards) == 1
 
     # 工具栏：跳转序号 / 搜索标签（host 组装存在 + 动作反馈文本）
     assert host._jump_edit is not None and host._search_edit is not None
@@ -874,25 +874,25 @@ class DemoStep(Step):
     host._search_edit.setText("xx")
     host._on_search()
     assert host._toolbar_status.text() == "未找到匹配标签"
-    host._view._cards[0].step.tag = "主力"
+    host._view.cards[0].step.tag = "主力"
     host._search_edit.setText("主力")
     host._on_search()
     assert host._toolbar_status.text() == "已定位"
 
     # 工具栏第二行：错误卡片数量（经 errors_changed 同步）+ 跳转错误
     assert host._error_count.text() == "错误卡片: 0"     # 卡片 io 有效
-    host._view._cards[0].step.io.change_value("input", 0, "")
+    host._view.cards[0].step.io.change_value("input", 0, "")
     host._view.refresh_validity()          # 输入字段 blockSignals → 显式重检发计数
     assert host._error_count.text() == "错误卡片: 1"
     # 错误数经 errors_changed 转发 → 左侧树条目红加粗（宿主联动）
-    it_main = tw._find_item("主列表")
+    it_main = tw.find_item("主列表")
     assert it_main is not None
     assert it_main.font(0).bold()
     assert it_main.foreground(0).color() == QColor(200, 50, 40)
     host._on_jump_error()
     assert host._toolbar_status.text() == "已定位错误卡片"
-    assert host._view._selected is host._view._cards[0]
-    host._view._cards[0].step.io.change_value("input", 0, "5")
+    assert host._view._selected is host._view.cards[0]
+    host._view.cards[0].step.io.change_value("input", 0, "5")
     host._view.refresh_validity()
     assert host._error_count.text() == "错误卡片: 0"
     assert not it_main.font(0).bold()      # 修复 → 树标记恢复默认
@@ -934,7 +934,7 @@ class DemoStep(Step):
     host2 = sl_mgr2.preview_widget()
     assert isinstance(host2, StepListHost)
     assert host2.currentIndex() == 1                    # 非占位：自动切到列表视图
-    assert len(host2._view._cards) == 0                 # 「乙」为空列表 → 无卡片
+    assert len(host2._view.cards) == 0                 # 「乙」为空列表 → 无卡片
     assert sl_mgr2._current == "乙"                     # 树中选中项 = 第一个列表
     assert host2._view._step_list is sl_mgr2._store.get("乙")
 
@@ -943,7 +943,7 @@ class DemoStep(Step):
     assert isinstance(spanel2, StepInfoPanel)
     win2._on_add_template("示例")
     assert len(sl_mgr2._store.get("乙").steps) == 1
-    assert len(host2._view._cards) == 1                 # 宿主刷新出新卡片
+    assert len(host2._view.cards) == 1                 # 宿主刷新出新卡片
     # 失败路径：未选中列表 → 提示框
     _infos = []
     _orig_info = QMessageBox.information
@@ -958,17 +958,17 @@ class DemoStep(Step):
     sl_mgr2._current = "乙"                             # 复位，不影响后续用例
 
     # ---- 需求：激活切换双向立刻刷新（树勾选 → 卡片；卡片按钮 → 树勾选框） ----
-    it2 = tw2._find_item("组甲/丙")
+    it2 = tw2.find_item("组甲/丙")
     assert it2 is not None
     tw2.setCurrentItem(it2)                      # 切到含步骤 s2 的列表
     assert sl_mgr2._current == "组甲/丙"
     assert host2._view._step_list is sl_mgr2._store.get("组甲/丙")
-    card2 = host2._view._cards[0]
+    card2 = host2._view.cards[0]
     assert card2.step is sl_mgr2._store.get("组甲/丙").steps[0]
     assert card2.property("active") is True
     it2.setCheckState(0, Qt.Unchecked)           # 树勾选框：停用列表内全部步骤
-    assert host2._view._cards[0].step.enabled is False
-    card2 = host2._view._cards[0]                # 宿主重建后的新卡片
+    assert host2._view.cards[0].step.enabled is False
+    card2 = host2._view.cards[0]                # 宿主重建后的新卡片
     assert card2.property("active") is False     # 卡片画面立刻刷新
     card2._btn_active.setChecked(True)
     card2._on_active_toggled(True)               # 卡片激活按钮 → 树勾选框同步
@@ -1205,13 +1205,13 @@ class DemoStep(Step):
             stree3 = win_i3._managers[0]._sl_tree
             assert stree3 is not None
             assert stree3._running_path == "主列表"      # 树高亮正在执行的列表
-            it3 = stree3._find_item("主列表")
+            it3 = stree3.find_item("主列表")
             assert it3 is not None and it3.text(0) == "▶ 主列表"
             step3.status = StepStatus.FINISHED
             assert len(fired3) == 2, fired3
             app.processEvents()
             assert stree3._running_path is None         # 无 RUNNING → 清高亮
-            assert stree3._find_item("主列表").text(0) == "主列表"
+            assert stree3.find_item("主列表").text(0) == "主列表"
             fake3._set(StepRunnerState.RUNNING)         # 模拟执行中
             app.processEvents()
             fake3._set(StepRunnerState.READY)           # 执行结束 → detach

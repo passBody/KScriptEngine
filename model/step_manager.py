@@ -130,6 +130,11 @@ class StepManager:
     # ================================================================
     # 产出（不保存）
     # ================================================================
+    def source_of(self, path: str) -> Optional[str]:
+        """模板源文件在包内的相对路径（模板内容编辑用）；未注册 → None。"""
+        entry = self._registry.get(path)
+        return entry[1] if entry is not None else None
+
     def create_step(self, path: str) -> Step:
         """按路径生成步骤实例（如 "控制流程/延时"）；未知路径抛 ValueError。"""
         entry = self._registry.get(path)

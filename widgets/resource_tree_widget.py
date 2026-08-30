@@ -43,6 +43,7 @@ from PyQt5.QtWidgets import (
 
 from model.kscp_package import KscpPackage
 from widgets.image_overlay import ImageOverlay
+from widgets.ui_common import ClickableLabel
 
 if TYPE_CHECKING:
     ...
@@ -61,15 +62,9 @@ def _parent(path: str) -> str:
     return path.rsplit("/", 1)[0] if "/" in path else ""
 
 
-class _ClickableImageLabel(QLabel):
-    """可点击的图片标签：左键点击发出 ``clicked``。"""
-
-    clicked = pyqtSignal()
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
+class _ClickableImageLabel(ClickableLabel):
+    """可点击的图片标签：左键点击发出 ``clicked``（共用 ui_common.ClickableLabel）。"""
+    pass
 
 
 class _PreviewPanel(QStackedWidget):

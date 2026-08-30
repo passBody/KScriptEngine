@@ -30,7 +30,7 @@ __all__ = ["TimeDelay"]
 @dataclass
 class TimeDelayInput:
     """输入：延时秒数（number）。"""
-    seconds: "number" = 0.0 # type: ignore
+    seconds: "number" = 0.5 # type: ignore  # 评审#28：默认 0.0 恒为错误态
 
 
 @dataclass

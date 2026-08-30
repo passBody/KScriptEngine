@@ -58,7 +58,7 @@ class StepListStore:
     _MAX_DEPTH = 128
 
     def __init__(self) -> None:
-        self._root: Dict[str, Any] = {}   # 值: StepList(叶子) 或 dict(组)
+        self.root: Dict[str, Any] = {}   # 值: StepList(叶子) 或 dict(组)
 
     # ================================================================
     # 路径归一化 / 名称校验
@@ -79,7 +79,7 @@ class StepListStore:
 
     def _parent_of(self, parts: List[str]) -> dict:
         """沿路径段（不含末段）走到底，返回父字典；祖先为列表/不存在 → ValueError。"""
-        node = self._root
+        node = self.root
         for seg in parts[:-1]:
             child = node.get(seg)
             if isinstance(child, StepList):
@@ -122,7 +122,7 @@ class StepListStore:
     # ================================================================
     def to_json_bytes(self) -> bytes:
         """生成 ``step_list.json`` 的 JSON 字节串（可直接 ``package.write_file``）。"""
-        return json.dumps(self._to_node(self._root),
+        return json.dumps(self._to_node(self.root),
                           ensure_ascii=False).encode("utf-8")
 
     @staticmethod
@@ -154,7 +154,7 @@ class StepListStore:
                 raise ValueError(
                     "step_list.json 顶层必须是对象，而非 %s" % type(root).__name__)
         store = cls()
-        store._walk(root, store._root, manager)
+        store._walk(root, store.root, manager)
         return store
 
     def _walk(self, node: dict, target: dict,
@@ -189,7 +189,7 @@ class StepListStore:
         ``enabled=False`` 的步骤不出现。
         """
         out: List[Callable[[], int]] = []
-        self._collect_do(self._root, out)
+        self._collect_do(self.root, out)
         return out
 
     @staticmethod
@@ -211,7 +211,7 @@ class StepListStore:
     def paths(self) -> List[str]:
         """全部列表路径（排序；后续管理树数据源）。"""
         out: List[str] = []
-        self._collect_paths(self._root, "", out)
+        self._collect_paths(self.root, "", out)
         return sorted(out)
 
     @staticmethod
@@ -226,7 +226,7 @@ class StepListStore:
     def get(self, path: str) -> StepList:
         """按路径取列表；不存在或为组 → :class:`FileNotFoundError`。"""
         parts = self._norm_path(path).split("/")
-        node = self._root
+        node = self.root
         for seg in parts[:-1]:
             child = node.get(seg)
             if not isinstance(child, dict):
@@ -278,7 +278,7 @@ class StepListStore:
         含空组；管理树数据源（树需要组节点，:meth:`paths` 只有叶子）。
         """
         out: List[Tuple[str, bool]] = []
-        self._collect_walk(self._root, "", out)
+        self._collect_walk(self.root, "", out)
         return out
 
     @staticmethod
@@ -514,10 +514,10 @@ class DemoStep(Step):
     store3.add_group("后组")
     store3.add_list("后组/子列表", sl_check)
     store3.rename("中间列表", "改名列表")
-    assert list(store3._root) == ["先组", "改名列表", "后组"]   # 保持插入位置
+    assert list(store3.root) == ["先组", "改名列表", "后组"]   # 保持插入位置
     assert "改名列表" in store3.paths()
     store3.rename("后组", "改名组")
-    assert list(store3._root) == ["先组", "改名列表", "改名组"]
+    assert list(store3.root) == ["先组", "改名列表", "改名组"]
     assert "改名组/子列表" in store3.paths()                    # 子树保留
     assert store3.get("改名组/子列表") is sl_check
     for bad in ("", "/", "a/b", ".", ".."):

@@ -134,7 +134,7 @@ class StepListTreeWidget(QTreeWidget):
             for it in self._walk_items():
                 if it.data(0, _PATH_ROLE) in expanded:
                     it.setExpanded(True)
-            target = self._find_item(cur)
+            target = self.find_item(cur)
             if target is not None:
                 self.setCurrentItem(target)
             self.refresh_error_marks()   # 列表/组错误标记随重建同步
@@ -279,7 +279,7 @@ class StepListTreeWidget(QTreeWidget):
         if root is not None:
             yield from rec(root)
 
-    def _find_item(self, path: Optional[str]) -> Optional[QTreeWidgetItem]:
+    def find_item(self, path: Optional[str]) -> Optional[QTreeWidgetItem]:
         if not path:
             return None
         for it in self._walk_items():
@@ -527,7 +527,7 @@ class StepListTreeWidget(QTreeWidget):
         else:
             QMessageBox.warning(self, "添加组", "无法添加：已存在 %r" % full)
             return
-        node = self._store._root
+        node = self._store.root
         if context_group:
             for seg in context_group.split("/"):
                 node = node[seg]       # 右键组为真实组 → 节点必为 dict
@@ -551,7 +551,7 @@ class StepListTreeWidget(QTreeWidget):
             QMessageBox.warning(self, "新建空列表", "名称不能为空")
             return
         full = self._dedup_name(context_group, name)
-        node = self._store._root
+        node = self._store.root
         if context_group:
             for seg in context_group.split("/"):
                 node = node[seg]               # 右键组为真实组 → 节点必为 dict
@@ -621,7 +621,7 @@ class StepListTreeWidget(QTreeWidget):
         name, triples = self._clipboard.items
         target = self._dedup_name(context_group, name)   # 完整路径（已含组前缀）
         top_name = target.rsplit("/", 1)[-1]
-        node = self._store._root
+        node = self._store.root
         if context_group:
             for seg in context_group.split("/"):
                 node = node[seg]               # 目标组为真实组 → 节点必为 dict
@@ -787,7 +787,7 @@ class StepListTreeWidget(QTreeWidget):
                 self._store.remove(p)
             except FileNotFoundError:
                 continue
-        node = self._store._root
+        node = self._store.root
         if parent:
             for seg in parent.split("/"):
                 node = node[seg]
@@ -822,7 +822,7 @@ class StepListTreeWidget(QTreeWidget):
                     self._store.add_list(
                         full, StepList.from_format_strings(fmts, self._manager))
         # 传完整路径而非名称（旧实现 snap[0][0] 只是名称）：refresh 的
-        # _find_item 按全路径匹配，组内移动时名称解析失败 → list_selected
+        # find_item 按全路径匹配，组内移动时名称解析失败 → list_selected
         # 不触发 → 宿主画面不刷新（用户报告「多选拖拽后画面不显示」）
         self._changed(first_new)
         return True
@@ -994,17 +994,17 @@ class DemoStep(Step):
     top = [tw.topLevelItem(i).text(0)
            for i in range(tw.topLevelItemCount())]
     assert top == ["打开软件", "清理体力", "空组"], top
-    g = tw._find_item("清理体力")
+    g = tw.find_item("清理体力")
     assert g is not None and g.childCount() == 1
     assert g.child(0).text(0) == "检查体力"
-    assert tw._find_item("清理体力/检查体力") is not None
-    assert tw._find_item("空组") is not None
-    assert not tw._find_item("打开软件").icon(0).isNull()
+    assert tw.find_item("清理体力/检查体力") is not None
+    assert tw.find_item("空组") is not None
+    assert not tw.find_item("打开软件").icon(0).isNull()
 
     # list_selected 仅叶子触发
     seen = []
     tw.list_selected.connect(seen.append)
-    tw.setCurrentItem(tw._find_item("打开软件"))
+    tw.setCurrentItem(tw.find_item("打开软件"))
     assert seen == ["打开软件"]
     tw.setCurrentItem(g)                       # 组不触发
     assert seen == ["打开软件"]
@@ -1021,17 +1021,17 @@ class DemoStep(Step):
     assert changes == [1]                      # 变更回调被调
 
     # 复制列表 → 剪贴板三元组；粘贴到组内（无重名 → 不产生 name(1)）
-    tw.setCurrentItem(tw._find_item("打开软件"))
+    tw.setCurrentItem(tw.find_item("打开软件"))
     tw._act_copy()
     assert clipboard.items[0] == "打开软件"
     assert clipboard.items[1] == [("", False, sl.to_format_strings())]
-    g = tw._find_item("清理体力")               # 树已重建 → 重新获取
+    g = tw.find_item("清理体力")               # 树已重建 → 重新获取
     assert g is not None
     tw.setCurrentItem(g)
     tw._act_paste("清理体力")                   # 右键在组上 → 粘贴进组
     assert "清理体力/打开软件" in store.paths()
     # 组复制 → 整棵子树；粘贴到根 → 顶层重名去重 name(1)
-    g = tw._find_item("清理体力")
+    g = tw.find_item("清理体力")
     tw.setCurrentItem(g)
     tw._act_copy()
     assert clipboard.items[0] == "清理体力"
@@ -1042,13 +1042,13 @@ class DemoStep(Step):
     assert "清理体力(1)/检查体力" in store.paths()
 
     # 剪切 = 复制 + 删除（剪贴板保留）
-    tw.setCurrentItem(tw._find_item("清理体力(1)"))
+    tw.setCurrentItem(tw.find_item("清理体力(1)"))
     tw._act_cut()
     assert "清理体力(1)" not in store.paths()
     assert clipboard.items is not None
 
     # 重命名（补丁 QInputDialog 带初值）
-    tw.setCurrentItem(tw._find_item("清理体力/打开软件"))
+    tw.setCurrentItem(tw.find_item("清理体力/打开软件"))
     orig_dlg = QInputDialog.getText
     QInputDialog.getText = staticmethod(lambda *a, **k: ("改名", True))
     try:
@@ -1062,7 +1062,7 @@ class DemoStep(Step):
     orig_q = QMessageBox.question
     QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
     try:
-        tw.setCurrentItem(tw._find_item("清理体力/改名"))
+        tw.setCurrentItem(tw.find_item("清理体力/改名"))
         tw._act_delete()
     finally:
         QMessageBox.question = orig_q
@@ -1070,8 +1070,8 @@ class DemoStep(Step):
     assert changes and len(changes) > 1
 
     # 多选复制/剪切 = no-op（剪贴板单条目契约 → 复制/剪切限单选，防数据丢失）
-    a = tw._find_item("打开软件")
-    b = tw._find_item("清理体力/检查体力")
+    a = tw.find_item("打开软件")
+    b = tw.find_item("清理体力/检查体力")
     assert a is not None and b is not None
     tw.setCurrentItem(a)
     a.setSelected(True)
@@ -1177,13 +1177,13 @@ class DemoStep(Step):
     orig_q = QMessageBox.question
     QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
     try:
-        tw_d.setCurrentItem(tw_d._find_item("乙"))
+        tw_d.setCurrentItem(tw_d.find_item("乙"))
         tw_d._act_delete()                       # 删中间 → 下一个「丙」
         assert tw_d._current_path() == "丙"
-        tw_d.setCurrentItem(tw_d._find_item("丙"))
+        tw_d.setCurrentItem(tw_d.find_item("丙"))
         tw_d._act_delete()                       # 删末尾 → 前一个「甲」
         assert tw_d._current_path() == "甲"
-        tw_d.setCurrentItem(tw_d._find_item("甲"))
+        tw_d.setCurrentItem(tw_d.find_item("甲"))
         tw_d._act_delete()                       # 删唯一 → 无列表（宿主回占位页）
         assert tw_d._current_path() == ""
     finally:
@@ -1261,7 +1261,7 @@ class DemoStep(Step):
         tw_m = StepListTreeWidget(store_m, mgr, StepClipboard(), lambda: None)
         tw_m.show()
         app.processEvents()
-        it = tw_m._find_item("乙")
+        it = tw_m.find_item("乙")
         assert it is not None
         pos = tw_m.visualItemRect(it).center()
         _MenuRecorder.chosen = None
@@ -1288,16 +1288,16 @@ class DemoStep(Step):
             # 注意：插入后树已重排（QTreeWidget 内部 model 变更即重算布局），
             # 旧 item 的 visualItemRect 坐标失效——必须重新定位「乙」再取新 pos，
             # 否则 itemAt 会命中「新列表」行、组被插到错误位置。
-            it = tw_m._find_item("乙")
+            it = tw_m.find_item("乙")
             assert it is not None
             pos = tw_m.visualItemRect(it).center()
             _MenuRecorder.chosen = "在此前添加组…"
             tw_m._on_context_menu(pos)
             assert [p for p, _g in store_m.walk()] == ["甲", "新列表", "前组", "乙"]
             # 粘贴菜单点击:「粘贴到此列表前」→ 插到锚(乙)前（与添加同位置语义）
-            tw_m.setCurrentItem(tw_m._find_item("甲"))
+            tw_m.setCurrentItem(tw_m.find_item("甲"))
             tw_m._act_copy()                   # 复制甲
-            it = tw_m._find_item("乙")
+            it = tw_m.find_item("乙")
             assert it is not None
             pos = tw_m.visualItemRect(it).center()
             _MenuRecorder.chosen = "粘贴到此列表前"
@@ -1319,7 +1319,7 @@ class DemoStep(Step):
         tw_g.show()
         tw_g.expandAll()                       # 未展开时子项 visualItemRect 为 0 尺寸
         app.processEvents()
-        it_g = tw_g._find_item("组甲/组乙")
+        it_g = tw_g.find_item("组甲/组乙")
         assert it_g is not None
         pos_g = tw_g.visualItemRect(it_g).center()
         _MenuRecorder.chosen = None
@@ -1375,19 +1375,19 @@ class DemoStep(Step):
     clip_p = StepClipboard()
     tw_p = StepListTreeWidget(store_p, mgr, clip_p, lambda: None)
     # 粘贴到列表头 → 根层首位（去重 → 乙(1)）
-    tw_p.setCurrentItem(tw_p._find_item("乙"))
+    tw_p.setCurrentItem(tw_p.find_item("乙"))
     tw_p._act_copy()
     tw_p._act_paste("", 0)
     assert [p for p, _g in store_p.walk()] == ["乙(1)", "甲", "乙"], \
         [p for p, _g in store_p.walk()]
     # 粘贴到此列表后 → 锚(乙)下标 + 1 = 3
-    tw_p.setCurrentItem(tw_p._find_item("甲"))
+    tw_p.setCurrentItem(tw_p.find_item("甲"))
     tw_p._act_copy()
     tw_p._act_paste("", 3)
     assert [p for p, _g in store_p.walk()] == \
         ["乙(1)", "甲", "乙", "甲(1)"], [p for p, _g in store_p.walk()]
     # 粘贴到列表尾 → 末位（去重 → 乙(1)(1)）
-    tw_p.setCurrentItem(tw_p._find_item("乙(1)"))
+    tw_p.setCurrentItem(tw_p.find_item("乙(1)"))
     tw_p._act_copy()
     tw_p._act_paste("", None)
     assert [p for p, _g in store_p.walk()] == \
@@ -1401,7 +1401,7 @@ class DemoStep(Step):
     store_pg.add_list("顶", StepList.create_empty())
     clip_pg = StepClipboard()
     tw_pg = StepListTreeWidget(store_pg, mgr, clip_pg, lambda: None)
-    tw_pg.setCurrentItem(tw_pg._find_item("组乙"))
+    tw_pg.setCurrentItem(tw_pg.find_item("组乙"))
     tw_pg._act_copy()
     tw_pg._act_paste("", 0)                    # 组粘贴到根层头部（walk 先序：组后紧跟子树）
     assert [p for p, _g in store_pg.walk()] == \
@@ -1429,23 +1429,23 @@ class DemoStep(Step):
     changes_c = []
     tw_c = StepListTreeWidget(store_c, mgr, StepClipboard(),
                               lambda: changes_c.append(1))
-    assert tw_c._find_item("全开").checkState(0) == Qt.Checked
-    assert tw_c._find_item("全关").checkState(0) == Qt.Unchecked
-    assert tw_c._find_item("混合").checkState(0) == Qt.PartiallyChecked
-    assert not (tw_c._find_item("组X").flags() & Qt.ItemIsUserCheckable)  # 组无框
+    assert tw_c.find_item("全开").checkState(0) == Qt.Checked
+    assert tw_c.find_item("全关").checkState(0) == Qt.Unchecked
+    assert tw_c.find_item("混合").checkState(0) == Qt.PartiallyChecked
+    assert not (tw_c.find_item("组X").flags() & Qt.ItemIsUserCheckable)  # 组无框
     # 用户点击（勾选框取消）→ 全部停用 + 保存；树重建后反映为未勾
-    tw_c._find_item("全开").setCheckState(0, Qt.Unchecked)
+    tw_c.find_item("全开").setCheckState(0, Qt.Unchecked)
     assert all(not s.enabled for s in sl_on.steps)
     assert changes_c == [1]
-    assert tw_c._find_item("全开").checkState(0) == Qt.Unchecked
+    assert tw_c.find_item("全开").checkState(0) == Qt.Unchecked
     # 再点 → 全部激活（回调 append(1)，第 2 次保存 = [1, 1]；
     # 三态 item 从 Unchecked→Checked 发两次 itemChanged，第一次状态未变
     # 被 _on_item_changed 的 early-return 拦截，恰好保存一次）
-    tw_c._find_item("全开").setCheckState(0, Qt.Checked)
+    tw_c.find_item("全开").setCheckState(0, Qt.Checked)
     assert all(s.enabled for s in sl_on.steps)
     assert changes_c == [1, 1]
     # 半选点击（Qt 三态规则：半选 → 未勾）→ 全部停用
-    tw_c._find_item("混合").setCheckState(0, Qt.Unchecked)
+    tw_c.find_item("混合").setCheckState(0, Qt.Unchecked)
     assert all(not s.enabled for s in sl_mix.steps)
 
     # ---- bug 回归：程序性 itemChanged（半选 + 错误标记刷新）不得停用全部步骤 ----
@@ -1463,7 +1463,7 @@ class DemoStep(Step):
     changes_b = []
     tw_b = StepListTreeWidget(store_b, mgr, StepClipboard(),
                               lambda: changes_b.append(1))
-    it_b = tw_b._find_item("混合B")
+    it_b = tw_b.find_item("混合B")
     assert it_b.checkState(0) == Qt.PartiallyChecked
     it_b.setFont(0, it_b.font(0))                      # 模拟 refresh_error_marks
     it_b.setForeground(0, QColor(200, 50, 40))
@@ -1527,8 +1527,8 @@ class DemoStep(Step):
     store_ms.add_list("甲", StepList.create_empty())   # walk 序在前
     store_ms.add_list("乙", StepList.create_empty())
     tw_ms = StepListTreeWidget(store_ms, mgr, StepClipboard(), lambda: None)
-    tw_ms._find_item("甲").setSelected(True)
-    tw_ms._find_item("乙").setSelected(True)
+    tw_ms.find_item("甲").setSelected(True)
+    tw_ms.find_item("乙").setSelected(True)
     assert tw_ms._selected_paths_top() == ["甲", "乙"], \
         tw_ms._selected_paths_top()          # 显示序 = 执行序，非名称排序
     # 组内多选（名称序 ≠ walk 序）
@@ -1538,15 +1538,15 @@ class DemoStep(Step):
     store_ms2.add_list("组X/子乙", StepList.create_empty())
     store_ms2.add_list("尾", StepList.create_empty())
     tw_ms2 = StepListTreeWidget(store_ms2, mgr, StepClipboard(), lambda: None)
-    tw_ms2._find_item("组X/子甲").setSelected(True)
-    tw_ms2._find_item("组X/子乙").setSelected(True)
+    tw_ms2.find_item("组X/子甲").setSelected(True)
+    tw_ms2.find_item("组X/子乙").setSelected(True)
     assert tw_ms2._selected_paths_top() == ["组X/子甲", "组X/子乙"], \
         tw_ms2._selected_paths_top()
     # 多选拖拽后：list_selected 收到第一个插入项的完整路径（宿主画面刷新）
     got_ms = []
     tw_ms2.list_selected.connect(lambda p: got_ms.append(p))
     # 组内移动：第一个插入项仍在组内 → 必须发组内完整路径
-    # （旧实现传名称「子甲」，_find_item 按全路径匹配失败 → list_selected
+    # （旧实现传名称「子甲」，find_item 按全路径匹配失败 → list_selected
     #   不触发 → 宿主画面不显示，即用户报告的 bug）
     assert tw_ms2._move_paths(
         ["组X/子甲"], "组X/子乙", QAbstractItemView.BelowItem)
@@ -1564,7 +1564,7 @@ class DemoStep(Step):
 
     # ---- 拖拽亮线（自定义：条目尾部/中间/空白处末尾；drop 完成与离开即清除） ----
     # 拖到条目上 → 该条目尾部亮线（OnItem = 插入到下一条，亮线在底部）
-    it_dd = tw_dd._find_item("乙")
+    it_dd = tw_dd.find_item("乙")
     assert it_dd is not None
     r = tw_dd.visualItemRect(it_dd)
     tw_dd._drop_rect = None
@@ -1630,8 +1630,8 @@ class DemoStep(Step):
     for nm in ("甲", "乙", "丙"):
         store_reg.add_list(nm, StepList.create_empty())
     tw_reg = StepListTreeWidget(store_reg, mgr, StepClipboard(), lambda: None)
-    tw_reg._find_item("丙").setSelected(True)          # 真实拖拽：press 即选中
-    ev_reg = _FakeDrop(tw_reg.visualItemRect(tw_reg._find_item("乙")).center(),
+    tw_reg.find_item("丙").setSelected(True)          # 真实拖拽：press 即选中
+    ev_reg = _FakeDrop(tw_reg.visualItemRect(tw_reg.find_item("乙")).center(),
                        tw_reg)
     tw_reg.dropEvent(ev_reg)
     assert not ev_reg._accepted, "内部拖拽必须 ignore（否则 Qt 收尾删行）"
@@ -1693,10 +1693,10 @@ class DemoStep(Step):
     tw_e = StepListTreeWidget(store_e, mgr, StepClipboard(), lambda: None)
     from PyQt5.QtGui import QColor as _QColor
     _RED = _QColor(200, 50, 40)
-    it_bad = tw_e._find_item("组A/坏列表")
-    it_grp = tw_e._find_item("组A")
-    it_sub = tw_e._find_item("组A/好组")
-    it_good = tw_e._find_item("好列表")
+    it_bad = tw_e.find_item("组A/坏列表")
+    it_grp = tw_e.find_item("组A")
+    it_sub = tw_e.find_item("组A/好组")
+    it_good = tw_e.find_item("好列表")
     assert it_bad is not None and it_grp is not None
     assert it_sub is not None and it_good is not None
     assert it_bad.font(0).bold() and it_bad.foreground(0).color() == _RED

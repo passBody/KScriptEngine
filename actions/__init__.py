@@ -1,12 +1,23 @@
-from .base import Step, StepStatus
-from .控制流程.time_delay import TimeDelay
-from .控制流程.输出日志 import LogStep
-from .输入.按键 import KeyClick
-from .输入.鼠标 import MouseClick
-from .输入.鼠标移动 import MouseMove
-from .输入.鼠标滚轮 import MouseScroll
-from .输入.鼠标拖动 import MouseDrag
-from .输入.多次点击 import MultiClick
+# -*- coding: utf-8 -*-
+"""步骤模板注册（动态发现，评审#29）。
 
-__all__ = ["Step", "StepStatus", "TimeDelay", "LogStep", "KeyClick", "MouseClick",
-           "MouseMove", "MouseScroll", "MouseDrag", "MultiClick"]
+遍历包内子模块，把各模块 ``__all__`` 导出的步骤类收集到本命名空间——
+新增模板只需建文件并写 ``__all__``，无需修改本文件（base 垫片除外）。
+"""
+
+import importlib
+import pkgutil
+
+from .base import Step, StepStatus
+
+__all__ = ["Step", "StepStatus"]
+
+for _info in pkgutil.walk_packages(__path__, __name__ + "."):
+    if _info.name == __name__ + ".base":
+        continue                       # base 已显式导入（垫片 + 基类）
+    _mod = importlib.import_module(_info.name)
+    for _name in getattr(_mod, "__all__", []):
+        if _name in __all__:
+            continue                       # 包 __init__ 与子模块重复导出 → 去重
+        globals()[_name] = getattr(_mod, _name)
+        __all__.append(_name)

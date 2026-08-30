@@ -58,6 +58,9 @@ class LogModel:
     _instance: Optional["LogModel"] = None
 
     def __init__(self) -> None:
+        # 评审#25：直接 LogModel() 绕过单例 → 拒绝（唯一入口 = instance()）
+        if LogModel._instance is not None:
+            raise RuntimeError("LogModel 是单例：请使用 LogModel.instance()")
         self._entries: List[LogEntry] = []
         self._listeners: List[Callable[[], None]] = []
 
@@ -186,6 +189,13 @@ if __name__ == "__main__":
     a.remove_listener(cb)
     a.info("no notify")
     assert len(a) == 1 and fired == ["x", "x"]       # 移除后不再触发
+
+    # 评审#25：直接构造绕过单例 → RuntimeError
+    try:
+        LogModel()
+        raise AssertionError("直接 LogModel() 应抛 RuntimeError")
+    except RuntimeError:
+        pass
 
     # 评审#15：监听器异常可见（logging 记录），其余监听者照常收到通知
     import logging as _lg

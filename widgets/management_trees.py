@@ -78,6 +78,17 @@ class ManagementTree:
     def _build_preview(self) -> QWidget:
         raise NotImplementedError
 
+    def _ensure(self, attr: str, builder: Callable[[], QWidget]) -> QWidget:
+        """懒构建缓存（评审#20）：``attr`` 未建 → ``builder()`` 并缓存后返回。
+
+        各子类的树/预览懒缓存统一经此实现，不再各自重复 if-None 样板。
+        """
+        w = getattr(self, attr, None)
+        if w is None:
+            w = builder()
+            setattr(self, attr, w)
+        return w
+
 
 class ResourceManagementTree(ManagementTree):
     """资源管理树：``ResourceTreeWidget`` + 其预览面板。"""
@@ -91,19 +102,14 @@ class ResourceManagementTree(ManagementTree):
         return make_icon("resource")
 
     def tree_widget(self) -> QWidget:
-        if self._rtree is None:
-            self._rtree = ResourceTreeWidget(self._package)
-        assert self._rtree is not None
-        return self._rtree
+        w = self._ensure("_rtree", lambda: ResourceTreeWidget(self._package))
+        assert isinstance(w, ResourceTreeWidget)
+        return w
 
     def preview_widget(self) -> QWidget:
-        if self._rtree is None:
-            self._rtree = ResourceTreeWidget(self._package)
-        assert self._rtree is not None
-        if self._preview is None:
-            self._preview = self._rtree.preview_widget()
-        assert self._preview is not None
-        return self._preview
+        r = self.tree_widget()
+        assert isinstance(r, ResourceTreeWidget)
+        return self._ensure("_preview", r.preview_widget)
 
 
 class VariableManagementTree(ManagementTree):
@@ -120,19 +126,15 @@ class VariableManagementTree(ManagementTree):
         return make_icon("variable")
 
     def tree_widget(self) -> QWidget:
-        if self._vtree is None:
-            self._vtree = VariableTreeWidget(self._package, self._tree)
-        assert self._vtree is not None
-        return self._vtree
+        w = self._ensure(
+            "_vtree", lambda: VariableTreeWidget(self._package, self._tree))
+        assert isinstance(w, VariableTreeWidget)
+        return w
 
     def preview_widget(self) -> QWidget:
-        if self._vtree is None:
-            self._vtree = VariableTreeWidget(self._package, self._tree)
-        assert self._vtree is not None
-        if self._preview is None:
-            self._preview = self._vtree.preview_widget()
-        assert self._preview is not None
-        return self._preview
+        v = self.tree_widget()
+        assert isinstance(v, VariableTreeWidget)
+        return self._ensure("_preview", v.preview_widget)
 
 
 class StepManagementTree(ManagementTree):
@@ -149,19 +151,14 @@ class StepManagementTree(ManagementTree):
         return make_icon("template")
 
     def tree_widget(self) -> QWidget:
-        if self._stree is None:
-            self._stree = StepTreeWidget(self._package, self._mgr)
-        assert self._stree is not None
-        return self._stree
+        w = self._ensure("_stree", lambda: StepTreeWidget(self._package, self._mgr))
+        assert isinstance(w, StepTreeWidget)
+        return w
 
     def preview_widget(self) -> QWidget:
-        if self._stree is None:
-            self._stree = StepTreeWidget(self._package, self._mgr)
-        assert self._stree is not None
-        if self._preview is None:
-            self._preview = self._stree.preview_widget()
-        assert self._preview is not None
-        return self._preview
+        s = self.tree_widget()
+        assert isinstance(s, StepTreeWidget)
+        return self._ensure("_preview", s.preview_widget)
 
 
 class StepListManagementTree(ManagementTree):
@@ -402,7 +399,7 @@ class StepListHost(QStackedWidget):
         except ValueError:
             self._toolbar_status.setText("序号需为数字")
             return
-        total = len(self._view._cards)
+        total = len(self._view.cards)
         if self._view.jump_to_index(n):
             self._toolbar_status.setText("已定位 %d/%d" % (n, total))
         else:
@@ -538,7 +535,7 @@ class DemoStep(Step):
     assert host2.currentIndex() == 1
     assert slm2.add_template_to_current("示例") is True
     assert len(sl2.steps) == 1
-    assert len(host2._view._cards) == 1              # 宿主刷新出新卡片
+    assert len(host2._view.cards) == 1              # 宿主刷新出新卡片
     # 未选中列表 → False + 日志（不弹窗）
     LogModel.instance().clear()
     slm2._current = None

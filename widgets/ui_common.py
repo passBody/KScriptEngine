@@ -19,8 +19,19 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
 
-__all__ = ["LandingCard", "TitledPanel", "ensure_qt_plugin_path",
-           "make_icon", "placeholder", "window_size"]
+__all__ = ["ClickableLabel", "LandingCard", "TitledPanel",
+           "ensure_qt_plugin_path", "make_icon", "placeholder", "window_size"]
+
+
+class ClickableLabel(QLabel):
+    """可点击标签：左键点击发出 ``clicked``（资源/变量树缩略图共用，评审#21）。"""
+
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 def ensure_qt_plugin_path() -> None:

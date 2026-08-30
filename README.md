@@ -56,5 +56,8 @@ ZIP 归档，内含：
 ## 测试
 
 无测试框架，每模块自带 `__main__` 冒烟（`python -m <模块>` 运行）。
-全量回归：所有模块冒烟 + `main.py sample.kscp --check` +
-`main.py qwer.kscp --check` + `demo_resource_tree.py --check`。
+全量回归一条命令：
+
+```bash
+python tests/smoke_all.py   # 36 模块冒烟 + 3 个工程加载自检，失败非零退出
+```
