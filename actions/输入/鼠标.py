@@ -117,12 +117,14 @@ class _ClickPreview(QLabel):
 class _ImagePreviewDialog(QDialog):
     """素材预览弹出窗口：滚轮缩放 / 拖拽平移 / 双击关闭。
 
-    查看器不嵌入卡片、以独立窗口弹出（用户反馈）；背景为应用背景色
-    （浅色）而非黑色。每次打开新建，画面取当前预览（标注图优先，否则素材原图）。
+    **无父窗口**：卡片在 QGraphicsView 场景（QGraphicsProxyWidget）中，带父的
+    QDialog 会被 proxy 内嵌渲染、嵌在卡片里（同 model.step_io 默认选择器的
+    教训）——故构造不设父，exec_() 无父时应用模态、阻塞主窗口。背景为应用
+    背景色（浅色）而非黑色。每次打开新建，画面取当前预览（标注图优先，否则素材原图）。
     """
 
-    def __init__(self, pixmap: QPixmap, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
+    def __init__(self, pixmap: QPixmap) -> None:
+        super().__init__()          # 无父窗口 → 独立顶层弹窗
         self.setWindowTitle("素材预览")
         self.resize(640, 480)
         from widgets.image_overlay import ZoomGraphicsView
@@ -217,12 +219,15 @@ class _MouseInfoView(QWidget):
                 _PREVIEW_H - 8, Qt.SmoothTransformation))
 
     def _open_preview(self) -> None:
-        """弹出窗口查看当前预览（标注图优先，否则素材原图）；无素材不弹。"""
+        """独立弹窗查看当前预览（标注图优先，否则素材原图）；无素材不弹。
+
+        不设父窗口（见 _ImagePreviewDialog）；exec_() 无父时应用模态 → 阻塞主窗口。
+        """
         pix = self._preview_pixmap()
         if pix.isNull():
             return
-        dlg = _ImagePreviewDialog(pix, self.window())
-        dlg.exec_()
+        dlg = _ImagePreviewDialog(pix)     # 无父 → 独立顶层窗口
+        dlg.exec_()                        # 应用模态：阻塞主窗口
 
     # ---- 槽变化 ----
     def _on_io_changed(self) -> None:
@@ -234,13 +239,14 @@ class _MouseInfoView(QWidget):
     def _on_mark(self) -> None:
         data = self._image_bytes()
         if not data:
-            QMessageBox.warning(self, "设置点位", "请先在输入 GUI 中为「素材图片」选择图片变量")
+            QMessageBox.warning(None, "设置点位",
+                                "请先在输入 GUI 中为「素材图片」选择图片变量")
             return
         from tools.image_marker import mark_image
         try:
             marked_img, pos = mark_image(data, "dot")
         except (ValueError, TypeError) as e:
-            QMessageBox.warning(self, "设置点位", "标注失败：%s" % e)
+            QMessageBox.warning(None, "设置点位", "标注失败：%s" % e)
             return
         if pos is None or not pos.points:
             return                                   # 取消 / 尺寸超屏 → 数据不动
@@ -349,7 +355,8 @@ if __name__ == "__main__":
     m3.io.change_value("input", 3, "{{图}}")
     assert not view._preview_pixmap().isNull()
 
-    # 点击缩略图 → 弹出独立窗口（顶层 QDialog，查看器不嵌入卡片）
+    # 点击缩略图 → 独立弹窗：**无父窗口**（父窗口在 QGraphicsProxyWidget 内
+    # 会被 proxy 内嵌渲染、嵌在卡片里 —— 同 model.step_io 默认选择器的教训）
     _captured = []
     from PyQt5.QtWidgets import QDialog
     _orig_exec = QDialog.exec_
@@ -359,10 +366,10 @@ if __name__ == "__main__":
     finally:
         QDialog.exec_ = _orig_exec
     assert len(_captured) == 1 and isinstance(_captured[0], _ImagePreviewDialog)
-    assert _captured[0].parent() is not None          # 附属于卡片所在主窗口
+    assert _captured[0].parent() is None              # 独立顶层窗口，不嵌入卡片
 
     # 预览弹窗：背景 = 应用背景色（浅色，非黑）
-    dlg = _ImagePreviewDialog(view._preview_pixmap(), None)
+    dlg = _ImagePreviewDialog(view._preview_pixmap())
     assert dlg._view.scene() is dlg._scene
     assert dlg._view.backgroundBrush().color().name() == "#f4f7fc"
     items = dlg._scene.items()
@@ -385,7 +392,10 @@ if __name__ == "__main__":
     from PyQt5.QtWidgets import QMessageBox
     _warn = QMessageBox.warning
     warned = []
-    QMessageBox.warning = staticmethod(lambda *a, **k: warned.append(1) or QMessageBox.Ok)
+    warned_parents = []
+    QMessageBox.warning = staticmethod(
+        lambda parent, *a, **k: (warned.append(1), warned_parents.append(parent),
+                                 QMessageBox.Ok)[2])
     try:
         m3.io.change_value("input", 3, "")
         m3.io.change_value("input", 0, "1")
@@ -396,6 +406,7 @@ if __name__ == "__main__":
         _im.mark_image = _orig_mark
         QMessageBox.warning = _warn
     assert warned == [1]
+    assert warned_parents == [None]     # 无父：警告框不在卡片 proxy 内嵌
     assert m3.io.input_value(0) == "1" and m3.io.input_value(1) == "2"   # 未改写
 
     # ---- I4: 视图销毁后监听器不泄漏（弱引用回调；触发 io 变更不崩） ----
