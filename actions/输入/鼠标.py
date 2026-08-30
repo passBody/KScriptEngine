@@ -18,9 +18,9 @@
 import re
 import weakref
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
-from PyQt5.QtCore import QPoint, Qt, pyqtSignal
+from PyQt5.QtCore import QPoint, QRect, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QDialog, QGraphicsPixmapItem, QGraphicsScene, QLabel,
@@ -78,24 +78,24 @@ _VAR_REF = re.compile(r"^\{\{(.+)\}\}$")
 _PREVIEW_H = 120   # 卡片内缩略图高度（点击 → 弹出窗口查看）
 
 
-# 标注点样式：与 tools.image_marker 的 _DOT_COLOR / _DOT_RADIUS 保持一致
-_DOT_COLOR = QColor(255, 0, 0)
+# 标注样式：与 tools.image_marker 的 _DIM_COLOR / _DOT_COLOR / _DOT_RADIUS 一致
+_DIM_COLOR = QColor(128, 128, 128, 140)    # 灰色半透明遮罩（整图）
+_DOT_COLOR = QColor(255, 0, 0)             # 标注点（红）
 _DOT_RADIUS = 6
 
 
-def _mark_dot_pixmap(src: QPixmap, x: int, y: int) -> QPixmap:
-    """在原图上叠加红点标注（**无灰色遮罩**），返回新位图；src 为 null 原样返回。
+def _mark_composite_pixmap(src: QPixmap, x: int, y: int) -> QPixmap:
+    """素材原图 → 标注合成图：**遮罩 + 红点 + 原图**（与 image_marker 'dot' 结果一致）。
 
-    mark_image('dot') 返回的合成图带整图灰色遮罩——遮罩是标注过程的辅助视觉，
-    不应进入预览（用户反馈：预览图是加遮罩的版本）——故预览自行合成：原图 + 红点。
+    预览不直接用 mark_image 的返回图——mark_image 只提供坐标，预览由输入 GUI
+    的参数（素材 + x/y）自行合成；x/y 变化时红点跟随移动。
     """
-    if src.isNull():
-        return src
     out = QPixmap(src)
     p = QPainter(out)
+    p.fillRect(QRect(0, 0, out.width(), out.height()), _DIM_COLOR)   # 遮罩
     p.setPen(Qt.NoPen)
     p.setBrush(_DOT_COLOR)
-    p.drawEllipse(QPoint(x, y), _DOT_RADIUS, _DOT_RADIUS)
+    p.drawEllipse(QPoint(x, y), _DOT_RADIUS, _DOT_RADIUS)            # 红点
     p.end()
     return out
 
@@ -125,8 +125,8 @@ class _ImagePreviewDialog(QDialog):
     QDialog 会被 proxy 内嵌渲染、嵌在卡片里（同 model.step_io 默认选择器的
     教训）——故构造不设父，exec_() 无父时应用模态、阻塞主窗口。背景为应用
     背景色（浅色）而非黑色。初始尺寸 = 显示器可用区 2/3；窗口拉伸时图片
-    跟随适配缩放（ZoomGraphicsView.resizeEvent）。每次打开新建，画面取当前
-    预览（标注图优先，否则素材原图）。
+    跟随适配缩放（ZoomGraphicsView.resizeEvent）。每次打开新建，画面 = 当前
+    预览（读输入 GUI 参数合成：遮罩+红点+原图；无标注坐标时为原图）。
     """
 
     def __init__(self, pixmap: QPixmap) -> None:
@@ -168,7 +168,6 @@ class _MouseInfoView(QWidget):
     def __init__(self, step: "MouseClick", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._step = step
-        self._marked: Optional[QPixmap] = None   # 标注结果（内存，槽未变时保持）
 
         hint = QLabel("自定义视图中的预览图的画面是通过读输入GUI的参数来生成")
         hint.setStyleSheet("color:#888;")
@@ -212,15 +211,30 @@ class _MouseInfoView(QWidget):
             return None
 
     def _preview_pixmap(self) -> QPixmap:
-        """当前预览画面：标注图（素材槽未变时）优先，否则素材原图；无素材 → null。"""
-        if self._marked is not None:
-            return QPixmap(self._marked)
+        """当前预览画面：**读输入 GUI 参数实时生成**（与卡片提示一致）。
+
+        素材图片槽 → 原图；x/y 槽为数值 → 合成 遮罩+红点+原图（红点跟随
+        x/y 移动）；x/y 非数值（未标注/手误）→ 原图；无素材 → null。
+        """
         data = self._image_bytes()
         if not data:
             return QPixmap()                      # null → 占位
         pix = QPixmap()
-        pix.loadFromData(bytes(data))
-        return pix
+        if not pix.loadFromData(bytes(data)) or pix.isNull():
+            return QPixmap()
+        xy = self._dot_position()
+        if xy is None:
+            return pix
+        return _mark_composite_pixmap(pix, xy[0], xy[1])
+
+    def _dot_position(self) -> Optional[Tuple[int, int]]:
+        """从输入 GUI 的 x/y 槽读标注点（四舍五入取整）；非数值 → None。"""
+        try:
+            x = int(round(float(self._step.io.input_value(0).strip())))
+            y = int(round(float(self._step.io.input_value(1).strip())))
+            return x, y
+        except (ValueError, TypeError):
+            return None
 
     def _refresh_preview(self) -> None:
         """缩略图随当前预览刷新：无素材 → 占位文字；有 → 等比缩放缩略图。"""
@@ -245,8 +259,7 @@ class _MouseInfoView(QWidget):
 
     # ---- 槽变化 ----
     def _on_io_changed(self) -> None:
-        # 素材槽变化 → 标注结果失效，回到原图预览
-        self._marked = None
+        # 素材 / x / y 槽变化 → 预览按输入 GUI 参数重新合成
         self._refresh_preview()
 
     # ---- 设置点位 ----
@@ -265,13 +278,10 @@ class _MouseInfoView(QWidget):
         if pos is None or not pos.points:
             return                                   # 取消 / 尺寸超屏 → 数据不动
         x, y = pos.points[0]
-        # change_value 触发 io 监听 → _on_io_changed 先把 _marked 置空，
-        # 故随后取 _preview_pixmap() 得到素材原图 → 叠加红点（无遮罩）
+        # 坐标写回 x/y 输入槽 → io 监听触发 _on_io_changed → 预览按输入 GUI
+        # 参数重新合成（遮罩 + 红点 + 原图）；此处兜底再刷一次
         self._step.io.change_value("input", 0, str(int(x)))
         self._step.io.change_value("input", 1, str(int(y)))
-        pix = _mark_dot_pixmap(self._preview_pixmap(), int(x), int(y))
-        if not pix.isNull():
-            self._marked = pix                       # 预览 = 原图 + 红点
         self._refresh_preview()
 
 
@@ -462,13 +472,20 @@ if __name__ == "__main__":
     finally:
         _im.mark_image = _orig_mark
     assert m4.io.input_value(0) == "50" and m4.io.input_value(1) == "50"
-    assert view4._marked is not None
-    _img4 = view4._marked.toImage()
+    _img4 = view4._preview_pixmap().toImage()
     _c_dot = _img4.pixelColor(50, 50)
     assert _c_dot.red() > 200 and _c_dot.green() < 100, _c_dot.getRgb()   # 红点
     _c_bg = _img4.pixelColor(10, 10)
-    assert (_c_bg.red() > 240 and _c_bg.green() > 240 and _c_bg.blue() > 240), \
-        _c_bg.getRgb()                                     # 无灰色遮罩（遮罩会压暗）
+    assert 100 < _c_bg.red() < 220, _c_bg.getRgb()         # 灰色遮罩压暗（有意保留）
+    # 预览由输入 GUI 参数生成：改 x/y → 红点跟随移动
+    m4.io.change_value("input", 0, "120")
+    m4.io.change_value("input", 1, "80")
+    _img5 = view4._preview_pixmap().toImage()
+    assert _img5.pixelColor(120, 80).red() > 200          # 新位置红点
+    assert _img5.pixelColor(50, 50).red() < 220           # 旧位置只剩遮罩
+    # 素材槽清空 → 占位（null）
+    m4.io.change_value("input", 3, "")
+    assert view4._preview_pixmap().isNull()
 
     # ---- I4: 视图销毁后监听器不泄漏（弱引用回调；触发 io 变更不崩） ----
     import weakref as _wr
