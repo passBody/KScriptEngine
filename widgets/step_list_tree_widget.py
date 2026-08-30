@@ -162,22 +162,26 @@ class StepListTreeWidget(QTreeWidget):
                 mark.add(parent)
                 parent = parent.rsplit("/", 1)[0] if "/" in parent else ""
         default_fg = self.palette().text()
-        for it in self._walk_items():
-            p = it.data(0, _PATH_ROLE)
-            if not p:
-                continue
-            err = p in mark
-            running = p == self._running_path and not self._is_group(p)
-            f = it.font(0)
-            f.setBold(err or running)
-            it.setFont(0, f)
-            if err:
-                fg = QColor(200, 50, 40)          # 错误红（优先于执行蓝）
-            elif running:
-                fg = QColor(27, 122, 214)          # 执行中蓝（哪个列表在执行）
-            else:
-                fg = default_fg
-            it.setForeground(0, fg)
+        self.blockSignals(True)   # setFont/setForeground 发 itemChanged，屏蔽防误触勾选处理
+        try:
+            for it in self._walk_items():
+                p = it.data(0, _PATH_ROLE)
+                if not p:
+                    continue
+                err = p in mark
+                running = p == self._running_path and not self._is_group(p)
+                f = it.font(0)
+                f.setBold(err or running)
+                it.setFont(0, f)
+                if err:
+                    fg = QColor(200, 50, 40)          # 错误红（优先于执行蓝）
+                elif running:
+                    fg = QColor(27, 122, 214)          # 执行中蓝（哪个列表在执行）
+                else:
+                    fg = default_fg
+                it.setForeground(0, fg)
+        finally:
+            self.blockSignals(False)
 
     def refresh_active_marks(self) -> None:
         """卡片激活按钮切换 → 树勾选框同步（不重建树）。
@@ -323,9 +327,16 @@ class StepListTreeWidget(QTreeWidget):
             lst = self._store.get(path)
         except FileNotFoundError:
             return
+        # 期望态守卫：程序性刷新（错误标记 setFont/setForeground、运行高亮等
+        # setData 触发的 itemChanged，勾选态 == 步骤聚合态）→ 忽略，绝不误判
+        # 为用户点击。此前半选（混合激活）列表在添加步骤后经 refresh_error_marks
+        # 触发 itemChanged，被误当作「取消勾选」把全部步骤停用（用户报告）。
+        en = [s.enabled for s in lst.steps]
+        expected = (Qt.Checked if all(en) else
+                    Qt.Unchecked if not any(en) else Qt.PartiallyChecked)
+        if item.checkState(0) == expected:
+            return
         checked = item.checkState(0) == Qt.Checked
-        if all(s.enabled == checked for s in lst.steps):
-            return                       # 状态未变（程序重建）→ 不触发保存
         for s in lst.steps:
             s.enabled = checked
         # 不能在这里 refresh()：itemChanged 分发栈上 clear() 删除 item，
@@ -1436,6 +1447,30 @@ class DemoStep(Step):
     # 半选点击（Qt 三态规则：半选 → 未勾）→ 全部停用
     tw_c._find_item("混合").setCheckState(0, Qt.Unchecked)
     assert all(not s.enabled for s in sl_mix.steps)
+
+    # ---- bug 回归：程序性 itemChanged（半选 + 错误标记刷新）不得停用全部步骤 ----
+    # 用户报告：混合激活列表上右键添加步骤 → refresh_error_marks 的 setFont/
+    # setForeground 发 itemChanged → 旧 _on_item_changed 把半选当「取消勾选」
+    # → 全部步骤停用、树条目变未勾
+    store_b = StepListStore.create_empty()
+    sl_b = StepList.create_empty()
+    s_b1 = make_step()
+    s_b2 = make_step()
+    s_b2.enabled = False
+    sl_b.add(s_b1)
+    sl_b.add(s_b2)
+    store_b.add_list("混合B", sl_b)
+    changes_b = []
+    tw_b = StepListTreeWidget(store_b, mgr, StepClipboard(),
+                              lambda: changes_b.append(1))
+    it_b = tw_b._find_item("混合B")
+    assert it_b.checkState(0) == Qt.PartiallyChecked
+    it_b.setFont(0, it_b.font(0))                      # 模拟 refresh_error_marks
+    it_b.setForeground(0, QColor(200, 50, 40))
+    assert [s.enabled for s in sl_b.steps] == [True, False], \
+        "程序性刷新不得停用全部步骤"
+    assert it_b.checkState(0) == Qt.PartiallyChecked
+    assert changes_b == []                             # 更不应触发保存
 
     # ---- 拖拽移动（排序/跨组/多选；OnItem=目标之后=下一条、Above/Below=同层前后） ----
     store_dd = StepListStore.create_empty()
