@@ -1,0 +1,18 @@
+[project]
+name = "kscript"
+version = "0.1.0"
+description = "KScript — 桌面自动化编排工具（步骤编排 + 热键执行）"
+requires-python = ">=3.14"
+dependencies = [
+    "PyQt5>=5.15,<5.15.12",
+    # PyQt5-Qt5 5.15.19 无 Windows wheel（uv 会解析到它导致装不上）；锁定 5.15.2
+    "PyQt5-Qt5==5.15.2",
+    "pynput>=1.7",
+]
+
+[project.optional-dependencies]
+# tools/image_marker 的可选增强：numpy/Pillow 缺失时自动降级（try-import）
+image = [
+    "numpy",
+    "pillow",
+]

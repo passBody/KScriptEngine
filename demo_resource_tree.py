@@ -76,6 +76,8 @@ def make_window():
 
 def main() -> int:
     args = sys.argv[1:]
+    from widgets.ui_common import ensure_qt_plugin_path
+    ensure_qt_plugin_path()   # venv 等独立部署：Qt 插件目录显式指路（须先于 QApplication）
     app = QApplication.instance() or QApplication(sys.argv)  # QImage 需 app
     if "--save" in args:
         i = args.index("--save")

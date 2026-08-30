@@ -51,7 +51,9 @@ from widgets.management_trees import (
     StepListManagementTree, StepManagementTree, VariableManagementTree,
 )
 from widgets.settings_dialog import SettingsDialog
-from widgets.ui_common import LandingCard, TitledPanel, make_icon, window_size
+from widgets.ui_common import (
+    LandingCard, TitledPanel, ensure_qt_plugin_path, make_icon, window_size,
+)
 
 __all__ = ["MainWindow", "main"]
 
@@ -660,6 +662,7 @@ class MainWindow(QMainWindow):
 # 入口
 # ================================================================
 def main(path: Optional[str] = None, check: bool = False) -> int:
+    ensure_qt_plugin_path()   # venv 等独立部署：Qt 插件目录显式指路（须先于 QApplication）
     app = QApplication.instance() or QApplication(sys.argv)
     app.setWindowIcon(QIcon(_ICON_PATH))          # 程序图标 → 所有窗口/弹窗继承
     app.setAttribute(Qt.AA_DisableWindowContextHelpButton, True)  # 弹窗右上角无「?」

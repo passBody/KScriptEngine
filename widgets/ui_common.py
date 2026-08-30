@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Optional, Tuple
 
 from PyQt5.QtCore import QPoint, Qt, pyqtSignal
@@ -18,7 +19,24 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
 
-__all__ = ["LandingCard", "TitledPanel", "make_icon", "placeholder", "window_size"]
+__all__ = ["LandingCard", "TitledPanel", "ensure_qt_plugin_path",
+           "make_icon", "placeholder", "window_size"]
+
+
+def ensure_qt_plugin_path() -> None:
+    """确保 Qt 插件（platforms/imageformats 等）可被找到——venv 等独立部署必需。
+
+    根因：PyQt5 在 venv 里把插件目录解析到**基础 Python 安装目录**
+    （如 ``C:/0_self/bin/Python314/platforms``）而非当前环境的 site-packages，
+    导致「no Qt platform plugin could be initialized」弹窗。此处显式指向
+    当前环境中 PyQt5 附带的 plugins 目录；已设置的环境变量不覆盖
+    （用户手工设置优先）。须在创建 QApplication 之前调用。
+    """
+    import PyQt5
+    plugins = os.path.join(os.path.dirname(PyQt5.__file__), "Qt5", "plugins")
+    os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH",
+                          os.path.join(plugins, "platforms"))
+    os.environ.setdefault("QT_PLUGIN_PATH", plugins)
 
 
 def window_size() -> Tuple[int, int]:
@@ -159,6 +177,20 @@ if __name__ == "__main__":
     import sys
 
     from PyQt5.QtWidgets import QApplication
+
+    # Qt 插件指路须先于 QApplication（venv 部署修复的核心入口）
+    ensure_qt_plugin_path()
+    _plugins = os.path.join(
+        os.path.dirname(__import__("PyQt5").__file__), "Qt5", "plugins")
+    assert os.environ["QT_PLUGIN_PATH"] == _plugins
+    assert os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] == os.path.join(
+        _plugins, "platforms")
+    assert os.path.isdir(os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"])
+    # 已设置的不覆盖（用户手工设置优先）
+    os.environ["QT_PLUGIN_PATH"] = "X"
+    ensure_qt_plugin_path()
+    assert os.environ["QT_PLUGIN_PATH"] == "X"
+    del os.environ["QT_PLUGIN_PATH"]
 
     app = QApplication.instance() or QApplication(sys.argv)
 
