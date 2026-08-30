@@ -142,3 +142,60 @@ step_list.json
 提供添加组 复制粘贴剪切重命名步骤列表
 当点击某个步骤列表时 会在视图中显示该步骤列表的步骤列表视图
 在树中只显示键值
+
+优化点
+1.工具栏中的字体显示不全，例如 `管理-导入动作` `实际是 管理-导入...` 被压缩了
+2.步骤卡片中下方的报错提示宽度如果超过卡片宽度则采用省略写法，鼠标悬停时浮窗显示完整信息
+3.卡片上的输入输出参数更改为具体变量名而不是 number number image等变量类型
+4.取消工具栏中的执行与快捷键设置按钮 改用为在左边拥有四个图标的栏位处的最下边添加 执行与设置按钮
+  点击设置按钮后弹出设置界面，先添加一个触发热键配置 右下角有保存按钮，点击保存后保存setting.json并写入.kscp文件
+bug
+1.当点击执行后，进入执行中的时候我发现我竟然可以添加步骤修改变量名等操作（这是极其危险的）
+  我希望当进入执行状态后 资源管理 变量管理 步骤管理等所有会影响到执行器运行的GUI编辑操作统统限制，只能通过内置函数去修改，用户无法通过GUI去修改
+
+
+优化
+1：多选卡片 右击的上下文中 支持删除
+2：执行按钮 设置按钮的图标可以再大一点
+3：日志我没有控制他，但是添加日志的时候日志视图不在最新消息上
+4：卡片中预览图片的查看器不用嵌入到卡片中可以弹出窗口查看
+5：当通过图片查看器或者预览图片时，背景都是背景色，而不是黑色，黑色太突兀了不太好看
+bug
+1.当我在卡片输入框中输入 {{测试}} （其中测试是变量组名）报错：
+    Traceback (most recent call last):
+    File "C:\Users\feelnn\Desktop\项目\KScript\widgets\step_card.py", line 140, in <lambda>
+        fld.textChanged.connect(lambda *_, r=self_ref: _notify_io_edited(r))
+                                                    ~~~~~~~~~~~~~~~~~^^^
+    File "C:\Users\feelnn\Desktop\项目\KScript\widgets\step_card.py", line 80, in _notify_io_edited
+        card._io_edited()
+        ~~~~~~~~~~~~~~~^^
+    File "C:\Users\feelnn\Desktop\项目\KScript\widgets\step_card.py", line 189, in _io_edited
+        self.refresh()
+        ~~~~~~~~~~~~^^
+    File "C:\Users\feelnn\Desktop\项目\KScript\widgets\step_card.py", line 165, in refresh
+        self._update_style()
+        ~~~~~~~~~~~~~~~~~~^^
+    File "C:\Users\feelnn\Desktop\项目\KScript\widgets\step_card.py", line 219, in _update_style
+        self.setProperty("valid", self._step.io.is_valid)
+                                ^^^^^^^^^^^^^^^^^^^^^^
+    File "C:\Users\feelnn\Desktop\项目\KScript\model\step_io.py", line 177, in is_valid
+        return self._validate_inputs() and self._validate_outputs()
+            ~~~~~~~~~~~~~~~~~~~~~^^
+    File "C:\Users\feelnn\Desktop\项目\KScript\model\step_io.py", line 180, in _validate_inputs
+        return all(self._is_input_valid(i, t)
+            ^^^
+    File "C:\Users\feelnn\Desktop\项目\KScript\model\step_io.py", line 180, in <genexpr>
+        return all(self._is_input_valid(i, t)
+                ~~~~~~~~~~~~~~~~~~~~^^^^^^
+    File "C:\Users\feelnn\Desktop\项目\KScript\model\step_io.py", line 192, in _is_input_valid
+        return self._tree.get(name).type == vtype
+            ~~~~~~~~~~~~~~^^^^^^
+    File "C:\Users\feelnn\Desktop\项目\KScript\model\variable_tree.py", line 212, in get
+        raise FileNotFoundError("变量不存在: %r" % path)
+    FileNotFoundError: 变量不存在: '测试'
+    同样的
+    FileNotFoundError: 变量不存在: '测试/'  也会报错
+
+功能探讨（能否实现）
+1.对于string类型的变量，选择变量时 数字完全也可以当作字符串去使用，但是输出日志的时候只能输入字符串
+  能否让string类型的变量选择变量的时候支持数字变量
