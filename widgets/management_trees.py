@@ -193,6 +193,11 @@ class StepListManagementTree(ManagementTree):
         """步骤列表存储（执行器数据源）。"""
         return self._store
 
+    @property
+    def current_path(self) -> Optional[str]:
+        """当前选中的步骤列表路径（「仅执行当前列表」范围用）；未选 → None。"""
+        return self._current
+
     def set_read_only(self, ro: bool) -> None:
         """执行期只读：树可点击切换查看列表（禁拖拽/右键/快捷键/勾选），
         卡片视图禁编辑保留悬停动画。"""

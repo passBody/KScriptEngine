@@ -69,11 +69,12 @@ class _ExecBridge(QObject):
     hotkey_toggle = pyqtSignal()
     log_changed = pyqtSignal()            # LogModel 变更（worker 线程记日志）→ GUI 线程刷计数
     step_status = pyqtSignal(object)      # 步骤状态变更（执行线程）→ GUI 线程刷卡片颜色/树高亮
+    progress = pyqtSignal(object)         # (第几步, 总数)：执行进度 → 状态栏
 
 
 # 模拟注入点：冒烟测试替换以避开真实热键/线程（与 picker 包装同思路）
-def _make_step_runner(store):
-    return StepRunner(store)
+def _make_step_runner(store, only_path=None):
+    return StepRunner(store, only_path)
 
 
 def _make_hotkey_listener(hotkey, on_toggle):
@@ -110,7 +111,9 @@ class MainWindow(QMainWindow):
         self._exec_bridge.hotkey_toggle.connect(self._handle_hotkey_toggle)
         self._exec_bridge.log_changed.connect(self._update_status_counts)
         self._exec_bridge.step_status.connect(self._on_step_status)
+        self._exec_bridge.progress.connect(self._on_progress)
         self._exec_locked = False
+        self._exec_scope = "all"     # 执行范围：all=全部列表 / current=仅当前列表
         self._runner_gen = 0                     # 执行器代际：陈旧 runner 迟到状态被忽略
         self._step_hooks: List[Tuple[object, Callable]] = []   # 执行期步骤状态监听（卡片刷新）
         self._step_paths: Dict[object, str] = {}   # 执行期 step → 列表路径（树高亮映射）
@@ -249,11 +252,18 @@ class MainWindow(QMainWindow):
             return
         sl_mgr = self._managers[0] if self._managers else None
         assert isinstance(sl_mgr, StepListManagementTree)
-        self._runner = _make_step_runner(sl_mgr.store)
+        only = None
+        if self._exec_scope == "current":
+            only = sl_mgr.current_path
+            if not only:
+                LogModel.instance().warning(
+                    "仅执行当前列表：未选中任何列表，按全部列表执行")
+        self._runner = _make_step_runner(sl_mgr.store, only)
         self._runner_gen += 1
         gen = self._runner_gen
         self._runner.add_state_listener(
             lambda st, g=gen: self._exec_bridge.runner_state.emit((g, st)))
+        self._attach_progress()
         hotkey = self._current_hotkey()
         self._hotkey_listener = _make_hotkey_listener(
             hotkey, self._exec_bridge.hotkey_toggle.emit)
@@ -357,6 +367,35 @@ class MainWindow(QMainWindow):
                         break
                 m0._sl_tree.set_running_path(running)
 
+    def _attach_progress(self) -> None:
+        """为当前 runner 挂进度监听（工作线程 emit → 桥 → 状态栏 i/n）。"""
+        if self._runner is not None:
+            self._runner.add_progress_listener(
+                lambda i, n: self._exec_bridge.progress.emit((i, n)))
+
+    def _on_progress(self, payload) -> None:
+        """执行进度（GUI 线程，经桥 queued）：执行中 → 状态栏「执行中 i/n」。"""
+        i, n = payload
+        if self._runner is not None \
+                and self._runner.state is StepRunnerState.RUNNING:
+            self._set_exec_status("执行中 %d/%d……（按热键停止）" % (i, n))
+
+    def _rebuild_runner(self) -> None:
+        """待命态按当前范围重建 runner（状态/进度监听一并重挂；热键 listener 保留）。
+
+        执行范围切换、或「仅执行当前列表」下切换选中列表时调用。
+        """
+        if not self._managers or self._runner is None:
+            return
+        sl_mgr = self._managers[0]
+        assert isinstance(sl_mgr, StepListManagementTree)
+        only = sl_mgr.current_path if self._exec_scope == "current" else None
+        self._runner = _make_step_runner(sl_mgr.store, only)
+        gen = self._runner_gen
+        self._runner.add_state_listener(
+            lambda st, g=gen: self._exec_bridge.runner_state.emit((g, st)))
+        self._attach_progress()
+
     def _set_exec_status(self, text: str) -> None:
         if self._exec_status is not None:
             self._exec_status.setText(text)
@@ -367,11 +406,46 @@ class MainWindow(QMainWindow):
         if self._exec_btn is None:
             return
         listening = self._hotkey_listener is not None
+        scope_text = "全部列表" if self._exec_scope == "all" else "当前列表"
         self._exec_btn.setChecked(listening)
         self._exec_btn.setToolTip(
             "停止监听" if listening else
-            "执行：点击进入待命，按下热键开始执行全部列表，再按停止（当前步骤完成后停）。\n"
-            "热键勿与步骤按键冲突（模拟按键也会被监听）；模拟输入到游戏窗口需管理员运行。")
+            "执行（范围：%s，右键切换）：点击进入待命，按下热键开始执行，"
+            "再按停止（当前步骤完成后停）。\n"
+            "热键勿与步骤按键冲突（模拟按键也会被监听）；模拟输入到游戏窗口需管理员运行。"
+            % scope_text)
+
+    # ---- 执行范围（全部列表 / 仅当前列表；右键执行按钮切换） ----
+    def _on_exec_menu(self, pos) -> None:
+        menu = QMenu(self._exec_btn)
+        a_all = menu.addAction("执行全部列表")
+        a_all.setCheckable(True)
+        a_cur = menu.addAction("仅执行当前列表")
+        a_cur.setCheckable(True)
+        (a_all if self._exec_scope == "all" else a_cur).setChecked(True)
+        a = menu.exec_(self._exec_btn.mapToGlobal(pos))
+        if a is a_all:
+            self._set_exec_scope("all")
+        elif a is a_cur:
+            self._set_exec_scope("current")
+
+    def _set_exec_scope(self, scope: str) -> None:
+        """切换执行范围；待命态立即重建 runner，执行中下次待命生效。"""
+        if scope == self._exec_scope:
+            return
+        self._exec_scope = scope
+        if self._runner is not None and self._runner.state is StepRunnerState.READY:
+            self._rebuild_runner()
+        self._update_exec_button()
+        LogModel.instance().info(
+            "执行范围已设为：%s"
+            % ("全部列表" if scope == "all" else "仅当前列表"))
+
+    def _on_exec_list_changed(self, _path: str) -> None:
+        """选中列表变化：仅执行当前列表且待命中 → runner 跟随新列表。"""
+        if self._exec_scope == "current" and self._runner is not None \
+                and self._runner.state is StepRunnerState.READY:
+            self._rebuild_runner()
 
     def _on_settings_clicked(self) -> None:
         """打开设置弹窗（触发热键配置）；保存 → setting.json + .kscp/executor.json。"""
@@ -534,6 +608,8 @@ class MainWindow(QMainWindow):
         # 栏位最底：执行（待命/停止监听，checkable 状态钮）与设置（瞬时按钮）
         self._exec_btn = self._switcher.add_bottom_button(
             "执行", make_icon("exec"), self._on_exec_clicked, checkable=True)
+        self._exec_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._exec_btn.customContextMenuRequested.connect(self._on_exec_menu)
         self._update_exec_button()
         self._settings_btn = self._switcher.add_bottom_button(
             "设置", make_icon("settings"), self._on_settings_clicked)
@@ -624,6 +700,7 @@ class MainWindow(QMainWindow):
         sl_tree = sl_mgr.tree_widget()
         assert isinstance(sl_tree, StepListTreeWidget)
         sl_mgr.preview_widget()
+        sl_tree.list_selected.connect(self._on_exec_list_changed)   # 单列表范围跟随选中
         first_path = sl_tree.first_list_path()
         if first_path:
             item = sl_tree._find_item(first_path)
@@ -1013,14 +1090,18 @@ class DemoStep(Step):
         class _FakeRunner:
             """桩执行器：状态手动置位，记录 start/request_stop 调用。"""
 
-            def __init__(self, store):
+            def __init__(self, store, only=None):
                 self.store = store
+                self.only = only            # 单列表范围（only_path）
                 self.state = StepRunnerState.READY
                 self.calls = []
                 self._listeners = []
 
             def add_state_listener(self, cb):
                 self._listeners.append(cb)
+
+            def add_progress_listener(self, cb):
+                pass                        # 桩不产生进度（进度经 _on_progress 直测）
 
             def start(self):
                 self.calls.append("start")
@@ -1034,7 +1115,7 @@ class DemoStep(Step):
                     cb(st)
 
         _orig_mk_runner = _make_step_runner
-        _make_step_runner = lambda store: _FakeRunner(store)
+        _make_step_runner = lambda store, only=None: _FakeRunner(store, only)
         try:
             win_i2 = MainWindow()
             win_i2._open_package(KscpPackage.create_empty(), None)
@@ -1106,6 +1187,21 @@ class DemoStep(Step):
             assert win_i3._step_hooks == [], win_i3._step_hooks   # detach 后清空
             step3.status = StepStatus.PENDING
             assert len(fired3) == 2, fired3             # detach 后不再通知
+
+            # ---- 执行范围（单列表）：切换 → 待命 runner 重建并携带 only_path ----
+            assert win_i3._exec_scope == "all"
+            win_i3._set_exec_scope("current")
+            assert win_i3._runner is not None
+            assert win_i3._runner.only == "主列表", win_i3._runner.only
+            # ---- 执行进度：桥 → 状态栏「执行中 i/n」 ----
+            win_i3._runner._set(StepRunnerState.RUNNING)
+            app.processEvents()
+            win_i3._on_progress((1, 2))
+            assert "1/2" in win_i3._exec_status.text(), win_i3._exec_status.text()
+            win_i3._runner._set(StepRunnerState.READY)
+            app.processEvents()
+            win_i3._set_exec_scope("all")
+            assert win_i3._runner is not None and win_i3._runner.only is None
             win_i3._exec_btn.click()                    # 复位：停监听
         finally:
             _make_step_runner = _orig_mk_runner

@@ -26,7 +26,7 @@
 """
 import threading
 from enum import Enum
-from typing import Callable, List
+from typing import Callable, List, Optional, Tuple
 
 from model.log_model import LogModel
 from model.step import StepStatus
@@ -47,12 +47,16 @@ class StepRunner:
 
     max_steps = 10000   # 死循环保护上限（冒烟测试可用小上限子类覆盖）
 
-    def __init__(self, store: StepListStore) -> None:
+    def __init__(self, store: StepListStore,
+                 only_path: Optional[str] = None) -> None:
         self._store = store
+        self._only_path = only_path   # None = 执行全部列表；否则仅执行该列表
         self._state = StepRunnerState.READY
         self._lock = threading.RLock()   # 可重入：request_stop 锁内调 _set_state
         self._stop_event = threading.Event()
         self._listeners: List[Callable[[StepRunnerState], None]] = []
+        self._progress: Tuple[int, int] = (0, 0)   # (第几步 1-based, 总数)
+        self._progress_listeners: List[Callable[[int, int], None]] = []
 
     # ---- 状态（线程安全 + 监听通知） ----
     @property
@@ -75,6 +79,26 @@ class StepRunner:
         """注册状态监听：``cb(new_state)``。"""
         self._listeners.append(cb)
 
+    # ---- 进度（线程安全 + 监听通知；回调在工作线程发生，UI 需自行桥接） ----
+    @property
+    def progress(self) -> Tuple[int, int]:
+        """当前执行进度 (第几步 1-based, 总步数)；未执行 = (0, 0)。"""
+        with self._lock:
+            return self._progress
+
+    def add_progress_listener(self, cb: Callable[[int, int], None]) -> None:
+        """注册进度监听：每步执行前 ``cb(第几步, 总数)``。"""
+        self._progress_listeners.append(cb)
+
+    def _notify_progress(self, index: int, total: int) -> None:
+        with self._lock:
+            self._progress = (index, total)
+        for cb in list(self._progress_listeners):
+            try:
+                cb(index, total)
+            except Exception:
+                pass
+
     # ---- 控制 ----
     def start(self) -> None:
         """复位全部步骤并启动执行线程；仅 READY 可调用，否则 :class:`RuntimeError`。
@@ -88,13 +112,24 @@ class StepRunner:
             if self._state is not StepRunnerState.READY:
                 raise RuntimeError("执行器非待命状态（当前 %s）" % self._state.value)
             # 复位：全部列表全部步骤（含 enabled=False 的）→ PENDING
-            for path, is_group in self._store.walk():
-                if is_group:
-                    continue
+            # （单列表模式只复位该列表——其余列表状态不受本次执行影响）
+            if self._only_path is not None:
+                try:
+                    prog = [s.do for s in self._store.get(self._only_path).steps
+                            if s.enabled]
+                except FileNotFoundError:
+                    LogModel.instance().error(
+                        "单列表执行：列表不存在: %s" % self._only_path)
+                    return
+                reset_paths = [self._only_path]
+            else:
+                prog = self._store.all_do_methods()
+                reset_paths = [p for p, g in self._store.walk() if not g]
+            for path in reset_paths:
                 for step in self._store.get(path).steps:
                     step.status = StepStatus.PENDING
-            prog = self._store.all_do_methods()
             self._stop_event.clear()
+            self._progress = (0, 0)
             if not prog:
                 LogModel.instance().info("无可执行的步骤")
                 return                          # 空程序：状态保持 READY
@@ -120,6 +155,7 @@ class StepRunner:
                         "执行步数超过上限 %d，已停止（偏移量 0/负值疑似死循环）"
                         % self.max_steps)
                     break
+                self._notify_progress(pc + 1, len(prog))   # 每步执行前报进度
                 try:
                     offset = prog[pc]()     # do(): input -> run -> output
                 except Exception:
@@ -304,5 +340,51 @@ if __name__ == "__main__":
     runner = StepRunner(store)
     runner.start()
     assert runner.state is StepRunnerState.READY
+
+    # ---- 执行进度：每步执行前通知 (第几步, 总数) ----
+    store = make_store([1, 1, 1], ["a", "b", "c"])
+    runner = StepRunner(store)
+    progs = []
+    runner.add_progress_listener(lambda i, n: progs.append((i, n)))
+    runner.start()
+    _wait_ready(runner)
+    assert progs == [(1, 3), (2, 3), (3, 3)], progs
+    assert runner.progress == (3, 3)
+    # 跳转（偏移 2）→ 只执行第 1 步
+    store = make_store([2, 1], ["a", "b"])
+    runner = StepRunner(store)
+    progs = []
+    runner.add_progress_listener(lambda i, n: progs.append((i, n)))
+    runner.start()
+    _wait_ready(runner)
+    assert progs == [(1, 2)], progs
+
+    # ---- 单列表执行（only_path）：只跑该列表、只复位该列表 ----
+    store = StepListStore.create_empty()
+    sl1 = StepList.create_empty()
+    s1 = _ProbeStep.create_default(None, None)  # type: ignore
+    s1.io._input_values = ["0"]                 # 合法输入（同 make_store）
+    s1.tag = "L1"
+    sl1.add(s1)
+    store.add_list("列表1", sl1)
+    sl2 = StepList.create_empty()
+    s2 = _ProbeStep.create_default(None, None)  # type: ignore
+    s2.io._input_values = ["0"]
+    s2.tag = "L2"
+    sl2.add(s2)
+    store.add_list("列表2", sl2)
+    _ProbeStep.calls = []
+    _ProbeStep.offsets = [1, 1]
+    runner = StepRunner(store, only_path="列表1")
+    runner.start()
+    _wait_ready(runner)
+    assert _ProbeStep.calls == ["L1"], _ProbeStep.calls   # 仅列表1执行
+    assert sl2.steps[0].status is StepStatus.PENDING      # 列表2未被复位触碰
+    # 不存在的列表 → 不执行 + 错误日志（保持 READY）
+    LogModel.instance().clear()
+    runner = StepRunner(store, only_path="不存在")
+    runner.start()
+    assert runner.state is StepRunnerState.READY
+    assert any("列表不存在" in e.message for e in LogModel.instance().entries)
 
     print("StepRunner smoke OK")
