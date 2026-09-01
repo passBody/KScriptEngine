@@ -137,14 +137,32 @@ class StepCard(QFrame):
         self._io_scroll.setWidgetResizable(True)
         self._io_scroll.setFrameShape(QFrame.NoFrame)
         self._io_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 视口透明：不透明白底改由白板样式提供（否则 #f0f0f0 视口底色贴住卡片边）；
+        # Qt 每次 paint 都会把视口 backgroundRole 重置为 Window（backgroundVisible
+        # 机制，PyQt5 无开关）→ 仅关 autoFillBackground 不够，须给视口直挂
+        # QSS 透明背景（QSS 背景优先于背景角色）；白板样式直挂滚动区
+        # （父级 QSS 级联对 QScrollArea 不生效）
+        self._io_scroll.viewport().setAutoFillBackground(False)
+        self._io_scroll.viewport().setStyleSheet("background: transparent;")
+        self._io_scroll.setStyleSheet(
+            "QScrollArea { background: rgba(238, 242, 248, 0.9);"
+            " border: 1px solid rgba(128, 148, 178, 0.3);"
+            " border-radius: 10px; }")
         self._io_scroll.setWidget(self._io_widget)
+        # io 背景板内缩：滚动区外包一层带边距容器（左右 10 / 底 10 / 顶 6），
+        # 白板不再贴卡片左右下边（用户反馈「背景板靠太近」）
+        self._io_box = QWidget(self)
+        _box = QVBoxLayout(self._io_box)
+        _box.setContentsMargins(10, 6, 10, 10)
+        _box.setSpacing(0)
+        _box.addWidget(self._io_scroll)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 8)
         lay.setSpacing(4)
         lay.addLayout(top)
         lay.addWidget(self._info)
-        lay.addWidget(self._io_scroll, 1)      # 占剩余空间（stretch）
+        lay.addWidget(self._io_box, 1)         # 占剩余空间（stretch）
 
         # 颜色刷新钩子①：io 文本框编辑（QLineEdit 输入即重检；用户输入 → 通知内容已改）
         # 弱引用传卡（防自引用环，见 _notify_io_edited）
@@ -417,6 +435,13 @@ if __name__ == "__main__":
     _vbar = _cm._io_scroll.verticalScrollBar()
     assert _vbar.maximum() > 0, _vbar.maximum()        # 内容超出可视区 → 可滚动
     assert _cm._io_widget.height() > _cm._io_scroll.viewport().height()
+    # io 背景板：内缩容器边距（左右 10/底 10/顶 6）+ 视口透明 + 白板圆角样式
+    _bm = _cm._io_box.layout().contentsMargins()
+    assert (_bm.left(), _bm.top(), _bm.right(), _bm.bottom()) == (10, 6, 10, 10), \
+        (_bm.left(), _bm.top(), _bm.right(), _bm.bottom())
+    assert not _cm._io_scroll.viewport().autoFillBackground()
+    assert "transparent" in _cm._io_scroll.viewport().styleSheet()
+    assert "border-radius: 10px" in _cm._io_scroll.styleSheet()
     _cm.close()
 
     # ---- I-2：picker 包装链扁平（_kscript_orig 回溯计数 = 1，重建不累积） ----
