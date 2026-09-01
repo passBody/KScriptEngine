@@ -29,6 +29,7 @@ from enum import Enum
 from typing import Callable, List, Optional, Tuple
 
 from model.log_model import LogModel
+from model.run_interrupt import clear_stop_event, set_stop_event
 from model.step import StepStatus
 from model.step_list_store import StepListStore
 
@@ -48,9 +49,14 @@ class StepRunner:
     max_steps = 10000   # 死循环保护上限（冒烟测试可用小上限子类覆盖）
 
     def __init__(self, store: StepListStore,
-                 only_path: Optional[str] = None) -> None:
+                 only_path: Optional[str] = None,
+                 stop_mode: str = "after_step") -> None:
         self._store = store
         self._only_path = only_path   # None = 执行全部列表；否则仅执行该列表
+        # 停止方式：after_step=当前步骤结束后停止；immediate=立即停止
+        # （停止事件登记到 run_interrupt，步骤内 interruptible_sleep 以 ~20ms
+        #   粒度轮询，请求后当前步骤尽快结束）
+        self._stop_mode = "immediate" if stop_mode == "immediate" else "after_step"
         self._state = StepRunnerState.READY
         self._lock = threading.RLock()   # 可重入：request_stop 锁内调 _set_state
         self._stop_event = threading.Event()
@@ -133,6 +139,8 @@ class StepRunner:
             if not prog:
                 LogModel.instance().info("无可执行的步骤")
                 return                          # 空程序：状态保持 READY
+            if self._stop_mode == "immediate":
+                set_stop_event(self._stop_event)   # 登记：步骤内可中断睡眠轮询此事件
             self._set_state(StepRunnerState.RUNNING)
         threading.Thread(target=self._run, args=(prog,), daemon=True).start()
 
@@ -165,6 +173,8 @@ class StepRunner:
                     pc = 0                  # 负偏移回跳，最前钳到 0
         finally:
             self._stop_event.clear()
+            if self._stop_mode == "immediate":
+                clear_stop_event(self._stop_event)   # 注销停止事件登记
             self._set_state(StepRunnerState.READY)
 
 
@@ -340,6 +350,54 @@ if __name__ == "__main__":
     runner = StepRunner(store)
     runner.start()
     assert runner.state is StepRunnerState.READY
+
+    # ---- 停止方式：immediate=可中断睡眠提前结束；after_step=当前步骤完成 ----
+    class _SlowInterruptStep(Step):
+        name = "可中断慢步骤"
+        description = ""
+        input_class = _In
+        output_class = _Out
+        count = 0
+
+        def run(self) -> int:
+            type(self).count += 1
+            from model.run_interrupt import interruptible_sleep
+            if interruptible_sleep(1.0):
+                type(self).count += 100     # 标记：等待被打断
+            return 1
+
+    def _mk_slow():
+        store = StepListStore.create_empty()
+        sl = StepList.create_empty()
+        s = _SlowInterruptStep.create_default(None, None)  # type: ignore
+        s.io._input_values = ["0"]
+        sl.add(s)
+        store.add_list("L", sl)
+        return store
+
+    # immediate：request_stop 后当前步骤的等待被中断 → 远小于 1s 结束
+    _SlowInterruptStep.count = 0
+    store = _mk_slow()
+    runner = StepRunner(store, stop_mode="immediate")
+    runner.start()
+    time.sleep(0.05)
+    t0 = time.monotonic()
+    runner.request_stop()
+    _wait_ready(runner)
+    assert time.monotonic() - t0 < 0.6, "immediate 应打断 1s 等待"
+    assert _SlowInterruptStep.count == 101
+
+    # after_step（默认）：睡满 1s 才结束
+    _SlowInterruptStep.count = 0
+    store = _mk_slow()
+    runner = StepRunner(store)
+    runner.start()
+    time.sleep(0.05)
+    t0 = time.monotonic()
+    runner.request_stop()
+    _wait_ready(runner, timeout=3.0)
+    assert time.monotonic() - t0 >= 0.9, "after_step 应等当前步骤完成"
+    assert _SlowInterruptStep.count == 1
 
     # ---- 执行进度：每步执行前通知 (第几步, 总数) ----
     store = make_store([1, 1, 1], ["a", "b", "c"])

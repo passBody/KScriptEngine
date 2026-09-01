@@ -23,6 +23,7 @@ from dataclasses import dataclass
 
 from model.step import Step, StepStatus
 from model.log_model import LogModel
+from model.run_interrupt import interruptible_sleep
 
 __all__ = ["TimeDelay"]
 
@@ -53,7 +54,8 @@ class TimeDelay(Step):
             LogModel.instance().error(
                 "延时秒数必须大于 0: %r" % self.inputs.seconds)
         else:
-            time.sleep(self.inputs.seconds)
+            # 可中断睡眠：执行器「立即停止」时 ~20ms 内返回（未登记事件时即普通 sleep）
+            interruptible_sleep(self.inputs.seconds)
         return 1
 
 # ================================================================

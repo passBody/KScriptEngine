@@ -445,7 +445,7 @@ class StepIOWidget:
         widget.output_labels = []  # List[QLabel]：各输出槽的标签
 
         root = QVBoxLayout(widget)
-        root.setContentsMargins(6, 6, 6, 6)
+        root.setContentsMargins(12, 6, 12, 12)   # 左右/底部加大：控件不贴卡片边（参数多时可滚动）
         root.setSpacing(4)
 
         root.addWidget(self._section_label("输入"))
@@ -923,6 +923,10 @@ if __name__ == "__main__":
     # gen_widget：生成 QWidget，change_value 同步刷新字段
     card = w.gen_widget()
     assert isinstance(card, QWidget)
+    # io 边距：左右 12 / 底部 12（控件不贴卡片边，参数多时滚动区观感）
+    _m = card.layout().contentsMargins()
+    assert (_m.left(), _m.top(), _m.right(), _m.bottom()) == (12, 6, 12, 12), \
+        (_m.left(), _m.top(), _m.right(), _m.bottom())
     assert w.change_value("input", 0, "9") is None
     assert card.input_fields[0].text() == "9"   # number 槽是 QLineEdit
     # 多控件同步

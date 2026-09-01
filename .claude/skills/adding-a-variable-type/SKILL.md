@@ -61,4 +61,4 @@ KScript 变量类型 = `VariableType` 子类（模型注册）+ `register_editor
 | 后缀与选择器过滤不一致 | 编辑器能选、校验不过 | 选择器用 `var.suffixes` |
 | 往 `_IMAGE_EXTS` 里加新后缀 | image 槽误接受新类型常量 | 按槽类型拆分过滤 |
 | 冒烟输出走管道 | EXIT=139 段错误 | 直跑 |
-| venv 部署下 Qt 冒烟 QApplication 挂起 | 插件路径解析到基础 Python 目录 | 冒烟前置 `ensure_qt_plugin_path()` 同款 env（ui_common） |
+| venv 部署下 Qt 冒烟 QApplication 挂起（exit 127 弹窗） | 插件路径解析到基础 Python 目录 | 跑 `tools/fix_qt_plugins.py` 安装 sitecustomize（uv sync 后需重跑；亦可用 `ensure_qt_plugin_path()` 同款 env） |

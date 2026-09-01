@@ -21,6 +21,7 @@ python main.py --check          # 自检（渲染后自动退出）
 
 ```bash
 uv sync                                   # 自动装 Python + 全部依赖到 .venv
+.venv\Scripts\python.exe tools/fix_qt_plugins.py   # 安装 Qt 插件指路（uv sync 重建 venv 后需重跑）
 .venv\Scripts\python.exe main.py          # 运行
 ```
 
@@ -36,7 +37,9 @@ uv pip install --no-index --find-links wheels/ -e .   # 或按 export 清单安�
 
 **关于 Qt 插件弹窗**（"no Qt platform plugin could be initialized"）：
 venv 等独立部署下 PyQt5 可能把插件目录解析到基础 Python 安装目录。
-程序已在启动时自动指路（`widgets/ui_common.ensure_qt_plugin_path`）；
+程序主入口已自动指路（`widgets/ui_common.ensure_qt_plugin_path`）；
+模块冒烟等任意脚本由 `tools/fix_qt_plugins.py` 安装的 sitecustomize 兜底
+（Python 3.14 起不再从当前目录加载 sitecustomize，故须装入 site-packages）。
 如仍报错，可手工把 PyQt5 安装目录下的 `PyQt5/Qt5/plugins` 整个文件夹
 复制到可执行程序同级目录（用户验证可行的兜底方案）。
 
@@ -49,7 +52,7 @@ ZIP 归档，内含：
 │  step_list.json     步骤列表（组/列表/步骤，执行序）
 │  variables.json     全局变量树
 │  composites.json    合成卡片定义（tree + 三段签名 sigs）
-│  executor.json      执行热键配置（工程自带）
+│  executor.json      执行热键 + 停止方式配置（工程自带）
 ├─assets/             资源（图片等）
 └─actions/            步骤模板（随工程分发，打开工程用包内版本）
 ```
@@ -60,7 +63,7 @@ ZIP 归档，内含：
 全量回归一条命令：
 
 ```bash
-python tests/smoke_all.py   # 49 模块冒烟 + 1 个工程加载自检，失败非零退出
+python tests/smoke_all.py   # 50 模块冒烟 + 1 个工程加载自检，失败非零退出
 ```
 
 ## 文档

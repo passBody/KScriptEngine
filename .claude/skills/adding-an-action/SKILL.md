@@ -37,6 +37,9 @@ KScript 的 action = `Step` 子类模板（`actions/<类别>/<名字>.py`），�
   `_mod._new_control = lambda: 桩()`。**绝不用 `import 模块 as _mod`** —— 包导入缓存
   使桩挂到旧模块对象上，冒烟会触发真实按键/鼠标（按键.py 顶部有完整注释）
 - `time.sleep` 同样经 `_mod.time.sleep` 桩替换（冒烟不等真实延时）
+- **步骤内长等待用 `from model.run_interrupt import interruptible_sleep`**（立即停止 ~20ms
+  内中断；未登记事件时即普通 sleep）——延时、连点间隔、拖拽插值均已接入；
+  冒烟对应经 `_mod.interruptible_sleep` 桩替换
 - 冒烟**零真实输入**：桩记录调用并断言参数（如 `called == [(key, duration)]`）
 - 空常量陷阱：空字符串过不了 StepIOWidget 校验，触达 `run()` 的空值守卫要经
   「string 变量引用 → 空串」（仿按键.py 的 `{{empty_key}}` 用例）

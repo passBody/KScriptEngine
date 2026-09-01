@@ -78,8 +78,8 @@ class _ExecBridge(QObject):
 
 
 # 模拟注入点：冒烟测试替换以避开真实热键/线程（与 picker 包装同思路）
-def _make_step_runner(store, only_path=None):
-    return StepRunner(store, only_path)
+def _make_step_runner(store, only_path=None, stop_mode="after_step"):
+    return StepRunner(store, only_path, stop_mode)
 
 
 def _make_hotkey_listener(hotkey, on_toggle):
@@ -264,7 +264,8 @@ class MainWindow(QMainWindow):
             if not only:
                 LogModel.instance().warning(
                     "仅执行当前列表：未选中任何列表，按全部列表执行")
-        self._runner = _make_step_runner(sl_mgr.store, only)
+        self._runner = _make_step_runner(
+            sl_mgr.store, only, self._current_stop_mode())
         self._runner_gen += 1
         gen = self._runner_gen
         self._runner.add_state_listener(
@@ -345,7 +346,7 @@ class MainWindow(QMainWindow):
             self._set_exec_status("执行中……（按热键停止）")
             self._set_exec_locked(True)
         elif st is StepRunnerState.STOPPING:
-            self._set_exec_status("停止中……（当前步骤完成后停）")
+            self._set_exec_status("停止中……（%s）" % self._stop_hint())
         else:
             self._set_exec_status(
                 "待命：按 %s 执行/停止" % self._current_hotkey())
@@ -430,7 +431,8 @@ class MainWindow(QMainWindow):
         sl_mgr = self._managers[0]
         assert isinstance(sl_mgr, StepListManagementTree)
         only = sl_mgr.current_path if self._exec_scope == "current" else None
-        self._runner = _make_step_runner(sl_mgr.store, only)
+        self._runner = _make_step_runner(
+            sl_mgr.store, only, self._current_stop_mode())
         gen = self._runner_gen
         self._runner.add_state_listener(
             lambda st, g=gen: self._exec_bridge.runner_state.emit((g, st)))
@@ -463,9 +465,9 @@ class MainWindow(QMainWindow):
         else:
             self._exec_btn.setToolTip(
                 "执行（范围：%s，右键切换）：点击进入待命，按下热键开始执行，"
-                "再按停止（当前步骤完成后停）。\n"
+                "再按停止（%s）。\n"
                 "热键勿与步骤按键冲突（模拟按键也会被监听）；模拟输入到游戏窗口需管理员运行。"
-                % scope_text)
+                % (scope_text, self._stop_hint()))
 
     # ---- 执行范围（全部列表 / 仅当前列表；右键执行按钮切换） ----
     def _on_sl_errors_changed(self, n: int) -> None:
@@ -510,13 +512,14 @@ class MainWindow(QMainWindow):
             self._rebuild_runner()
 
     def _on_settings_clicked(self) -> None:
-        """打开设置弹窗（触发热键配置）；保存 → setting.json + .kscp/executor.json。"""
+        """打开设置弹窗（触发热键 + 停止方式）；保存 → .kscp/executor.json。"""
         if self._package is None:
             return
-        dlg = SettingsDialog(self._current_hotkey(), self)
+        dlg = SettingsDialog(
+            self._current_hotkey(), self._current_stop_mode(), self)
         if dlg.exec_() != QDialog.Accepted:
             return
-        self._apply_hotkey(dlg.hotkey())
+        self._apply_settings(dlg.hotkey(), dlg.stop_mode())
 
     def _current_hotkey(self) -> str:
         """当前生效热键：.kscp 内 executor.json 优先（工程自带配置）；缺失/非法 → 默认 `` ` ``。
@@ -536,16 +539,45 @@ class MainWindow(QMainWindow):
                 LogModel.instance().warning("executor.json 无法读取，使用默认热键")
         return "`"
 
-    def _apply_hotkey(self, key: str) -> None:
-        """保存热键到工程包 executor.json（有路径则立即落盘 .kscp）。
+    def _current_stop_mode(self) -> str:
+        """当前停止方式：executor.json 的 stop_mode（immediate/after_step）。
+
+        缺失/非法 → 默认 ``after_step``（旧工程 executor.json 无该字段，
+        静默回退不打扰；显式非法值才告警）。
+        """
+        if self._package is not None and self._package.exists("executor.json"):
+            try:
+                data = json.loads(
+                    self._package.read_file("executor.json").decode("utf-8"))
+                if isinstance(data, dict):
+                    mode = data.get("stop_mode", "after_step")
+                    if mode in ("immediate", "after_step"):
+                        return mode
+                    LogModel.instance().warning(
+                        "executor.json 停止方式非法，使用默认（当前步骤结束后停止）")
+            except (ValueError, UnicodeDecodeError):
+                LogModel.instance().warning(
+                    "executor.json 无法读取，使用默认停止方式")
+        return "after_step"
+
+    def _stop_hint(self) -> str:
+        """停止方式提示文案（状态栏/按钮 tooltip 共用）。"""
+        if self._current_stop_mode() == "immediate":
+            return "立即停止"
+        return "当前步骤结束后停止"
+
+    def _apply_settings(self, key: str, stop_mode: str) -> None:
+        """保存热键 + 停止方式到工程包 executor.json（有路径则立即落盘 .kscp）。
 
         不写 setting.json（executor.json 为唯一来源）。待命（监听中）时
-        重建监听器使新热键即时生效。
+        重建监听器使新热键即时生效；执行器同样按新停止方式重建。
         """
+        mode = "immediate" if stop_mode == "immediate" else "after_step"
         if self._package is not None:
             self._package.write_file(
                 "executor.json",
-                json.dumps({"hotkey": key}, ensure_ascii=False).encode("utf-8"))
+                json.dumps({"hotkey": key, "stop_mode": mode},
+                           ensure_ascii=False).encode("utf-8"))
             if self._kscp_path:
                 try:
                     self._package.save(self._kscp_path)
@@ -560,7 +592,11 @@ class MainWindow(QMainWindow):
                 key, self._exec_bridge.hotkey_toggle.emit)
             self._hotkey_listener.start()
             self._set_exec_status("待命：按 %s 执行/停止" % key)
-        LogModel.instance().info("执行热键已设为 %s" % key)
+        # 待命执行器按新停止方式重建（立即生效；执行中下次待命生效）
+        if self._runner is not None and self._runner.state is StepRunnerState.READY:
+            self._rebuild_runner()
+        LogModel.instance().info(
+            "执行设置已更新：热键 %s，停止方式 %s" % (key, mode))
 
     def _set_exec_locked(self, locked: bool) -> None:
         """执行期间锁定所有影响执行器的 GUI 编辑入口：
@@ -568,7 +604,7 @@ class MainWindow(QMainWindow):
         * 步骤列表树 + 卡片视图 → **只读模式**：条目仍可点击切换查看列表、
           卡片悬停缩放动画保留，但拖拽/右键/Del/勾选/卡片编辑全禁
         * 变量/模板/资源树与其预览 → 整树禁用（无查看需求）
-        * 管理菜单（导入模板）、文件菜单新建/打开（换工程）、设置按钮（改热键）禁用
+        * 管理菜单（导入模板）、文件菜单新建/打开（换工程）、设置按钮（改热键/停止方式）禁用
         * 执行按钮保留（停止通道）；日志面板与保存只读无害不锁
         """
         if self._exec_locked == locked:
@@ -1266,9 +1302,10 @@ class DemoStep(Step):
         class _FakeRunner:
             """桩执行器：状态手动置位，记录 start/request_stop 调用。"""
 
-            def __init__(self, store, only=None):
+            def __init__(self, store, only=None, stop_mode="after_step"):
                 self.store = store
                 self.only = only            # 单列表范围（only_path）
+                self.stop_mode = stop_mode  # 停止方式（应来自 executor.json）
                 self.state = StepRunnerState.READY
                 self.calls = []
                 self._listeners = []
@@ -1291,7 +1328,8 @@ class DemoStep(Step):
                     cb(st)
 
         _orig_mk_runner = _make_step_runner
-        _make_step_runner = lambda store, only=None: _FakeRunner(store, only)
+        _make_step_runner = lambda store, only=None, stop_mode="after_step": \
+            _FakeRunner(store, only, stop_mode)
         try:
             win_i2 = MainWindow()
             win_i2._open_package(KscpPackage.create_empty(), None)
@@ -1299,6 +1337,7 @@ class DemoStep(Step):
             win_i2._exec_btn.click()                    # 待命 → 假 runner（READY）
             fake1 = win_i2._runner
             assert isinstance(fake1, _FakeRunner)
+            assert fake1.stop_mode == "after_step"      # executor.json 缺失 → 默认停止方式
             fake1._set(StepRunnerState.RUNNING)         # 模拟开始执行
             app.processEvents()
             assert "执行中" in win_i2._exec_status.text()
@@ -1384,22 +1423,33 @@ class DemoStep(Step):
     finally:
         _make_hotkey_listener = _orig_mk_listener
 
-    # ---- 设置按钮（活动栏底部）与热键落盘 ----
+    # ---- 设置按钮（活动栏底部）与热键/停止方式落盘 ----
     # 设置按钮 = 瞬时按钮（点击后无样式残留）；弹窗细节冒烟见 widgets.settings_dialog
     assert not win_exec._settings_btn.isCheckable()
-    # _apply_hotkey：只写工程包 executor.json（不碰 setting.json——executor.json 唯一来源）
-    win_exec._apply_hotkey("g")
+    # _apply_settings：只写工程包 executor.json（不碰 setting.json——executor.json 唯一来源）
+    win_exec._apply_settings("g", "immediate")
     assert win_exec._package.exists("executor.json")
     data = json.loads(win_exec._package.read_file("executor.json").decode("utf-8"))
-    assert data == {"hotkey": "g"}, data
+    assert data == {"hotkey": "g", "stop_mode": "immediate"}, data
     # 工程优先：_current_hotkey 读 executor.json；缺失回退默认 "`"
     assert win_exec._current_hotkey() == "g"
+    # _current_stop_mode：读 executor.json；立即停止 → 状态栏文案随之变化
+    assert win_exec._current_stop_mode() == "immediate"
+    win_exec._exec_bridge.runner_state.emit(
+        (win_exec._runner_gen, StepRunnerState.STOPPING))
+    assert "立即停止" in win_exec._exec_status.text()
     win_exec._package.remove("executor.json")
     try:
         assert win_exec._current_hotkey() == "`"      # 缺失 → 默认热键
+        assert win_exec._current_stop_mode() == "after_step"
     finally:
         win_exec._package.write_file(
             "executor.json", b'{"hotkey": "g"}')
+    # 旧格式（无 stop_mode 字段）→ 静默回退 after_step（不打扰）
+    assert win_exec._current_stop_mode() == "after_step"
+    win_exec._package.write_file(
+        "executor.json", '{"hotkey": "g", "stop_mode": "bad"}'.encode("utf-8"))
+    assert win_exec._current_stop_mode() == "after_step"   # 非法值 → 回退 + 告警日志
 
     # ---- 代际标记（随附修复）：陈旧 runner 迟到 READY 不覆盖新 runner 状态 ----
     # 本段再次点击执行按钮 → 重新桩替换监听工厂（冒烟不得真实全局监听）

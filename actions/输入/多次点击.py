@@ -25,6 +25,7 @@ from typing import List, Optional, Tuple
 
 from libs.key_control import InputControl
 from model.log_model import LogModel
+from model.run_interrupt import interruptible_sleep
 from model.step import Step, StepStatus
 
 __all__ = ["MultiClick"]
@@ -86,7 +87,9 @@ class MultiClick(Step):
         ctl = _new_control()
         for i, (x, y) in enumerate(pts):
             if i and interval:
-                time.sleep(interval)   # 点与点之间等待（末次后不等待）
+                # 可中断睡眠：立即停止时中断等待并结束本步骤（不再点击剩余点）
+                if interruptible_sleep(interval):
+                    break
             ctl.mouse_click(x, y)
         return 1
 
@@ -134,9 +137,9 @@ if __name__ == "__main__":
             called.append((x, y, duration))
 
     _mod._new_control = lambda: _StubCtl()
-    _orig_sleep = _mod.time.sleep
     slept = []
-    _mod.time.sleep = lambda t: slept.append(t)
+    _orig_sleep = _mod.interruptible_sleep
+    _mod.interruptible_sleep = lambda t: (slept.append(t), False)[1]
 
     # 正常：两点 + 间隔（点间 sleep 一次）
     m.io.change_value("input", 0, "100,200;300,400")
@@ -165,5 +168,5 @@ if __name__ == "__main__":
     assert isinstance(m2, MultiClick)
     assert m2.io.to_format_string() == m.io.to_format_string()
 
-    _mod.time.sleep = _orig_sleep
+    _mod.interruptible_sleep = _orig_sleep
     print("MultiClick smoke OK")

@@ -45,6 +45,16 @@ def validate_char_key(key, name):
     return key.lower()
 
 
+def _interruptible_sleep(seconds):
+    """插值等待：执行器「立即停止」时提前返回 True（惰性导入避免循环依赖）。"""
+    try:
+        from model.run_interrupt import interruptible_sleep
+        return interruptible_sleep(seconds)
+    except ImportError:
+        time.sleep(seconds)
+        return False
+
+
 def key_char(key):
     """从 pynput 按键对象提取字符（纯函数，便于测试）。
 
@@ -130,7 +140,8 @@ class InputControl:
             sy = (y2 - y1) / n
             t = duration / n
             for i in range(1, n + 1):
-                time.sleep(t)
+                if _interruptible_sleep(t):
+                    break          # 立即停止：中断插值，直接松开结束
                 self.mouse_control.position = (round(x1 + sx * i), round(y1 + sy * i))
         self.mouse_control.release(mouse.Button.left)
 
