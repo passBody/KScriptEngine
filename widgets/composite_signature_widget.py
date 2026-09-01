@@ -53,16 +53,16 @@ class _Section(QWidget):
         self._muting = False      # _add_row 构造期静音 cellChanged/currentTextChanged
         cols = ["名", "类型"] + (["默认值"] if with_default else [])
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(2)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(4)
         head = QHBoxLayout()
         if titled:
             head.addWidget(QLabel(title))
         head.addStretch(1)
         b_add = QPushButton("+")
-        b_add.setFixedWidth(28)
+        b_add.setFixedWidth(32)
         b_rem = QPushButton("−")
-        b_rem.setFixedWidth(28)
+        b_rem.setFixedWidth(32)
         head.addWidget(b_rem)
         head.addWidget(b_add)
         lay.addLayout(head)
@@ -71,9 +71,19 @@ class _Section(QWidget):
         vh = self._tw.verticalHeader()
         if vh is not None:
             vh.setVisible(False)
+            vh.setDefaultSectionSize(32)     # 行高加大（用户反馈操作空间狭挤）
         h = self._tw.horizontalHeader()
         if h is not None:
             h.setSectionResizeMode(QHeaderView.Stretch)
+            h.setMinimumSectionSize(96)
+            if with_default:
+                self._tw.setColumnWidth(0, 160)
+                self._tw.setColumnWidth(1, 120)
+                self._tw.setColumnWidth(2, 120)
+            else:
+                self._tw.setColumnWidth(0, 180)
+                self._tw.setColumnWidth(1, 140)
+        self._tw.setMinimumHeight(200)       # 每段表足够高，避免滚动条过挤
         # 名列编辑居中：委托把编辑期 QLineEdit 设居中（显示态经 setTextAlignment）
         self._tw.setItemDelegateForColumn(0, _CenteredTextDelegate(self._tw))
         self._types = ProjectVariable.supported_types()
@@ -245,9 +255,14 @@ class CompositeSignatureDialog(QDialog):
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("编辑签名")
+        # 操作空间充裕（用户反馈：原自动尺寸狭挤、UI 显示不全）
+        self.resize(640, 540)
+        self.setMinimumSize(560, 480)
         self._sig_widget = CompositeSignatureWidget(self)
         self._sig_widget.set_signature(sig)
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(8)
         lay.addWidget(self._sig_widget)
         # 右下角确定/取消（QDialogButtonBox 默认右对齐）
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -326,6 +341,8 @@ if __name__ == "__main__":
     # ---- CompositeSignatureDialog：弹窗载入 + 内嵌编辑 + signature() 读取 ----
     # 不调 exec_（模态会阻塞）：直接构造 + 操控内嵌 widget + 读 signature()。
     dlg = CompositeSignatureDialog(sig)
+    # 操作空间充裕（用户反馈原自动尺寸狭挤）：最小 560×480
+    assert dlg.minimumWidth() >= 560 and dlg.minimumHeight() >= 480
     assert dlg._sig_widget._in._tw.rowCount() == 1     # 载入：输入段 1 行（x）
     assert dlg._sig_widget._out._tw.rowCount() == 1    # 输出段 1 行（y）
     assert dlg._sig_widget._loc._tw.rowCount() == 1    # 局部段 1 行（t）

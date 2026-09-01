@@ -35,6 +35,7 @@ MODULES = [
     "model.composite_signature", "model.placeholder_step",
     "widgets.activity_bar", "widgets.image_overlay", "widgets.log_widget",
     "widgets.main_widget", "widgets.management_trees",
+    "widgets.mark_preview_view",
     "widgets.composite_local_picker", "widgets.composite_signature_widget",
     "widgets.composite_tree_widget",
     "widgets.resource_tree_widget", "widgets.settings_dialog",

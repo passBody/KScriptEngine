@@ -178,6 +178,11 @@ class StepIOWidget:
         """关联的变量树（自定义视图解析 ``{{变量}}`` 引用用）。"""
         return self._tree
 
+    @property
+    def package(self) -> "KscpPackage":
+        """关联的工程包（资源类常量读写/校验用，如素材预览读取资源路径）。"""
+        return self._package
+
     def set_optional_inputs(self, flags: List[bool]) -> None:
         """设置输入槽可选标记（Step 签名注入；不足补 False、多余忽略）。
 

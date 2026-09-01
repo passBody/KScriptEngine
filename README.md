@@ -60,7 +60,7 @@ ZIP 归档，内含：
 全量回归一条命令：
 
 ```bash
-python tests/smoke_all.py   # 48 模块冒烟 + 1 个工程加载自检，失败非零退出
+python tests/smoke_all.py   # 49 模块冒烟 + 1 个工程加载自检，失败非零退出
 ```
 
 ## 文档

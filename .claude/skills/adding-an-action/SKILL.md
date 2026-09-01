@@ -20,6 +20,9 @@ KScript 的 action = `Step` 子类模板（`actions/<类别>/<名字>.py`），�
   **解析为 None** 传入 run()、一旦填值仍按类型校验；仅输入槽支持、输出槽恒必须；
   **run() 必须容忍可选槽的 None**（典型：编辑期辅助参数，如鼠标点击的素材图片）
 - 输入模拟类模板必须提供 `_new_control()` 桩工厂（冒烟替换用，仿 `按键.py`）
+- 鼠标类自定义视图的**素材预览/设置点位复用** `widgets.mark_preview_view.MarkPreviewView`
+  （io/素材槽/mode/read_points/write_points 参数化，合成样式 dot/rect/dots 齐备）——
+  不要在新 action 里再复制一份缩略图/弹窗代码
 - `__all__ = ["类名"]`
 - `run()` 错误路径：置 `StepStatus.ERROR` + `LogModel.instance().error(...)`，**不抛异常**，返回 1；
   错误消息与守卫风格与同类模板保持一致（分开守卫或合并守卫，仿照按键.py）
