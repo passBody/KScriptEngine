@@ -23,9 +23,12 @@
     sl2 = StepList.from_format_strings(fmts, mgr)   # 由格式串还原
 """
 
-from typing import Callable, Iterator, List, TYPE_CHECKING
+from typing import Callable, Iterator, List, Optional, TYPE_CHECKING
 
 from model.step import Step
+from model.composite_card import CompositeCard
+from model.log_model import LogModel
+from model.placeholder_step import PlaceholderStep
 
 if TYPE_CHECKING:
     from model.step_manager import StepManager
@@ -75,37 +78,66 @@ class StepList:
     @classmethod
     def from_format_strings(cls, fmts: List[str],
                             manager: "StepManager") -> "StepList":
-        """由格式串列表还原步骤列表；任一坏条目（非法编码或无匹配）→ ``ValueError``（带「第 N 条」下标）。"""
+        """由格式串列表还原步骤列表；坏条目 → 红色占位卡片（**不报错退出**）。
+
+        条目可为普通步骤格式串（base64，由 :meth:`StepManager.from_format_string`
+        解码）或合成卡片引用标记（``@合成卡片:<路径>``，由
+        :meth:`CompositeCard.from_marker` 解码）——二者混存，故步骤列表与合成卡片
+        体内均可装合成卡片引用。
+
+        任一条目无法还原（非法编码 / 无匹配模板 / 空引用标记）→ 经
+        :meth:`_decode_one` 兜底为 :class:`PlaceholderStep`（红色占位卡片，保留
+        原格式串、写明失败原因）；占位卡片的 ``to_format_string`` 原样回吐原串，
+        故槽位数据不丢失——模板修复后**重新加载工程**即可还原该条。
+        """
         sl = cls()
-        for i, fmt in enumerate(fmts):
-            try:
-                step = manager.from_format_string(fmt)
-            except ValueError as e:
-                raise ValueError("步骤列表第 %d 条格式串无效: %s" % (i, e))
-            if step is None:
-                raise ValueError("步骤列表第 %d 条无法还原: 没有可匹配的模板" % i)
-            sl._steps.append(step)
+        for fmt in fmts:
+            sl._steps.append(cls._decode_one(fmt, manager))
         return sl
+
+    @staticmethod
+    def _decode_one(fmt: str, manager: "StepManager") -> Step:
+        """解码单条格式串 → :class:`Step`（**永不抛、永不返回 None**）。
+
+        合成卡片标记 → :meth:`CompositeCard.from_marker`；否则 →
+        :meth:`StepManager.from_format_string`。任一失败（非法编码 / 无匹配模板 /
+        空引用标记）→ 返回 :class:`PlaceholderStep`（红色占位卡片，保留原格式串、
+        写明失败原因），不报错退出。
+
+        占位卡片的 ``to_format_string`` 原样回吐原 ``fmt`` → 下次加载仍走本方法
+        重试：模板已修复 → 还原为真实步骤；仍未修复 → 再次占位（稳定，不丢失数据）。
+        """
+        if CompositeCard.is_marker(fmt):
+            try:
+                return CompositeCard.from_marker(fmt, manager)
+            except ValueError as e:
+                LogModel.instance().warning("合成卡片引用无效，已占位：%s" % e)
+                return PlaceholderStep(fmt, manager.tree, manager.package,
+                                       reason="合成卡片引用无效：%s" % e)
+        try:
+            step = manager.from_format_string(fmt)
+        except ValueError as e:
+            LogModel.instance().warning("步骤格式串无效，已占位：%s" % e)
+            return PlaceholderStep(fmt, manager.tree, manager.package,
+                                   reason="格式串无效：%s" % e)
+        if step is None:
+            nm = PlaceholderStep._extract_name(fmt) or (fmt[:40] if fmt else "")
+            LogModel.instance().warning(
+                "步骤无匹配模板，已占位：%s" % (nm or "（未知）"))
+            return PlaceholderStep(
+                fmt, manager.tree, manager.package,
+                reason="没有可匹配的模板（名称/签名与注册表不符）")
+        return step
 
     def insert_format_strings(self, index: int, fmts: List[str],
                               manager: "StepManager") -> None:
         """把格式串列表解码后插入到 ``index``（保持顺序）。
 
-        事务性：先全部解码成功，再统一插入——任一条坏条目（非法编码或无匹配）
-        → :class:`ValueError`（带「第 N 条」下标），且不产生任何部分插入。
-        ``index`` 用 Python ``list.insert`` 语义（越界钳制，负数回绕）。
+        坏条目 → 红色占位卡片（同 :meth:`from_format_strings`，不报错、不阻断
+        其余条目插入）。``index`` 用 Python ``list.insert`` 语义（越界钳制，负数回绕）。
         """
-        decoded: List[Step] = []
         for i, fmt in enumerate(fmts):
-            try:
-                step = manager.from_format_string(fmt)
-            except ValueError as e:
-                raise ValueError("步骤列表第 %d 条格式串无效: %s" % (i, e))
-            if step is None:
-                raise ValueError("步骤列表第 %d 条无法还原: 没有可匹配的模板" % i)
-            decoded.append(step)
-        for i, step in enumerate(decoded):
-            self._steps.insert(index + i, step)
+            self._steps.insert(index + i, StepList._decode_one(fmt, manager))
 
     @classmethod
     def create_empty(cls) -> "StepList":
@@ -231,26 +263,38 @@ class DemoStep(Step):
     sl3b = StepList.from_format_strings(sl3.to_format_strings(), mgr)
     assert sl3b[0].enabled is False and sl3b[1].enabled is True
 
-    # 坏条目（严格报错，带下标）：
-    # ① 非法编码
-    try:
-        StepList.from_format_strings(["not*valid*"], mgr)
-        raise AssertionError("非法编码应抛 ValueError")
-    except ValueError as exc:
-        assert "第 0 条" in str(exc)
-    # ② 无匹配模板（伪造 name 的合法串）
+    # 坏条目 → 红色占位卡片（不报错退出；原串保留、写明原因、可被 do 跳过）：
     import base64 as _b64
     import json as _json
+    from model.log_model import LogModel
+    from model.placeholder_step import PlaceholderStep
+    from model.step import StepStatus
+    LogModel.instance().clear()
+    # ① 非法编码 → 占位（原因「格式串无效」），原串原样回吐
+    bad_enc = StepList.from_format_strings(["not*valid*"], mgr)
+    assert isinstance(bad_enc[0], PlaceholderStep)
+    assert bad_enc[0].to_format_string() == "not*valid*"     # 原串保留 → 槽位不丢失
+    assert "格式串无效" in bad_enc[0]._reason
+    # ② 无匹配模板（伪造 name 的合法串）→ 占位（原因「没有可匹配的模板」）
     fake = _b64.urlsafe_b64encode(_json.dumps(
         {"name": "别的步骤", "in": [], "out": [], "io": s1.io.to_format_string()},
         ensure_ascii=False).encode()).decode().rstrip("=")
-    try:
-        StepList.from_format_strings([fake], mgr)
-        raise AssertionError("无匹配应抛 ValueError")
-    except ValueError as exc:
-        assert "第 0 条" in str(exc)
+    bad_nomatch = StepList.from_format_strings([fake], mgr)
+    assert isinstance(bad_nomatch[0], PlaceholderStep)
+    assert bad_nomatch[0].to_format_string() == fake        # 原串保留
+    assert "没有可匹配的模板" in bad_nomatch[0]._reason
+    assert "别的步骤" in bad_nomatch[0].name                 # 实例名带原步骤名
+    # 占位卡片可被 do() 调度（跳过、置 ERROR、返回 1，不阻断）
+    assert bad_nomatch[0].do() == 1
+    assert bad_nomatch[0].status is StepStatus.ERROR
+    # 每个占位都打一条 warning（可定位失败原因）
+    assert sum(1 for e in LogModel.instance().entries
+               if e.level.name == "WARNING") >= 2
+    # 占位串往返稳定：再加载仍占位（原串不变，模板修复后才还原）
+    assert StepList.from_format_strings(
+        bad_nomatch.to_format_strings(), mgr)[0].to_format_string() == fake
 
-    # insert_format_strings：事务性解码后统一插入（保持顺序；list.insert 语义）
+    # insert_format_strings：保持顺序；list.insert 语义（越界钳制、负数回绕）
     sl4 = StepList.create_empty()
     sl4.insert_format_strings(0, fmts, mgr)          # 头部插入 → [f0, f1]
     assert sl4.to_format_strings() == fmts
@@ -260,20 +304,42 @@ class DemoStep(Step):
     assert sl4.to_format_strings() == [fmts[0], fmts[0], fmts[1], fmts[1]]
     sl4.insert_format_strings(-1, [fmts[0]], mgr)    # 负数回绕 → 倒数第 2
     assert sl4.to_format_strings() == [fmts[0], fmts[0], fmts[1], fmts[0], fmts[1]]
-    # 事务性：坏条目出现在中间 → 一条都不插入
+    # 坏条目在中间 → 三条都插入（中间为占位），不阻断其余
     sl5 = StepList.create_empty()
     sl5.add(s1)
-    try:
-        sl5.insert_format_strings(1, [fmts[0], "not*valid*", fmts[1]], mgr)
-        raise AssertionError("坏条目应抛 ValueError")
-    except ValueError as exc:
-        assert "第 1 条" in str(exc)
-    assert sl5.to_format_strings() == [s1.to_format_string()]   # 无部分插入
-    try:
-        sl5.insert_format_strings(0, [fake], mgr)    # 无匹配模板（复用上文 fake）
-        raise AssertionError("无匹配应抛 ValueError")
-    except ValueError as exc:
-        assert "第 0 条" in str(exc)
-    assert len(sl5) == 1
+    sl5.insert_format_strings(1, [fmts[0], "not*valid*", fmts[1]], mgr)
+    assert len(sl5) == 4                                   # s1 + 3 插入（含占位）
+    assert isinstance(sl5[2], PlaceholderStep)            # 中间坏条目 → 占位
+    assert sl5[2].to_format_string() == "not*valid*"
+    assert sl5[1].to_format_string() == fmts[0] \
+        and sl5[3].to_format_string() == fmts[1]
+    # 无匹配模板也走占位（不阻断）
+    sl5.insert_format_strings(0, [fake], mgr)
+    assert isinstance(sl5[0], PlaceholderStep)
+    assert len(sl5) == 5
+
+    # ---- 合成卡片引用标记：与普通步骤混存，往返一致 ----
+    from model.composite_card import CompositeCard
+    cc = CompositeCard("组/卡片X", tree, pkg)
+    sl_mix = StepList.create_empty()
+    sl_mix.add(s1)                                    # 普通步骤（s1 来自上文）
+    sl_mix.add(cc)                                    # 合成卡片引用
+    fmts_mix = sl_mix.to_format_strings()
+    assert fmts_mix[0] == s1.to_format_string()
+    assert fmts_mix[1] == "@合成卡片:组/卡片X", fmts_mix[1]
+    sl_back = StepList.from_format_strings(fmts_mix, mgr)
+    assert sl_back.to_format_strings() == fmts_mix    # 往返稳定
+    assert isinstance(sl_back[1], CompositeCard) and sl_back[1].ref == "组/卡片X"
+    # 单条合成卡片标记的列表也能还原
+    sl_cc = StepList.from_format_strings(["@合成卡片:列表/独"], mgr)
+    assert isinstance(sl_cc[0], CompositeCard) and sl_cc[0].ref == "列表/独"
+    # insert_format_strings 同样支持标记
+    sl_mix.insert_format_strings(1, ["@合成卡片:组/卡片Y"], mgr)
+    assert isinstance(sl_mix[1], CompositeCard) and sl_mix[1].ref == "组/卡片Y"
+    # 空 ref 标记 → 占位（不报错；原因「合成卡片引用无效」，原串保留）
+    bad_empty = StepList.from_format_strings(["@合成卡片:"], mgr)
+    assert isinstance(bad_empty[0], PlaceholderStep)
+    assert "合成卡片引用无效" in bad_empty[0]._reason
+    assert bad_empty[0].to_format_string() == "@合成卡片:"
 
     print("StepList smoke OK")

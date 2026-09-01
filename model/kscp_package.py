@@ -147,16 +147,19 @@ class KscpPackage:
 
         结构::
 
-            │  step_list.json   (b"{}")
-            │  variables.json   (b"{}")
-            └─assets           (空目录)
+            │  step_list.json    (b"{}")
+            │  variables.json    (b"{}")
+            │  composites.json   (b"{}")
+            └─assets            (空目录)
 
-        两个根 JSON 以空对象 ``{}`` 初始化，方便后续步骤列表、变量树等兄弟模型
-        直接载入；``assets/`` 为空目录。随后可 ``save(path)`` 落盘为 ``.kscp``。
+        三个根 JSON 以空对象 ``{}`` 初始化，方便后续步骤列表、变量树、合成卡片
+        等兄弟模型直接载入；``assets/`` 为空目录。随后可 ``save(path)`` 落盘为
+        ``.kscp``。
         """
         pkg = cls()
         pkg.add_file("step_list.json", b"{}")
         pkg.add_file("variables.json", b"{}")
+        pkg.add_file("composites.json", b"{}")
         pkg.make_dir("assets")
         return pkg
 
@@ -481,17 +484,21 @@ if __name__ == "__main__":
 
     # create_empty：空工程骨架
     empty = KscpPackage.create_empty()
-    assert empty.files == ["step_list.json", "variables.json"]
+    assert empty.files == ["composites.json", "step_list.json", "variables.json"]
     assert "assets" in empty.dirs
     assert empty.read_file("step_list.json") == b"{}"
     assert empty.read_file("variables.json") == b"{}"
-    assert empty.list_dir("/") == ["assets", "step_list.json", "variables.json"]
+    assert empty.read_file("composites.json") == b"{}"
+    assert empty.list_dir("/") == ["assets", "composites.json",
+                                   "step_list.json", "variables.json"]
     with tempfile.TemporaryDirectory() as td:
         empty_kscp = os.path.join(td, "empty.kscp")
         empty.save(empty_kscp)
         empty2 = KscpPackage.from_kscp(empty_kscp)
-        assert empty2.files == ["step_list.json", "variables.json"]
+        assert empty2.files == ["composites.json", "step_list.json",
+                                "variables.json"]
         assert empty2.is_dir("assets")
         assert empty2.read_file("variables.json") == b"{}"
+        assert empty2.read_file("composites.json") == b"{}"
 
     print("KscpPackage smoke OK")

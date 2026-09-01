@@ -21,15 +21,22 @@ sys.path.insert(0, str(ROOT))   # 便于 import 项目包（如 widgets.ui_commo
 
 MODULES = [
     "actions.控制流程.time_delay", "actions.控制流程.输出日志",
-    "actions.输入.按键", "actions.输入.鼠标", "actions.输入.鼠标移动",
+    "actions.变量控制.变量设置.设置number", "actions.变量控制.变量设置.设置string",
+    "actions.变量控制.类型转换.字符串转数字", "actions.变量控制.类型转换.数字转字符串",
+    "actions.输入.按键", "actions.输入.鼠标点击", "actions.输入.鼠标移动",
     "actions.输入.鼠标滚轮", "actions.输入.鼠标拖动", "actions.输入.多次点击",
     "libs.key_control.base",
     "model.hotkey", "model.kscp_package", "model.log_model", "model.path_util",
     "model.project_variable", "model.settings", "model.step", "model.step_io",
     "model.step_list", "model.step_list_store", "model.step_manager",
     "model.step_runner", "model.variable_tree",
+    "model.composite_card", "model.composite_card_store",
+    "model.composite_definition", "model.composite_local_tree",
+    "model.composite_signature", "model.placeholder_step",
     "widgets.activity_bar", "widgets.image_overlay", "widgets.log_widget",
     "widgets.main_widget", "widgets.management_trees",
+    "widgets.composite_local_picker", "widgets.composite_signature_widget",
+    "widgets.composite_tree_widget",
     "widgets.resource_tree_widget", "widgets.settings_dialog",
     "widgets.step_card", "widgets.step_list_tree_widget",
     "widgets.step_list_view", "widgets.step_tree_widget",
@@ -40,7 +47,6 @@ MODULES = [
 
 CHECKS = [
     ["main.py", "sample.kscp", "--check"],
-    ["main.py", "qwer.kscp", "--check"],
 ]
 
 

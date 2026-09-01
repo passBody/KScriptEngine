@@ -54,8 +54,14 @@ class StepManager:
     # ================================================================
     # 加载
     # ================================================================
-    def load(self) -> None:
-        """从 ``.kscp/actions`` 加载模板（幂等：每次清空注册表重建）。"""
+    def load(self, quiet: bool = False) -> None:
+        """从 ``.kscp/actions`` 加载模板（幂等：每次清空注册表重建）。
+
+        ``quiet=True`` 时不打「步骤模板加载完成」摘要行——批量导入
+        (:meth:`copy_source_templates`) 逐文件调 :meth:`add_template`，
+        每次都会触发一次 ``load``，若每次都打摘要会刷屏（N 个文件 → N 行）。
+        单次操作与启动仍保留摘要。
+        """
         self._registry = {}
         files = sorted(f for f in self._package.files      # files 是属性不是方法
                        if f.startswith("actions/") and f.endswith(".py"))
@@ -64,8 +70,9 @@ class StepManager:
             ok, count = self._load_file(rel)
             if ok:
                 loaded += count
-        LogModel.instance().info("步骤模板加载完成: 模板 %d 个, 文件 %d 个"
-                                 % (loaded, len(files)))
+        if not quiet:
+            LogModel.instance().info("步骤模板加载完成: 模板 %d 个, 文件 %d 个"
+                                     % (loaded, len(files)))
 
     def _load_file(self, rel: str) -> Tuple[bool, int]:
         """加载单个模板文件；返回 (文件是否成功, 注册成功的模板数)。"""
@@ -146,7 +153,9 @@ class StepManager:
     def from_format_string(self, fmt: str) -> Optional[Step]:
         """遍历注册表由格式串还原步骤实例。
 
-        非法编码 → 重抛 ValueError；全部不匹配 → 日志报错返回 None。
+        非法编码 → 重抛 ValueError；全部不匹配 → 返回 None（由调用方
+        :meth:`model.step_list.StepList._decode_one` 兜底为占位卡片，不在此记日志
+        以免与占位告警重复）。
         """
         for cls, _rel in self._registry.values():
             try:
@@ -155,9 +164,20 @@ class StepManager:
                 raise
             if step is not None:
                 return step
-        LogModel.instance().error(
-            "无法还原步骤格式化字符串: 没有可匹配的模板(名称/签名与注册表不符)")
         return None
+
+    # ================================================================
+    # 共享访问（只读）
+    # ================================================================
+    @property
+    def tree(self) -> VariableTree:
+        """关联的变量树（供合成卡片等兄弟模型取用，见 ``CompositeCard.from_marker``）。"""
+        return self._tree
+
+    @property
+    def package(self) -> KscpPackage:
+        """关联的工程包（同上）。"""
+        return self._package
 
     # ================================================================
     # 模板路径
@@ -169,26 +189,38 @@ class StepManager:
     # ================================================================
     # 模板操作（对 .py 文件；操作后自动 load() 刷新）
     # ================================================================
-    def add_template(self, src_py: str, dest_dir: str = "") -> bool:
-        """把本地 .py 加入工程 ``actions/<dest_dir>/``；成功 True，无贡献回滚 False。"""
+    def add_template(self, src_py: str, dest_dir: str = "",
+                     quiet: bool = False) -> bool:
+        """把本地 .py 加入工程 ``actions/<dest_dir>/``；成功 True，无贡献回滚 False。
+
+        ``quiet=True`` 供 :meth:`copy_source_templates` 批量导入逐文件调用——
+        压制「成功」info 与 ``load`` 摘要行，避免 N 个文件刷出 N×2 行；
+        失败/回滚仍记 ERROR（稀有且需让用户知道哪个文件没贡献）。
+        """
         base = os.path.basename(src_py)
         if not base.endswith(".py"):
             base += ".py"
         target = self._actions_rel(dest_dir, base)
         with open(src_py, "rb") as fh:
             data = fh.read()
-        return self._write_template(target, data, "添加模板")
+        return self._write_template(target, data, "添加模板", quiet)
 
     def _actions_rel(self, dest_dir: str, base: str) -> str:
         d = dest_dir.strip("/")
         return ("actions/%s/%s" % (d, base)) if d else ("actions/" + base)
 
-    def _write_template(self, target: str, data: bytes, what: str) -> bool:
-        """写盘 → load → 无贡献（非模板/重名被跳/注解非法）回滚删除；成功 info。"""
+    def _write_template(self, target: str, data: bytes, what: str,
+                        quiet: bool = False) -> bool:
+        """写盘 → load → 无贡献（非模板/重名被跳/注解非法）回滚删除；成功 info。
+
+        ``quiet=True``（批量导入逐文件）：压制 ``load`` 摘要与「成功」info；
+        失败/回滚的 ERROR 不受 ``quiet`` 影响（始终记，让用户看到哪个文件没贡献）。
+        """
         self._package.write_file(target, data)
-        self.load()
+        self.load(quiet=quiet)
         if any(rel == target for _cls, rel in self._registry.values()):
-            LogModel.instance().info("%s成功: %s" % (what, target))
+            if not quiet:
+                LogModel.instance().info("%s成功: %s" % (what, target))
             return True
         try:
             self._package.remove(target)
@@ -196,7 +228,7 @@ class StepManager:
             # 评审#16：回滚失败不再静默——孤儿模板文件残留会与注册表状态不一致
             LogModel.instance().warning(
                 "模板回滚失败（%s 可能残留于工程包）: %s" % (target, e))
-        self.load()
+        self.load(quiet=quiet)
         LogModel.instance().error(
             "%s失败, 已回滚: %s(文件中没有可注册的步骤模板)" % (what, target))
         return False
@@ -240,6 +272,11 @@ class StepManager:
         """把源码 ``actions/`` 下 .py 模板按相对目录全部加入工程；返回成功数。
 
         跳过 ``base.py`` / ``__init__.py`` / ``__pycache__``。
+
+        逐文件以 ``quiet=True`` 调 :meth:`add_template`：压制每个文件的
+        ``load`` 摘要与「添加模板成功」info（N 个文件否则刷出 N×2 行）；
+        失败/冲突仍记 ERROR，最终成功数由调用方
+        （:meth:`widgets.main_widget.MainWindow._on_import`）打一行摘要。
         """
         added = 0
         for root, dirs, files in os.walk(source_dir):
@@ -250,7 +287,7 @@ class StepManager:
                 src = os.path.join(root, name)
                 rel_dir = os.path.relpath(root, source_dir)
                 rel_dir = "" if rel_dir == "." else rel_dir.replace("\\", "/")
-                if self.add_template(src, rel_dir):
+                if self.add_template(src, rel_dir, quiet=True):
                     added += 1
         return added
 
@@ -428,7 +465,8 @@ class NoDcStep(Step):
     except ValueError:
         pass
 
-    # from_format_string：还原 / 非法编码重抛 / 无匹配 None+日志
+    # from_format_string：还原 / 非法编码重抛 / 无匹配返回 None（不再记日志；
+    # 由 StepList._decode_one 兜底为占位卡片并记 warning，避免重复）
     fmt = s.to_format_string()
     back = mgr.from_format_string(fmt)
     assert isinstance(back, Step)
@@ -438,12 +476,10 @@ class NoDcStep(Step):
         raise AssertionError("非法编码应抛 ValueError")
     except ValueError:
         pass
-    LogModel.instance().clear()
     fake = _b64.urlsafe_b64encode(_json.dumps(
         {"name": "别的步骤", "in": [], "out": [], "io": s.io.to_format_string()},
         ensure_ascii=False).encode()).decode().rstrip("=")
-    assert mgr.from_format_string(fake) is None
-    assert any("无法还原" in e.message for e in LogModel.instance().entries)
+    assert mgr.from_format_string(fake) is None     # 无匹配 → None（不记日志）
 
     # ---- 模板操作（增删复制粘贴剪切 / 拷贝入口） ----
     with tempfile.TemporaryDirectory() as td:
@@ -495,7 +531,9 @@ class NoDcStep(Step):
             raise AssertionError("未知路径应抛 ValueError")
         except ValueError:
             pass
-        # copy_source_templates：跳过 base/__init__/__pycache__，保目录结构
+        # copy_source_templates：跳过 base/__init__/__pycache__，保目录结构；
+        # 逐文件 quiet=True → 不刷「步骤模板加载完成 / 添加模板成功」，
+        # 但坏文件（无 Step 子类）的「添加模板失败」ERROR 仍记。
         src = os.path.join(td, "src_actions")
         os.makedirs(os.path.join(src, "子目录", "__pycache__"))
         for name, content in (
@@ -503,13 +541,20 @@ class NoDcStep(Step):
                 ("__init__.py", "pass\n"),
                 ("本地2.py", LOCAL.replace('name = "本地"', 'name = "本地2"')),
                 ("子目录/深层.py", LOCAL.replace('name = "本地"', 'name = "深层"')),
-                ("子目录/__pycache__/缓存.py", LOCAL)):
+                ("子目录/__pycache__/缓存.py", LOCAL),
+                ("坏文件.py", "pass\n")):              # 无 Step 子类 → 回滚 + ERROR
             with open(os.path.join(src, name), "w", encoding="utf-8") as fh:
                 fh.write(content)
-        assert mgr.copy_source_templates(src) == 2
+        LogModel.instance().clear()
+        assert mgr.copy_source_templates(src) == 2     # 坏文件失败不计入
         assert "本地2" in mgr.template_paths()
         assert "子目录/深层" in mgr.template_paths()
         assert not any("__pycache__" in f for f in pkg.files)
+        msgs = [e.message for e in LogModel.instance().entries]
+        assert not any("步骤模板加载完成" in m for m in msgs), msgs   # quiet 压制 load 摘要
+        assert not any("添加模板成功" in m for m in msgs), msgs       # quiet 压制逐文件成功
+        assert any("添加模板失败" in m and "坏文件.py" in m
+                   for m in msgs), msgs                              # 失败 ERROR 仍记
 
     # ---- 移动 / 分组操作 / 模板类访问（步骤管理树支持） ----
     # move_template：顶层 → 子目录成功

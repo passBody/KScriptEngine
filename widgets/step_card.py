@@ -36,6 +36,7 @@ from PyQt5.QtWidgets import (
 )
 
 from model.step import Step, StepStatus
+from model.placeholder_step import PlaceholderStep
 
 __all__ = ["StepCard", "card_size_for_screen"]
 
@@ -150,10 +151,15 @@ class StepCard(QFrame):
         # 颜色刷新钩子②：资源类按钮经 picker 选择后重检
         # 扁平化包装：每次只包最原始 picker（经 _kscript_orig 回溯），
         # 旧包装器被替换后即无引用、可回收——避免视图重建时链式累积、已弃卡片滞留
+        # 包装器体读 ``_picker._kscript_orig``（调用时取属性，非闭包 ``orig``）：
+        # 这样 :meth:`CompositeManagementTree._apply_local_picker` 换底层 picker 时
+        # 只改 ``_kscript_orig`` 属性即可，**不必替换包装器**——否则包装器（含
+        # deferred ``_io_edited`` 刷新钩子）被顶掉后，``…`` 按钮选值不再触发刷新，
+        # 表现为「按钮选合法值后不红、但错误提示词残留」（手输因 textChanged 不受影响）。
         orig = getattr(step.io.picker, "_kscript_orig", step.io.picker)
 
         def _picker(tree, vtype, parent):
-            result = orig(tree, vtype, parent)
+            result = _picker._kscript_orig(tree, vtype, parent)
             QTimer.singleShot(0, self._io_edited)   # 延迟到值落地后（下一事件循环迭代）重检 + 通知
             return result
 
@@ -226,6 +232,9 @@ class StepCard(QFrame):
         self.setProperty("state", self._step.status.name.lower())
         self.setProperty("active", self._step.enabled)
         self.setProperty("valid", self._step.io.is_valid)
+        # 占位卡片（无法还原）→ 红色背景（broken）；与 io 非法（valid）同级红，
+        # 二者互斥（占位 io 空签名恒合规）。
+        self.setProperty("broken", isinstance(self._step, PlaceholderStep))
         self.setProperty("selected", self._selected)
         self._name.setProperty("active", self._step.enabled)
         self._btn_active.setProperty("active", self._step.enabled)

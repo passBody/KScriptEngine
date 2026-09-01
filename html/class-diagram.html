@@ -1,0 +1,1029 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KScript 类图</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; margin: 0; background: #f6f8fa; color: #1f2328; line-height: 1.6; }
+  header { background: #1f2328; color: #fff; padding: 26px 32px; }
+  header h1 { margin: 0 0 6px; font-size: 26px; font-weight: 650; }
+  header .sub { opacity: .78; font-size: 14px; max-width: 920px; }
+  nav { margin: 16px 0 0; display: flex; gap: 8px; flex-wrap: wrap; }
+  nav a { color: #fff; background: #2d333b; padding: 5px 13px; border-radius: 14px; text-decoration: none; font-size: 13px; }
+  nav a:hover { background: #444c56; }
+  .legend { margin: 16px 0 0; font-size: 13px; opacity: .9; display: flex; gap: 18px; flex-wrap: wrap; }
+  .legend b { font-family: ui-monospace, Consolas, monospace; color: #79c0ff; }
+  #load-status { margin-top: 12px; font-size: 13px; opacity: .9; }
+  main { max-width: 1320px; margin: 0 auto; padding: 22px 20px 60px; }
+  section { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; margin: 20px 0; padding: 22px 26px; }
+  section h2 { margin: 0 0 4px; font-size: 20px; font-weight: 650; }
+  section h2 .path { font-size: 12px; color: #6e7781; font-weight: 400; font-family: ui-monospace, Consolas, monospace; margin-left: 8px; }
+  section p.desc { color: #57606a; margin: 4px 0 14px; font-size: 14px; }
+  .mermaid { font-family: ui-monospace, Consolas, monospace; text-align: center; padding: 6px; overflow-x: auto; }
+  .mermaid:not([data-processed]) { white-space: pre; text-align: left; color: #6e7781; font-size: 12px; background: #f6f8fa; border: 1px dashed #d0d7de; border-radius: 6px; padding: 10px; }
+  footer { text-align: center; color: #6e7781; font-size: 13px; padding: 24px 0; }
+  footer code { font-family: ui-monospace, Consolas, monospace; background: #eff1f3; padding: 1px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>KScript 类图</h1>
+  <div class="sub">PyQt5 步骤化脚本引擎 · main → widgets(UI) → model(数据核心) ← actions(步骤模板) · libs/tools 辅助。共四张图：总览 + 三层细节。点击任一类框可打开对应源码文件。</div>
+  <nav>
+    <a href="#overview">总览</a>
+    <a href="#model">model 层</a>
+    <a href="#widgets">widgets 层</a>
+    <a href="#actions">actions+libs+tools</a>
+  </nav>
+  <div class="legend">
+    <span><b>&lt;|--</b> 继承</span>
+    <span><b>*--</b> 组合(owned)</span>
+    <span><b>o--</b> 聚合(ref)</span>
+    <span><b>--&gt;</b> 关联/持有</span>
+    <span><b>..&gt;</b> 依赖(瞬时)</span>
+    <span><b>&lt;&lt;X&gt;&gt;</b> 基类/构造型</span>
+  </div>
+  <div id="load-status">正在加载 Mermaid…</div>
+</header>
+<main>
+
+<section id="overview">
+  <h2>总览<span class="path">全项目跨层关系</span></h2>
+  <p class="desc">入口 → MainWindow 接线 model 全家桶；MainWindow 经 ManagementTree 簇管理 UI；StepListStore→StepList→Step→StepIOWidget 是执行数据主脊；StepRunner 消费 store，HotkeyListener 驱动 runner；actions 各步骤继承 Step 并经 InputControl 模拟输入。</p>
+<script type="text/mermaid">
+classDiagram
+direction TB
+package main_entry { class main }
+package widgets_UI {
+  class MainWindow
+  class ManagementTree
+  class StepListManagementTree
+  class StepListView
+  class StepCard
+  class ActivityBar
+  class LogWidget
+}
+package model_core {
+  class KscpPackage
+  class ProjectVariable
+  class VariableTree
+  class Step
+  class StepIOWidget
+  class StepList
+  class StepListStore
+  class StepManager
+  class StepRunner
+  class HotkeyListener
+  class Settings
+  class LogModel
+}
+package actions_templates {
+  class KeyClick
+  class MouseClick
+  class LogStep
+  class TimeDelay
+}
+package libs_tools {
+  class InputControl
+  class _MarkerDialog
+}
+
+main ..> MainWindow
+MainWindow *-- ManagementTree
+MainWindow *-- ActivityBar
+MainWindow *-- LogWidget
+MainWindow --> StepManager
+MainWindow --> StepListStore
+MainWindow --> VariableTree
+MainWindow --> KscpPackage
+MainWindow --> StepRunner
+MainWindow --> HotkeyListener
+MainWindow ..> Settings
+
+ManagementTree <|-- StepListManagementTree
+StepListManagementTree *-- StepListView
+StepListView *-- StepCard
+StepCard --> Step
+StepCard --> StepIOWidget
+
+StepManager --> Step
+StepListStore *-- StepList
+StepList *-- Step
+Step *-- StepIOWidget
+StepRunner --> StepListStore
+HotkeyListener ..> StepRunner
+VariableTree *-- ProjectVariable
+ProjectVariable ..> KscpPackage
+Step ..> LogModel
+LogWidget --> LogModel
+
+Step <|-- KeyClick
+Step <|-- MouseClick
+Step <|-- LogStep
+Step <|-- TimeDelay
+KeyClick ..> InputControl
+MouseClick ..> InputControl
+MouseClick ..> _MarkerDialog
+
+click main href "../main.py"
+click MainWindow href "../widgets/main_widget.py"
+click ManagementTree href "../widgets/management_trees.py"
+click StepListManagementTree href "../widgets/management_trees.py"
+click StepListView href "../widgets/step_list_view.py"
+click StepCard href "../widgets/step_card.py"
+click ActivityBar href "../widgets/activity_bar.py"
+click LogWidget href "../widgets/log_widget.py"
+click KscpPackage href "../model/kscp_package.py"
+click ProjectVariable href "../model/project_variable.py"
+click VariableTree href "../model/variable_tree.py"
+click Step href "../model/step.py"
+click StepIOWidget href "../model/step_io.py"
+click StepList href "../model/step_list.py"
+click StepListStore href "../model/step_list_store.py"
+click StepManager href "../model/step_manager.py"
+click StepRunner href "../model/step_runner.py"
+click HotkeyListener href "../model/hotkey.py"
+click Settings href "../model/settings.py"
+click LogModel href "../model/log_model.py"
+click KeyClick href "../actions/输入/按键.py"
+click MouseClick href "../actions/输入/鼠标.py"
+click LogStep href "../actions/控制流程/输出日志.py"
+click TimeDelay href "../actions/控制流程/time_delay.py"
+click InputControl href "../libs/key_control/base.py"
+click _MarkerDialog href "../tools/image_marker.py"
+</script>
+</section>
+
+<section id="model">
+  <h2>model 层<span class="path">数据核心 · ~5200 行 · 不依赖 PyQt5</span></h2>
+  <p class="desc">.kscp 包存取(KscpPackage) → 变量体系(VariableTree→ProjectVariable→VariableType 策略) → 步骤体系(Step+StepIOWidget/StepStatus，StepList→StepListStore，StepManager 动态导入模板工厂) → 执行器(StepRunner+StepRunnerState) → 热键(HotkeyListener)/设置(Settings) → 日志(LogModel 单例)。</p>
+<script type="text/mermaid">
+classDiagram
+direction TB
+
+class KscpPackage {
+  +_files: Dict
+  +_dirs: Set
+  +from_kscp(path) KscpPackage
+  +create_empty() KscpPackage
+  +save(path)
+  +read_file(path) bytes
+}
+class VariableType {
+  +name: str
+  +is_resource: bool
+  +suffixes: tuple
+  +is_valid(data, package) bool
+  +to_actual(data, package) Any
+}
+class _StringType {
+  +name: str
+  +is_valid(data, package) bool
+  +to_actual(data, package) Any
+}
+class _NumberType {
+  +name: str
+  +is_valid(data, package) bool
+  +to_actual(data, package) Any
+}
+class _ImageType {
+  +name: str
+  +is_resource: bool
+  +suffixes: tuple
+  +normalize(data) Any
+  +is_valid(data, package) bool
+  +to_actual(data, package) Any
+}
+class ProjectVariable {
+  +_type: str
+  +_data: Any
+  +_valid: bool
+  +_package: KscpPackage
+  +create(vtype, data, package) ProjectVariable
+  +from_format_string(fmt, package) ProjectVariable
+  +to_format_string() str
+  +get_actual_data() Any
+}
+class VariableTree {
+  +_vars: Dict
+  +_groups: Set
+  +from_json(data, package) VariableTree
+  +to_json_bytes() bytes
+  +add(path, var)
+  +get(path) ProjectVariable
+  +filter_by_type(vtype) VariableTree
+}
+class StepIOWidget {
+  +_input_type: List
+  +_output_type: List
+  +_tree: VariableTree
+  +_package: KscpPackage
+  +resolve_inputs() List
+  +write_outputs(outs)
+  +gen_widget() QWidget
+  +change_value(kind, index, value)
+}
+class StepStatus {
+  <<Enum>>
+  +PENDING
+  +RUNNING
+  +FINISHED
+  +ERROR
+}
+class Step {
+  +io: StepIOWidget
+  +enabled: bool
+  +tag: str
+  +_status: StepStatus
+  +do() int
+  +create_default(tree, package) Step
+  +from_format_string(fmt, tree, package) Step
+  +run() int
+}
+class StepList {
+  +_steps: List
+  +add(step)
+  +do_methods() List
+  +from_format_strings(fmts, manager) StepList
+  +move(src, dst)
+}
+class StepListStore {
+  +root: Dict
+  +add_list(path, step_list)
+  +from_json(data, manager) StepListStore
+  +to_json_bytes() bytes
+  +all_do_methods() List
+  +get(path) StepList
+}
+class StepManager {
+  +_package: KscpPackage
+  +_tree: VariableTree
+  +_registry: Dict
+  +load()
+  +create_step(path) Step
+  +from_format_string(fmt) Step
+  +copy_source_templates(source_dir) int
+}
+class StepRunnerState {
+  <<Enum>>
+  +READY
+  +RUNNING
+  +STOPPING
+}
+class StepRunner {
+  +_store: StepListStore
+  +_only_path: Optional
+  +_state: StepRunnerState
+  +max_steps: int
+  +start()
+  +request_stop()
+  +add_state_listener(cb)
+  +add_progress_listener(cb)
+}
+class HotkeyListener {
+  +_hotkey: str
+  +_on_toggle: Callable
+  +start()
+  +stop()
+}
+class Settings {
+  +_hotkey: str
+  +load(path) Settings
+  +set_hotkey(key)
+  +save(path)
+}
+class LogLevel {
+  <<Enum>>
+  +DEBUG
+  +INFO
+  +WARNING
+  +ERROR
+  +CRITICAL
+}
+class LogEntry {
+  <<NamedTuple>>
+  +time: float
+  +level: LogLevel
+  +message: str
+}
+class LogModel {
+  +_entries: List
+  +instance() LogModel
+  +log(level, message)
+  +export(fmt) bytes
+  +add_listener(cb)
+}
+class PointTimeline {
+  +_points: List
+  +_waits: List
+  +add(x, y)
+  +undo()
+  +items()
+}
+
+VariableType <|-- _StringType
+VariableType <|-- _NumberType
+VariableType <|-- _ImageType
+ProjectVariable o-- VariableType
+ProjectVariable --> KscpPackage
+VariableTree *-- ProjectVariable
+VariableTree ..> KscpPackage
+StepIOWidget --> VariableTree
+StepIOWidget --> KscpPackage
+StepIOWidget ..> ProjectVariable
+Step *-- StepIOWidget
+Step --> StepStatus
+Step ..> LogModel
+Step ..> VariableTree
+Step ..> KscpPackage
+Step ..> ProjectVariable
+StepList *-- Step
+StepList ..> StepManager
+StepListStore *-- StepList
+StepListStore ..> StepManager
+StepManager --> KscpPackage
+StepManager --> VariableTree
+StepManager ..> Step
+StepManager ..> LogModel
+StepRunner --> StepListStore
+StepRunner ..> StepStatus
+StepRunner ..> Step
+StepRunner ..> LogModel
+Settings ..> LogModel
+LogModel *-- LogEntry
+LogEntry --> LogLevel
+
+click KscpPackage href "../model/kscp_package.py"
+click VariableType href "../model/project_variable.py"
+click _StringType href "../model/project_variable.py"
+click _NumberType href "../model/project_variable.py"
+click _ImageType href "../model/project_variable.py"
+click ProjectVariable href "../model/project_variable.py"
+click VariableTree href "../model/variable_tree.py"
+click StepIOWidget href "../model/step_io.py"
+click StepStatus href "../model/step.py"
+click Step href "../model/step.py"
+click StepList href "../model/step_list.py"
+click StepListStore href "../model/step_list_store.py"
+click StepManager href "../model/step_manager.py"
+click StepRunnerState href "../model/step_runner.py"
+click StepRunner href "../model/step_runner.py"
+click HotkeyListener href "../model/hotkey.py"
+click Settings href "../model/settings.py"
+click LogLevel href "../model/log_model.py"
+click LogEntry href "../model/log_model.py"
+click LogModel href "../model/log_model.py"
+click PointTimeline href "../model/point_timeline.py"
+</script>
+</section>
+
+<section id="widgets">
+  <h2>widgets 层<span class="path">UI · ~8200 行 · MainWindow 簇 + 4 棵管理树</span></h2>
+  <p class="desc">MainWindow(双态窗口+执行器接线) 装配 ManagementTree 簇(基类→资源/变量/步骤模板/步骤列表四树+占位树) 与 StepListHost→StepListView→StepCard 卡片链；StepTreeWidget/VariableTreeWidget/ResourceTreeWidget 各带预览面板；LogWidget 经 _LogBridge 接 LogModel；ImageOverlay 全屏图片预览。_ExecBridge 是跨线程信号桥。</p>
+<script type="text/mermaid">
+classDiagram
+direction TB
+
+class MainWindow {
+  <<QMainWindow>>
+  +_package: KscpPackage
+  +_managers: List
+  +_runner: StepRunner
+  +_exec_bridge: _ExecBridge
+  +_open_package(package, path)
+  +_set_exec_locked(locked)
+  +_start_listening()
+  +_apply_hotkey(key)
+}
+class _ExecBridge {
+  <<QObject>>
+  +runner_state: pyqtSignal
+  +hotkey_toggle: pyqtSignal
+  +log_changed: pyqtSignal
+  +step_status: pyqtSignal
+  +progress: pyqtSignal
+}
+class ManagementTree {
+  +_name: str
+  +_tree: QWidget
+  +_preview: QWidget
+  +tree_widget() QWidget
+  +preview_widget() QWidget
+  +icon() QIcon
+}
+class ResourceManagementTree {
+  +_package: KscpPackage
+  +_rtree: ResourceTreeWidget
+  +tree_widget() QWidget
+  +preview_widget() QWidget
+}
+class VariableManagementTree {
+  +_package: KscpPackage
+  +_tree: VariableTree
+  +_vtree: VariableTreeWidget
+  +tree_widget() QWidget
+  +preview_widget() QWidget
+}
+class StepManagementTree {
+  +_package: KscpPackage
+  +_mgr: StepManager
+  +_stree: StepTreeWidget
+  +tree_widget() QWidget
+  +preview_widget() QWidget
+}
+class StepListManagementTree {
+  +_package: KscpPackage
+  +_store: StepListStore
+  +_mgr: StepManager
+  +_clipboard: StepClipboard
+  +add_template_to_current(path) bool
+  +refresh_cards()
+  +set_read_only(ro)
+  +current_path: Optional
+}
+class PlaceholderManagementTree {
+  +_icon_kind: str
+  +_build_tree() QWidget
+  +_build_preview() QWidget
+}
+class StepListHost {
+  <<QStackedWidget>>
+  +_view: StepListView
+  +errors_changed: pyqtSignal
+  +set_list(step_list, mgr)
+  +refresh_validity()
+  +set_read_only(ro)
+}
+class ActivityBar {
+  <<QWidget>>
+  +_buttons: List
+  +_bottom_buttons: List
+  +currentChanged: pyqtSignal
+  +add_item(name, icon) QToolButton
+  +add_bottom_button(name, icon, on_click, checkable) QToolButton
+  +clear()
+  +set_current_row(row)
+}
+class HotkeyEdit {
+  <<QLineEdit>>
+  +_hotkey: str
+  +hotkey() str
+  +_apply_key(key) bool
+}
+class SettingsDialog {
+  <<QDialog>>
+  +_hotkey_edit: HotkeyEdit
+  +hotkey() str
+}
+class ClickableLabel {
+  <<QLabel>>
+  +clicked: pyqtSignal
+}
+class LandingCard {
+  <<QFrame>>
+  +clicked: pyqtSignal
+}
+class TitledPanel {
+  <<QWidget>>
+  +_title: QLabel
+  +set_title(title)
+}
+class _LogBridge {
+  <<QObject>>
+  +changed: pyqtSignal
+}
+class LogWidget {
+  <<QWidget>>
+  +_model: LogModel
+  +_toggles: Dict
+  +_bridge: _LogBridge
+  +_on_export()
+  +closeEvent(event)
+}
+class ZoomGraphicsView {
+  <<QGraphicsView>>
+  +_zoom: float
+  +doubleClicked: pyqtSignal
+  +fit_view()
+  +wheelEvent(event)
+}
+class ImageOverlay {
+  <<QWidget>>
+  +_pixmap: QPixmap
+  +_view: ZoomGraphicsView
+  +_item: QGraphicsPixmapItem
+  +show_overlay()
+  +close_overlay()
+  +eventFilter(obj, event) bool
+}
+class StepCard {
+  <<QFrame>>
+  +_step: Step
+  +_selected: bool
+  +_io_widget: StepIOWidget
+  +menu_requested: pyqtSignal
+  +io_changed: pyqtSignal
+  +refresh()
+  +set_selected(selected)
+  +set_read_only(ro)
+}
+class StepTreeWidget {
+  <<QTreeWidget>>
+  +_package: KscpPackage
+  +_mgr: StepManager
+  +_info_panel: StepInfoPanel
+  +step_selected: pyqtSignal
+  +refresh(current_path)
+  +import_templates(source_dir) int
+  +preview_widget() StepInfoPanel
+}
+class StepInfoPanel {
+  <<QStackedWidget>>
+  +_mgr: StepManager
+  +_current_path: Optional
+  +add_requested: pyqtSignal
+  +load(path)
+  +show_placeholder(text)
+}
+class EditTemplateDialog {
+  <<QDialog>>
+  +_edit: QPlainTextEdit
+  +source() str
+}
+class MoveStepDialog {
+  <<QDialog>>
+  +_combo: QComboBox
+  +target() str
+}
+class StepListTreeWidget {
+  <<QTreeWidget>>
+  +_store: StepListStore
+  +_manager: StepManager
+  +_clipboard: StepClipboard
+  +list_selected: pyqtSignal
+  +store_changed: pyqtSignal
+  +refresh(current_path)
+  +refresh_error_marks()
+  +refresh_active_marks()
+  +set_running_path(path)
+  +find_item(path) QTreeWidgetItem
+}
+class StepClipboard {
+  +steps: Optional
+  +items: Optional
+}
+class TemplateChooserDialog {
+  <<QDialog>>
+  +_mgr: StepManager
+  +_path: Optional
+  +selected_path() Optional
+}
+class _ErrorLabelItem {
+  <<QGraphicsSimpleTextItem>>
+  +_full: str
+  +set_full(full)
+}
+class _CardShadowItem {
+  <<QGraphicsItem>>
+  +_w: int
+  +_h: int
+  +_radius: float
+  +boundingRect() QRectF
+}
+class StepListView {
+  <<QGraphicsView>>
+  +_mgr: StepManager
+  +_clipboard: StepClipboard
+  +_step_list: Optional
+  +_cards: List
+  +edited: pyqtSignal
+  +errors_changed: pyqtSignal
+  +set_list(step_list, mgr)
+  +refresh()
+  +refresh_validity()
+  +jump_to_index(n) bool
+  +locate_by_tag(text) bool
+  +set_read_only(ro)
+  +cards: List
+}
+class VariableTreeWidget {
+  <<QTreeWidget>>
+  +_package: KscpPackage
+  +_tree: VariableTree
+  +_edit_panel: VariableEditPanel
+  +var_selected: pyqtSignal
+  +tree_changed: pyqtSignal
+  +refresh(current_path)
+  +_save()
+  +preview_widget() VariableEditPanel
+}
+class VariableEditPanel {
+  <<QStackedWidget>>
+  +_tree: VariableTree
+  +_tree_widget: VariableTreeWidget
+  +_undo_stack: List
+  +load(path)
+  +_on_save()
+  +_on_undo()
+  +_validate()
+}
+class CreateVariableDialog {
+  <<QDialog>>
+  +_package: KscpPackage
+  +_tree: VariableTree
+  +_vtype: str
+  +_cur_value: Any
+  +make() tuple
+  +_validate()
+}
+class _ClickableLabel {
+  <<QLabel>>
+  +_raw: Optional
+  +set_raw(pix)
+  +clear_image()
+  +_rescale()
+}
+class ResourceTreeWidget {
+  <<QTreeWidget>>
+  +_package: KscpPackage
+  +_select_mode: bool
+  +_preview: _PreviewPanel
+  +path_selected: pyqtSignal
+  +refresh(current_path)
+  +preview_widget() _PreviewPanel
+  +pick_resource(package, suffixes, parent) Optional
+  +apply_suffix_filter(suffixes)
+}
+class _PreviewPanel {
+  <<QStackedWidget>>
+  +_img_label: _ClickableImageLabel
+  +_raw_pixmap: Optional
+  +show_placeholder(text)
+  +show_image(pix)
+  +show_text(text)
+  +_rescale()
+}
+class _ClickableImageLabel {
+  <<QLabel>>
+}
+
+ManagementTree <|-- ResourceManagementTree
+ManagementTree <|-- VariableManagementTree
+ManagementTree <|-- StepManagementTree
+ManagementTree <|-- StepListManagementTree
+ManagementTree <|-- PlaceholderManagementTree
+ClickableLabel <|-- _ClickableImageLabel
+ClickableLabel <|-- _ClickableLabel
+
+MainWindow *-- _ExecBridge
+MainWindow *-- StepListManagementTree
+MainWindow *-- VariableManagementTree
+MainWindow *-- StepManagementTree
+MainWindow *-- ResourceManagementTree
+MainWindow *-- ActivityBar
+MainWindow *-- LogWidget
+MainWindow *-- TitledPanel
+MainWindow ..> SettingsDialog
+
+StepListManagementTree *-- StepListHost
+StepListManagementTree *-- StepListTreeWidget
+StepListManagementTree *-- StepClipboard
+StepListHost *-- StepListView
+StepListView *-- StepCard
+StepListView *-- _ErrorLabelItem
+StepListView *-- _CardShadowItem
+StepListTreeWidget o-- StepClipboard
+StepListView o-- StepClipboard
+StepListView ..> TemplateChooserDialog
+
+StepTreeWidget *-- StepInfoPanel
+StepTreeWidget ..> EditTemplateDialog
+StepTreeWidget ..> MoveStepDialog
+
+VariableTreeWidget *-- VariableEditPanel
+VariableTreeWidget ..> CreateVariableDialog
+VariableEditPanel --> VariableTreeWidget
+
+ResourceTreeWidget *-- _PreviewPanel
+_PreviewPanel *-- _ClickableImageLabel
+
+ImageOverlay *-- ZoomGraphicsView
+LogWidget *-- _LogBridge
+
+StepManagementTree *-- StepTreeWidget
+VariableManagementTree *-- VariableTreeWidget
+ResourceManagementTree *-- ResourceTreeWidget
+
+click MainWindow href "../widgets/main_widget.py"
+click _ExecBridge href "../widgets/main_widget.py"
+click ManagementTree href "../widgets/management_trees.py"
+click ResourceManagementTree href "../widgets/management_trees.py"
+click VariableManagementTree href "../widgets/management_trees.py"
+click StepManagementTree href "../widgets/management_trees.py"
+click StepListManagementTree href "../widgets/management_trees.py"
+click PlaceholderManagementTree href "../widgets/management_trees.py"
+click StepListHost href "../widgets/management_trees.py"
+click ActivityBar href "../widgets/activity_bar.py"
+click HotkeyEdit href "../widgets/settings_dialog.py"
+click SettingsDialog href "../widgets/settings_dialog.py"
+click ClickableLabel href "../widgets/ui_common.py"
+click LandingCard href "../widgets/ui_common.py"
+click TitledPanel href "../widgets/ui_common.py"
+click _LogBridge href "../widgets/log_widget.py"
+click LogWidget href "../widgets/log_widget.py"
+click ZoomGraphicsView href "../widgets/image_overlay.py"
+click ImageOverlay href "../widgets/image_overlay.py"
+click StepCard href "../widgets/step_card.py"
+click StepTreeWidget href "../widgets/step_tree_widget.py"
+click StepInfoPanel href "../widgets/step_tree_widget.py"
+click EditTemplateDialog href "../widgets/step_tree_widget.py"
+click MoveStepDialog href "../widgets/step_tree_widget.py"
+click StepListTreeWidget href "../widgets/step_list_tree_widget.py"
+click StepClipboard href "../widgets/step_list_view.py"
+click TemplateChooserDialog href "../widgets/step_list_view.py"
+click _ErrorLabelItem href "../widgets/step_list_view.py"
+click _CardShadowItem href "../widgets/step_list_view.py"
+click StepListView href "../widgets/step_list_view.py"
+click VariableTreeWidget href "../widgets/variable_tree_widget.py"
+click VariableEditPanel href "../widgets/variable_tree_widget.py"
+click CreateVariableDialog href "../widgets/variable_tree_widget.py"
+click _ClickableLabel href "../widgets/variable_tree_widget.py"
+click ResourceTreeWidget href "../widgets/resource_tree_widget.py"
+click _PreviewPanel href "../widgets/resource_tree_widget.py"
+click _ClickableImageLabel href "../widgets/resource_tree_widget.py"
+</script>
+</section>
+
+<section id="actions">
+  <h2>actions + libs + tools<span class="path">步骤模板 · 随 .kscp 分发</span></h2>
+  <p class="desc">8 个 Step 子类(按键/鼠标点击/拖动/滚轮/移动/多次点击/延时/输出日志)，各持 Input/Output 数据类；输入模拟步骤经 libs.InputControl 统一发出；MouseClick 附带 _MouseInfoView→_ClickPreview/_ImagePreviewDialog 预览并通过 tools._MarkerDialog 拾取坐标。</p>
+<script type="text/mermaid">
+classDiagram
+direction LR
+
+class KeyClick {
+  +name: str
+  +input_class: KeyClickInput
+  +run() int
+}
+class KeyClickInput {
+  <<dataclass>>
+}
+class KeyClickOutput {
+  <<dataclass>>
+}
+class MouseClick {
+  +name: str
+  +IMAGE_SLOT: int
+  +run() int
+  +info_widget() QWidget
+}
+class MouseClickInput {
+  <<dataclass>>
+}
+class MouseClickOutput {
+  <<dataclass>>
+}
+class MouseDrag {
+  +name: str
+  +input_class: MouseDragInput
+  +run() int
+}
+class MouseDragInput {
+  <<dataclass>>
+}
+class MouseDragOutput {
+  <<dataclass>>
+}
+class MouseScroll {
+  +name: str
+  +input_class: MouseScrollInput
+  +run() int
+}
+class MouseScrollInput {
+  <<dataclass>>
+}
+class MouseScrollOutput {
+  <<dataclass>>
+}
+class MouseMove {
+  +name: str
+  +input_class: MouseMoveInput
+  +run() int
+}
+class MouseMoveInput {
+  <<dataclass>>
+}
+class MouseMoveOutput {
+  <<dataclass>>
+}
+class MultiClick {
+  +name: str
+  +input_class: MultiClickInput
+  +run() int
+}
+class MultiClickInput {
+  <<dataclass>>
+}
+class MultiClickOutput {
+  <<dataclass>>
+}
+class TimeDelay {
+  +name: str
+  +input_class: TimeDelayInput
+  +run() int
+}
+class TimeDelayInput {
+  <<dataclass>>
+}
+class TimeDelayOutput {
+  <<dataclass>>
+}
+class LogStep {
+  +name: str
+  +input_class: LogStepInput
+  +run() int
+}
+class LogStepInput {
+  <<dataclass>>
+}
+class LogStepOutput {
+  <<dataclass>>
+}
+class InputControl {
+  -mouse_control: Controller
+  -keyboard_control: Controller
+  +key_click(key, duration)
+  +mouse_click(x, y, duration, restore_position)
+  +mouse_move(x, y)
+  +mouse_scroll(dx, dy)
+  +mouse_drag(x1, y1, x2, y2, duration, steps)
+  +start_key_listen(on_press, on_release)
+  +start_mouse_listen(on_click)
+  +stop_listeners()
+  +mouse_position
+}
+class _ClickPreview {
+  <<QLabel>>
+  +clicked: pyqtSignal
+  +mousePressEvent(event)
+}
+class _ImagePreviewDialog {
+  <<QDialog>>
+  -_view: ZoomGraphicsView
+  -_scene: QGraphicsScene
+}
+class _MouseInfoView {
+  <<QWidget>>
+  -_step: MouseClick
+  -_preview: _ClickPreview
+  +_on_mark()
+}
+class _MarkerDialog {
+  <<QDialog>>
+  -_base: QImage
+  -_mode: str
+  -_timeline: PointTimeline
+  +result_image: QImage
+  +result_pos: PointTimeline
+  +_render(p)
+}
+
+Step <|-- KeyClick
+Step <|-- MouseClick
+Step <|-- MouseDrag
+Step <|-- MouseScroll
+Step <|-- MouseMove
+Step <|-- MultiClick
+Step <|-- TimeDelay
+Step <|-- LogStep
+
+KeyClick *-- KeyClickInput
+KeyClick *-- KeyClickOutput
+MouseClick *-- MouseClickInput
+MouseClick *-- MouseClickOutput
+MouseDrag *-- MouseDragInput
+MouseDrag *-- MouseDragOutput
+MouseScroll *-- MouseScrollInput
+MouseScroll *-- MouseScrollOutput
+MouseMove *-- MouseMoveInput
+MouseMove *-- MouseMoveOutput
+MultiClick *-- MultiClickInput
+MultiClick *-- MultiClickOutput
+TimeDelay *-- TimeDelayInput
+TimeDelay *-- TimeDelayOutput
+LogStep *-- LogStepInput
+LogStep *-- LogStepOutput
+
+KeyClick ..> InputControl
+MouseClick ..> InputControl
+MouseDrag ..> InputControl
+MouseScroll ..> InputControl
+MouseMove ..> InputControl
+MultiClick ..> InputControl
+
+KeyClick ..> LogModel
+MultiClick ..> LogModel
+TimeDelay ..> LogModel
+LogStep ..> LogModel
+
+MouseClick ..> _MouseInfoView
+_MouseInfoView --> MouseClick
+_MouseInfoView *-- _ClickPreview
+_MouseInfoView ..> _ImagePreviewDialog
+_MouseInfoView ..> _MarkerDialog
+
+click KeyClick href "../actions/输入/按键.py"
+click KeyClickInput href "../actions/输入/按键.py"
+click KeyClickOutput href "../actions/输入/按键.py"
+click MouseClick href "../actions/输入/鼠标.py"
+click MouseClickInput href "../actions/输入/鼠标.py"
+click MouseClickOutput href "../actions/输入/鼠标.py"
+click _ClickPreview href "../actions/输入/鼠标.py"
+click _ImagePreviewDialog href "../actions/输入/鼠标.py"
+click _MouseInfoView href "../actions/输入/鼠标.py"
+click MouseDrag href "../actions/输入/鼠标拖动.py"
+click MouseDragInput href "../actions/输入/鼠标拖动.py"
+click MouseDragOutput href "../actions/输入/鼠标拖动.py"
+click MouseScroll href "../actions/输入/鼠标滚轮.py"
+click MouseScrollInput href "../actions/输入/鼠标滚轮.py"
+click MouseScrollOutput href "../actions/输入/鼠标滚轮.py"
+click MouseMove href "../actions/输入/鼠标移动.py"
+click MouseMoveInput href "../actions/输入/鼠标移动.py"
+click MouseMoveOutput href "../actions/输入/鼠标移动.py"
+click MultiClick href "../actions/输入/多次点击.py"
+click MultiClickInput href "../actions/输入/多次点击.py"
+click MultiClickOutput href "../actions/输入/多次点击.py"
+click TimeDelay href "../actions/控制流程/time_delay.py"
+click TimeDelayInput href "../actions/控制流程/time_delay.py"
+click TimeDelayOutput href "../actions/控制流程/time_delay.py"
+click LogStep href "../actions/控制流程/输出日志.py"
+click LogStepInput href "../actions/控制流程/输出日志.py"
+click LogStepOutput href "../actions/控制流程/输出日志.py"
+click InputControl href "../libs/key_control/base.py"
+click _MarkerDialog href "../tools/image_marker.py"
+</script>
+</section>
+
+</main>
+<footer>
+  <p>由 KScript 源码自动提取生成 · 基于 <code>docs/工程分析.md</code> 与三份并行子代理逐文件核验 · 排除全部 <code>DemoStep/_Demo*/BadStep/NoDcStep</code> 冒烟夹具。</p>
+  <p>渲染：<a href="https://mermaid.js.org/">Mermaid.js</a> · 本地 <code>mermaid.min.js</code> 优先，失败回退 CDN · <code>securityLevel: loose</code> 启用点击跳转源码。</p>
+</footer>
+
+<script>
+(function () {
+  var status = document.getElementById('load-status');
+  // 1) 把 <script type="text/mermaid"> 的源码转成 <div class="mermaid">，便于 Mermaid 渲染 + 文本兜底
+  function embedSources() {
+    var nodes = document.querySelectorAll('script[type="text/mermaid"]');
+    nodes.forEach(function (t) {
+      if (t.dataset.embedded) return;
+      var d = document.createElement('div');
+      d.className = 'mermaid';
+      d.textContent = t.textContent.replace(/^\n/, '').replace(/\s+$/, '');
+      t.parentNode.insertBefore(d, t);
+      t.dataset.embedded = '1';
+    });
+  }
+  document.addEventListener('DOMContentLoaded', embedSources);
+
+  // 2) 依次尝试本地 → 各 CDN 加载 Mermaid
+  var candidates = [
+    './mermaid.min.js',
+    'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js',
+    'https://unpkg.com/mermaid@11/dist/mermaid.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.11.0/mermaid.min.js',
+    'https://cdn.jsdelivr.net/npm/mermaid@10.9.3/dist/mermaid.min.js'
+  ];
+  var i = 0;
+  function failAll() {
+    status.textContent = '⚠ Mermaid 加载失败：本地与所有 CDN 均不可用。请将 mermaid.min.js 放入 html/ 目录（https://github.com/mermaid-js/mermaid/releases），下方已显示原始文本。';
+    status.style.color = '#ff8b72';
+  }
+  function init() {
+    try {
+      mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose', fontFamily: 'ui-monospace, Consolas, monospace' });
+      mermaid.run();
+      status.textContent = '✓ Mermaid 已加载（' + (i === 0 ? '本地 mermaid.min.js' : 'CDN') + '）· 点击类框打开源码';
+    } catch (e) {
+      status.textContent = '⚠ Mermaid 初始化失败：' + e;
+      status.style.color = '#ff8b72';
+    }
+  }
+  function load() {
+    if (i >= candidates.length) { failAll(); return; }
+    var s = document.createElement('script');
+    s.src = candidates[i];
+      s.onload = function () { init(); };
+      s.onerror = function () { i++; load(); };
+    document.head.appendChild(s);
+  }
+  load();
+})();
+</script>
+</body>
+</html>

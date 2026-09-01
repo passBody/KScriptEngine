@@ -395,8 +395,8 @@ if __name__ == "__main__":
     # ---- optional()：非必须输入标记——空值合法/解析 None；填值仍校验 ----
     @dataclass
     class _OptIn:
-        a: "number" = 0
-        note: "string" = optional("")
+        a: "number" = 0  # type: ignore
+        note: "string" = optional("")  # type: ignore
 
     @dataclass
     class _OptOut:

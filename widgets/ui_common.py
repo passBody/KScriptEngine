@@ -89,6 +89,16 @@ def make_icon(kind: str) -> QIcon:
         p.setBrush(QColor("#e67e22"))
         for y in (7, 14, 21):
             p.drawRoundedRect(4, y, 24, 5, 2, 2)
+    elif kind == "composite":
+        # 叠层卡片（合成卡片 = 多步骤的集合）：后片 + 前片错位，紫区别于步骤橙
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#8e6db5"))
+        p.drawRoundedRect(4, 4, 20, 20, 3, 3)       # 后片
+        p.setBrush(QColor("#b290e0"))
+        p.drawRoundedRect(8, 8, 20, 20, 3, 3)       # 前片
+        p.setBrush(QColor("#fff3e0"))
+        for y in (12, 18, 24):
+            p.drawRoundedRect(11, y, 14, 3, 1, 1)    # 前片内三条横线
     elif kind == "template":
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#e67e22"))
@@ -206,7 +216,7 @@ if __name__ == "__main__":
     app = QApplication.instance() or QApplication(sys.argv)
 
     # make_icon：各类别（含未知回退）生成非空图标；exec/settings 放大 48px
-    for kind in ("resource", "variable", "step", "template",
+    for kind in ("resource", "variable", "step", "composite", "template",
                  "exec", "settings", "default", "未知"):
         assert not make_icon(kind).isNull(), kind
     assert make_icon("exec").availableSizes()

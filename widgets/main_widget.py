@@ -41,6 +41,9 @@ from model.step import StepStatus
 from model.step_manager import StepManager
 from model.step_runner import StepRunner, StepRunnerState
 from model.variable_tree import VariableTree
+from model.composite_card import CompositeCard
+from model.composite_card_store import CompositeCardStore
+from model.placeholder_step import PlaceholderStep
 from widgets.log_widget import LogWidget
 from widgets.step_list_tree_widget import StepListTreeWidget
 from widgets.step_tree_widget import StepInfoPanel, StepTreeWidget
@@ -49,7 +52,9 @@ from widgets.activity_bar import ActivityBar
 from widgets.management_trees import (
     ManagementTree, ResourceManagementTree, StepListHost,
     StepListManagementTree, StepManagementTree, VariableManagementTree,
+    CompositeManagementTree,
 )
+from widgets.step_list_view import StepClipboard
 from widgets.settings_dialog import SettingsDialog
 from widgets.ui_common import (
     LandingCard, TitledPanel, ensure_qt_plugin_path, make_icon, window_size,
@@ -114,6 +119,7 @@ class MainWindow(QMainWindow):
         self._exec_bridge.progress.connect(self._on_progress)
         self._exec_locked = False
         self._exec_scope = "all"     # 执行范围：all=全部列表 / current=仅当前列表
+        self._sl_error_count = 0     # 当前步骤列表视图的错误/占位卡片数（>0 → 禁止执行）
         self._runner_gen = 0                     # 执行器代际：陈旧 runner 迟到状态被忽略
         self._step_hooks: List[Tuple[object, Callable]] = []   # 执行期步骤状态监听（卡片刷新）
         self._step_paths: Dict[object, str] = {}   # 执行期 step → 列表路径（树高亮映射）
@@ -291,10 +297,44 @@ class MainWindow(QMainWindow):
         if self._runner is None:
             return
         if self._runner.state is StepRunnerState.READY:
+            # 安全网：待命期间引入了错误/占位卡片 → 禁止执行（按钮禁用是主防线，
+            # 此处兜底热键直触；含无法还原的占位卡或 io 非法卡一律不执行）
+            if self._exec_has_errors():
+                LogModel.instance().error(
+                    "禁止执行：待执行列表含错误/占位卡片，请先修正或删除后再执行")
+                self._stop_listening()
+                self._set_exec_status("禁止执行：含错误/占位卡片（已停止监听）")
+                return
             self._attach_step_hooks()          # 执行前挂卡片状态监听
             self._runner.start()
         else:
             self._runner.request_stop()
+
+    def _exec_has_errors(self) -> bool:
+        """待执行范围（全部列表 / 仅当前列表）是否含错误/占位卡片。
+
+        占位卡片（:class:`PlaceholderStep`，模板缺失/签名不匹配）与 io 非法卡
+        均视为不可执行。按钮禁用是主防线（随当前视图错误数变化）；本方法在
+        热键触发执行前按**执行范围**兜底扫描，闭合「待命后引入错误」的缺口。
+        """
+        if not self._managers:
+            return False
+        sl_mgr = self._managers[0]
+        if not isinstance(sl_mgr, StepListManagementTree):
+            return False
+        if self._exec_scope == "current" and sl_mgr.current_path:
+            paths = [sl_mgr.current_path]
+        else:
+            paths = [p for p, is_group in sl_mgr.store.walk() if not is_group]
+        for p in paths:
+            try:
+                sl = sl_mgr.store.get(p)
+            except FileNotFoundError:
+                continue
+            for s in sl.steps:
+                if isinstance(s, PlaceholderStep) or not s.io.is_valid:
+                    return True
+        return False
 
     def _on_runner_state(self, payload) -> None:
         """执行器状态变化（GUI 线程）：状态栏 + 编辑锁定 + 挂钩清理。"""
@@ -402,20 +442,42 @@ class MainWindow(QMainWindow):
 
     # ---- 执行/设置按钮（活动栏底部） ----
     def _update_exec_button(self) -> None:
-        """执行按钮视觉态：待命（监听中）→ 绿色 checked + tooltip「停止监听」；否则复原。"""
+        """执行按钮视觉态：待命（监听中）→ 绿色 checked + tooltip「停止监听」；否则复原。
+
+        启用态：执行中（``_exec_locked``，保留停止通道）或当前步骤列表无错误/占位
+        卡片时可用；**有错误/占位卡片时禁用**（无法还原或 io 非法的步骤禁止执行）。
+        """
         if self._exec_btn is None:
             return
         listening = self._hotkey_listener is not None
         scope_text = "全部列表" if self._exec_scope == "all" else "当前列表"
         self._exec_btn.setChecked(listening)
-        self._exec_btn.setToolTip(
-            "停止监听" if listening else
-            "执行（范围：%s，右键切换）：点击进入待命，按下热键开始执行，"
-            "再按停止（当前步骤完成后停）。\n"
-            "热键勿与步骤按键冲突（模拟按键也会被监听）；模拟输入到游戏窗口需管理员运行。"
-            % scope_text)
+        # 执行中保留停止通道；否则仅当当前视图无错误/占位卡片时可用
+        self._exec_btn.setEnabled(self._exec_locked or self._sl_error_count == 0)
+        if listening:
+            self._exec_btn.setToolTip("停止监听")
+        elif self._sl_error_count > 0:
+            self._exec_btn.setToolTip(
+                "当前列表有 %d 张错误/占位卡片，禁止执行（修正或删除后即可执行）"
+                % self._sl_error_count)
+        else:
+            self._exec_btn.setToolTip(
+                "执行（范围：%s，右键切换）：点击进入待命，按下热键开始执行，"
+                "再按停止（当前步骤完成后停）。\n"
+                "热键勿与步骤按键冲突（模拟按键也会被监听）；模拟输入到游戏窗口需管理员运行。"
+                % scope_text)
 
     # ---- 执行范围（全部列表 / 仅当前列表；右键执行按钮切换） ----
+    def _on_sl_errors_changed(self, n: int) -> None:
+        """当前步骤列表视图错误/占位卡片数变化 → 更新执行按钮启用态。
+
+        ``n > 0``（有 io 非法卡或占位卡）→ 禁止执行（按钮禁用，除非执行中）；
+        ``n == 0`` → 恢复可用。占位卡（模板缺失/签名不匹配）与 io 非法卡同等
+        计入（见 :meth:`StepListView.error_card_indices`）。
+        """
+        self._sl_error_count = n
+        self._update_exec_button()
+
     def _on_exec_menu(self, pos) -> None:
         menu = QMenu(self._exec_btn)
         a_all = menu.addAction("执行全部列表")
@@ -514,7 +576,7 @@ class MainWindow(QMainWindow):
         self._exec_locked = locked
         enabled = not locked
         for m in self._managers:
-            if isinstance(m, StepListManagementTree):
+            if isinstance(m, (StepListManagementTree, CompositeManagementTree)):
                 m.set_read_only(locked)
                 continue
             # 已构建的树/预览才需要处理（懒构建：未构建的不会出现在屏幕）
@@ -533,6 +595,8 @@ class MainWindow(QMainWindow):
         for a in (getattr(self, "_a_new", None), getattr(self, "_a_open", None)):
             if a is not None:
                 a.setEnabled(enabled)
+        # 执行按钮：执行中保留（停止通道）；解锁后按当前错误/占位卡片数重评启用态
+        self._update_exec_button()
 
     def _on_new(self) -> None:
         LogModel.instance().info("新建工程")
@@ -546,6 +610,53 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.information(self, "加入当前列表",
                                 "请先在左侧选中一个步骤列表")
+
+    def _on_jump_to_composite(self, ref: str) -> None:
+        """右键合成卡片「跳转到合成卡片编辑」→ 切活动栏到合成卡片树并选中该卡片。
+
+        经 :attr:`StepListHost.composite_jump_requested` 触发（步骤列表宿主与
+        合成卡片宿主都连）：在任一卡片视图里右键合成卡片即可跳转其编辑界面。
+        """
+        for i, m in enumerate(self._managers):
+            if isinstance(m, CompositeManagementTree):
+                assert self._switcher is not None
+                self._switcher.set_current_row(i)   # 切面板（_on_switch 切树/预览两栈）
+                m.preview_widget()                   # 确保宿主已建（_reset_project_view 已建，幂等）
+                m.select_composite(ref)              # 选中树条目 → _on_selected 打开编辑
+                return
+        LogModel.instance().warning("跳转合成卡片：未找到合成卡片管理树")
+
+    def _on_composite_renamed(self, old_path: str, new_path: str) -> None:
+        """合成卡片重命名 → 改指所有引用旧路径的合成卡片条目。
+
+        经 :attr:`CompositeTreeWidget` 的 ``on_rename`` 回调触发（重命名流程在
+        ``store.rename`` 成功后、``_changed`` 刷新树前调用，此时合成卡片存储内
+        该卡片已在新路径 ``new_path``）。两处存储都扫：
+
+        * **步骤列表存储**：引用旧路径的卡片步骤改指新路径 + 落盘
+          ``step_list.json`` + 重绑当前卡片画面（卡片名立即更新——否则步骤里的
+          合成卡片名不随重命名变化，且运行时变悬空引用）。
+        * **合成卡片存储**：**其它**卡片体内引用旧路径的条目改指 + 落盘
+          ``composites.json``（当前编辑卡即被重命名者，其体内不含自引用，画面由
+          重命名流程自身刷新，此处不重绑——见 :meth:`CompositeManagementTree.repoint_composite_refs`）。
+        """
+        for m in self._managers:
+            if isinstance(m, StepListManagementTree):
+                m.repoint_composite_refs(old_path, new_path)
+            elif isinstance(m, CompositeManagementTree):
+                m.repoint_composite_refs(old_path, new_path)
+
+    def _on_composite_sig_changed(self, ref: str) -> None:
+        """合成卡片签名变更 → 重同步步骤列表内引用该卡的 CompositeCard 步骤 io。
+
+        经 :meth:`CompositeManagementTree._on_signature_changed` 的 ``on_sig_changed``
+        回调触发（签名表编辑 / quick-create 局部后）。步骤列表里引用该卡的
+        CompositeCard 步骤按新签名重建 io（保留已填值），当前列表有变化则刷新卡片。
+        """
+        for m in self._managers:
+            if isinstance(m, StepListManagementTree):
+                m.resync_composite_steps(ref)
+                return
 
     def _on_open(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -693,26 +804,49 @@ class MainWindow(QMainWindow):
         spanel = self._step_mgr.preview_widget()
         assert isinstance(spanel, StepInfoPanel)
         spanel.add_requested.connect(self._on_add_template)
-        # 左侧管理树排序（从上到下）：步骤列表 / 全局变量 / 步骤模板 / 资源
+        # 合成卡片存储全局共享一份。v2：先建空壳 + 注入解析器（闭包捕获可变 cstore），
+        # 再就地加载（load_from_json 先读 sigs 再走树）——体内合成卡片引用经 from_marker
+        # 解码时，解析器即可取到被引卡签名（sigs 已预加载），解决加载期先后顺序问题。
+        cstore = CompositeCardStore.create_empty()
+        CompositeCard.set_resolver(cstore.get_or_none)
+        if package.exists("composites.json"):
+            cstore.load_from_json(package.read_file("composites.json"), shared_mgr)
+        else:
+            package.write_file("composites.json", cstore.to_json_bytes())
+        # 卡片视图剪贴板共享：步骤列表与合成卡片体之间可互粘步骤
+        shared_clip = StepClipboard()
+        # 左侧管理树排序（从上到下）：步骤列表 / 合成卡片 / 全局变量 / 步骤模板 / 资源
         self._managers = [
-            StepListManagementTree(package, tree, shared_mgr),
+            StepListManagementTree(package, tree, shared_mgr,
+                                   composite_store=cstore, clipboard=shared_clip),
+            CompositeManagementTree(package, tree, shared_mgr,
+                                    cstore, shared_clip,
+                                    on_rename=self._on_composite_renamed,
+                                    on_sig_changed=self._on_composite_sig_changed),
             VariableManagementTree(package, tree),
             self._step_mgr,
             ResourceManagementTree(package),
         ]
-        # 变量树变化 → 步骤卡片重检颜色（io 校验随变量树变）
-        var_mgr = self._managers[1]
+        # 变量树变化 → 步骤列表与合成卡片重检颜色（io 校验随变量树变）
+        var_mgr = self._managers[2]
         sl_mgr = self._managers[0]
+        comp_mgr = self._managers[1]
         assert isinstance(var_mgr, VariableManagementTree)
         assert isinstance(sl_mgr, StepListManagementTree)
+        assert isinstance(comp_mgr, CompositeManagementTree)
         vtw = var_mgr.tree_widget()
         assert isinstance(vtw, VariableTreeWidget)
         vtw.tree_changed.connect(sl_mgr.refresh_cards)
+        vtw.tree_changed.connect(comp_mgr.refresh_cards)
         # 进入工程第一画面：store 非空 → 自动选中第一个步骤列表（显示序 DFS 首个列表）
         # 树/宿主均为懒构建 → 先构建再选中；宿主须在联动前构建，否则列表不显示
         sl_tree = sl_mgr.tree_widget()
         assert isinstance(sl_tree, StepListTreeWidget)
         sl_mgr.preview_widget()
+        # 步骤列表视图错误/占位卡片数 → 执行按钮启用态（>0 禁止执行，执行中除外）。
+        # 须在首个列表加载（setCurrentItem → errors_changed）前连，否则首列表计数漏收。
+        self._sl_error_count = 0          # 重置（重开工程：旧宿主计数作废）
+        sl_mgr.preview_widget().errors_changed.connect(self._on_sl_errors_changed)
         sl_tree.list_selected.connect(self._on_exec_list_changed)   # 单列表范围跟随选中
         first_path = sl_tree.first_list_path()
         if first_path:
@@ -725,6 +859,12 @@ class MainWindow(QMainWindow):
             self._project_widget = self._build_project_view()
             self._central.addWidget(self._project_widget)
         self._reset_project_view()
+        # 右键合成卡片「跳转编辑」：步骤列表宿主与合成卡片宿主都连
+        # （在任一卡片视图右键合成卡片 → 切到合成卡片树并打开其编辑）
+        sl_mgr.preview_widget().composite_jump_requested.connect(
+            self._on_jump_to_composite)
+        comp_mgr.host.composite_jump_requested.connect(
+            self._on_jump_to_composite)
         self._central.setCurrentWidget(self._project_widget)
         self.setWindowTitle("KScript — %s" % (path or "新工程"))
         if not self._project_sized:          # 首次进入工程视图：窗口 = 屏幕 2/3 并居中
@@ -739,7 +879,7 @@ class MainWindow(QMainWindow):
         # 默认管理树 = 步骤列表管理树（_managers 第 1 位；进入工程即见步骤列表）
         self._switcher.set_current_row(0)
         if self._exec_btn is not None:
-            self._exec_btn.setEnabled(True)
+            self._update_exec_button()      # 按当前错误/占位卡片数决定启用态（不无条件启用）
 
     @staticmethod
     def _load_shared_tree(package: KscpPackage) -> VariableTree:
@@ -771,7 +911,7 @@ if __name__ == "__main__":
     import sys
     import tempfile
 
-    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtWidgets import QApplication, QInputDialog
 
     from model.project_variable import ProjectVariable
     from model.step import StepStatus
@@ -814,18 +954,22 @@ class DemoStep(Step):
     win = MainWindow(tmp)
     win.show()                       # 不 exec：构造期已同步构建全部控件
 
-    # managers 结构：第 1 位 = StepListManagementTree（替换占位）
-    assert len(win._managers) == 4
+    # managers 结构：步骤列表 / 合成卡片 / 全局变量 / 步骤模板 / 资源（5 棵）
+    assert len(win._managers) == 5
     sl_mgr = win._managers[0]
     assert isinstance(sl_mgr, StepListManagementTree)
     assert sl_mgr.name == "步骤列表"
+    comp_mgr = win._managers[1]
+    assert isinstance(comp_mgr, CompositeManagementTree)
+    assert comp_mgr.name == "合成卡片"
+    assert win._package is not None and win._package.exists("composites.json")
     # 默认管理树 = 步骤列表管理树（切换栏第 1 位高亮）
     assert win._switcher is not None
-    assert len(win._switcher._buttons) == 4
+    assert len(win._switcher._buttons) == 5
     assert win._switcher._buttons[0].isChecked()
 
     # 共享变量树：变量管理树与步骤列表管理树同树
-    var_mgr = win._managers[1]
+    var_mgr = win._managers[2]
     assert isinstance(var_mgr, VariableManagementTree)
     vtw = var_mgr.tree_widget()
     assert isinstance(vtw, VariableTreeWidget)
@@ -1084,7 +1228,7 @@ class DemoStep(Step):
         # 禁用会吞 hover 事件导致卡片缩放动画消失）；其余树整树禁用
         sl_tree = win_exec._managers[0]._sl_tree
         assert sl_tree is not None
-        var_tree = win_exec._managers[1].tree_widget()
+        var_tree = win_exec._managers[2].tree_widget()
         win_exec._set_exec_locked(True)
         assert sl_tree._read_only, "步骤列表树应进入只读模式"
         assert not var_tree.isEnabled()                 # 变量树整树禁用
@@ -1276,5 +1420,104 @@ class DemoStep(Step):
         win_exec._exec_btn.click()                       # 复位：停监听
     finally:
         _make_hotkey_listener = _orig_mk_listener2
+
+    # ---- 右键合成卡片「跳转到编辑」：切活动栏 + 选中卡片 + 打开编辑 ----
+    tmp_j = tempfile.mktemp(suffix=".kscp")
+    KscpPackage.create_empty().save(tmp_j)
+    win_j = MainWindow(tmp_j)
+    win_j.show()
+    comp_mgr_j = win_j._managers[1]
+    assert isinstance(comp_mgr_j, CompositeManagementTree)
+    body_x = StepList.create_empty()
+    comp_mgr_j.store.add_list("卡X", body_x)      # 内存加一张合成卡片定义
+    comp_mgr_j.tree_widget().refresh()             # 树在开包时已建（空 store）→ 重建含卡X
+    win_j._on_jump_to_composite("卡X")            # 模拟右键「跳转到合成卡片编辑」
+    assert win_j._switcher is not None
+    assert win_j._switcher._buttons[1].isChecked()    # 活动栏切到合成卡片面板
+    assert comp_mgr_j.current_path == "卡X"           # 树选中卡X
+    chost_j = comp_mgr_j.host
+    assert chost_j.currentIndex() == 1                # 打开卡X 编辑页
+    assert chost_j._view._step_list is body_x
+    # 跳转到不存在的卡片 → 不崩（select_composite False，面板切过去但选中不变）
+    win_j._on_jump_to_composite("不存在")
+    assert comp_mgr_j.current_path == "卡X"
+
+    # ---- 重命名合成卡片 → 引用改指 + 卡片名刷新（修「步骤中命名不随重命名变化」）----
+    # win_j 已有合成卡片「卡X」(body_x)；先在步骤列表「L」里引用它，再把 卡X 重命名为
+    # 卡Y，验证：引用条目 ref/name 改指卡Y、卡片画面名立即刷新、运行时仍解析到 body_x、
+    # 落盘 step_list.json 存的是新标记 @合成卡片:卡Y（引用只存指针 → 改一处处处变）。
+    sl_mgr_j = win_j._managers[0]
+    assert isinstance(sl_mgr_j, StepListManagementTree)
+    listL = StepList.create_empty()
+    card_step = CompositeCard("卡X", sl_mgr_j._tree, sl_mgr_j._package)
+    listL.add(card_step)
+    sl_mgr_j.store.add_list("L", listL)
+    sl_mgr_j._save_store()
+    sl_tw_j = sl_mgr_j.tree_widget()
+    sl_tw_j.refresh()
+    sl_tw_j.list_selected.emit("L")            # 选中 L → 宿主显示其卡片
+    sl_host_j = sl_mgr_j.preview_widget()
+    assert sl_host_j.currentIndex() == 1
+    assert card_step.ref == "卡X" and card_step.name == "卡X"
+    assert sl_host_j._view.cards[0]._name.text() == "卡X"   # 改名前卡片名
+    # 重命名 卡X → 卡Y（_on_composite_renamed 经 on_rename 自动改指两处存储）
+    assert comp_mgr_j.current_path == "卡X"    # 跳转测试后树仍选中卡X
+    _orig_get_text = QInputDialog.getText
+    QInputDialog.getText = staticmethod(lambda *a, **k: ("卡Y", True))
+    try:
+        comp_mgr_j.tree_widget()._act_rename()
+    finally:
+        QInputDialog.getText = _orig_get_text
+    # 定义已改名
+    assert "卡Y" in comp_mgr_j.store.paths() and "卡X" not in comp_mgr_j.store.paths()
+    # 步骤列表里的引用条目改指 + 卡片画面名刷新（核心修复点）
+    assert card_step.ref == "卡Y" and card_step.name == "卡Y"
+    assert sl_host_j._view.cards[0]._name.text() == "卡Y"
+    # 运行时解析仍指向原定义体（改指未破坏执行）；旧路径已悬空
+    assert CompositeCard.resolve_ref("卡Y").body is body_x
+    assert CompositeCard.resolve_ref("卡X") is None
+    # 落盘的 step_list.json 存新标记（引用只存指针 → 改一处处处变）
+    sl_blob = win_j._package.read_file("step_list.json").decode("utf-8")
+    assert "@合成卡片:卡Y" in sl_blob and "@合成卡片:卡X" not in sl_blob
+    CompositeCard.set_resolver(lambda ref: None)   # 复位，避免影响后续模块冒烟
+
+    # ---- 占位卡片：计入错误数、可定位、禁止执行 ----
+    # 工程含一条「格式串不可还原」的步骤 → 加载落为红色占位卡；执行按钮禁用、
+    # 错误数含该卡、跳转错误可定位（用户：占位卡应计入错误数并禁止执行）。
+    import base64 as _b64
+    import json as _json
+    from model.step_io import StepIOWidget
+    from model.variable_tree import VariableTree
+    from model.placeholder_step import PlaceholderStep
+    pkg_e = KscpPackage.create_empty()
+    # 一条不可还原的格式串（name「别的步骤」无匹配模板）+ 空列表「干净」作对照
+    fake_fmt = _b64.urlsafe_b64encode(_json.dumps(
+        {"name": "别的步骤", "in": [], "out": [],
+         "io": StepIOWidget([], [], VariableTree.create_empty(),
+                            pkg_e).to_format_string(),
+         "run": False, "tag": ""}, ensure_ascii=False).encode()).decode().rstrip("=")
+    sl_e = {"坏列表": [fake_fmt], "干净": []}
+    pkg_e.write_file("step_list.json",
+                     json.dumps(sl_e, ensure_ascii=False).encode("utf-8"))
+    tmp_e = tempfile.mktemp(suffix=".kscp")
+    pkg_e.save(tmp_e)
+    win_e = MainWindow(tmp_e)
+    win_e.show()
+    sl_mgr_e = win_e._managers[0]
+    host_e = sl_mgr_e.preview_widget()
+    # 首列表「坏列表」自动选中 → 宿主显示占位卡 → errors_changed(1)
+    assert win_e._sl_error_count == 1, win_e._sl_error_count
+    assert isinstance(host_e._view.cards[0].step, PlaceholderStep)
+    assert host_e._view.error_card_indices() == [1]   # 占位卡计入错误数（可定位）
+    assert host_e._view.jump_to_error() is True       # 跳转错误可定位到占位卡
+    assert win_e._exec_btn is not None and not win_e._exec_btn.isEnabled()  # 禁止执行
+    # 切到「干净」列表 → 错误数归零、执行按钮恢复
+    sl_mgr_e.tree_widget().list_selected.emit("干净")
+    assert win_e._sl_error_count == 0
+    assert win_e._exec_btn.isEnabled()
+    # 切回「坏列表」→ 再次禁用；_exec_has_errors 兜底扫描亦为 True
+    sl_mgr_e.tree_widget().list_selected.emit("坏列表")
+    assert not win_e._exec_btn.isEnabled()
+    assert win_e._exec_has_errors() is True
 
     print("MainWindow smoke OK")

@@ -25,7 +25,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 from PyQt5.QtCore import (
     QEasingCurve, QEvent, QPointF, QRectF, Qt, QVariantAnimation, pyqtSignal,
@@ -40,7 +40,13 @@ from PyQt5.QtWidgets import (
 
 from model.step_list import StepList
 from model.step_manager import StepManager
+from model.composite_card import CompositeCard
+from model.placeholder_step import PlaceholderStep
 from widgets.step_card import StepCard, card_size_for_screen
+from widgets.ui_common import make_icon
+
+if TYPE_CHECKING:
+    from model.composite_card_store import CompositeCardStore
 
 __all__ = ["StepClipboard", "StepListView", "TemplateChooserDialog"]
 
@@ -125,15 +131,25 @@ class StepClipboard:
 
 
 class TemplateChooserDialog(QDialog):
-    """添加步骤：模板树选择。按文件夹分组展示全部已注册模板，叶子才可确定。"""
+    """添加步骤：模板树选择 + 合成卡片区。按文件夹分组展示全部已注册模板，
+    另在顶部「合成卡片」分组下列出可选合成卡片（叶子才可确定）。
+
+    选中模板叶子 → 返回模板路径；选中合成卡片叶子 → 返回引用标记
+    ``@合成卡片:<路径>``（由 :meth:`StepListView._add_step` 识别并实例化）。
+    ``exclude_ref`` 为当前编辑的合成卡片路径 → 从列表中过滤（不含自身，防递归）。
+    """
 
     def __init__(self, mgr: StepManager,
-                 parent: Optional[QWidget] = None) -> None:
+                 parent: Optional[QWidget] = None,
+                 composite_paths: Optional[List[str]] = None,
+                 exclude_ref: Optional[str] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("选择步骤模板")
         self.resize(360, 420)
         self._path: Optional[str] = None
         self._mgr = mgr
+        self._composite_paths = list(composite_paths) if composite_paths else []
+        self._exclude_ref = exclude_ref
         lay = QVBoxLayout(self)
         self._tw = QTreeWidget()
         self._tw.setHeaderHidden(True)
@@ -151,31 +167,44 @@ class TemplateChooserDialog(QDialog):
         self._build_tree()
 
     def selected_path(self) -> Optional[str]:
-        """返回选中的模板路径；未选（或选的是组）→ None。"""
+        """返回选中的模板路径或合成卡片引用标记；未选（或选的是组）→ None。"""
         return self._path
 
-    def _build_tree(self) -> None:
+    def _insert_leaf(self, root: QTreeWidgetItem, path: str,
+                     data: str) -> None:
+        """按 ``/`` 分段建子树（中间段=组、末段=叶子），叶子 ``data`` 存入 UserRole。"""
         style = self.style()
+        item = root
+        segs = path.split("/")
+        for i, seg in enumerate(segs):
+            found = None
+            for c in range(item.childCount()):
+                ch = item.child(c)
+                if ch is not None and ch.text(0) == seg:
+                    found = ch
+                    break
+            if found is None:
+                found = QTreeWidgetItem(item)
+                found.setText(0, seg)
+                if i < len(segs) - 1 and style is not None:
+                    found.setIcon(0, style.standardIcon(QStyle.SP_DirIcon))
+            item = found
+        item.setData(0, _PATH_ROLE, data)
+
+    def _build_tree(self) -> None:
         root = self._tw.invisibleRootItem()
         if root is None:
             return
         for path in self._mgr.template_paths():
-            item = root
-            segs = path.split("/")
-            for i, seg in enumerate(segs):
-                found = None
-                for c in range(item.childCount()):
-                    ch = item.child(c)
-                    if ch is not None and ch.text(0) == seg:
-                        found = ch
-                        break
-                if found is None:
-                    found = QTreeWidgetItem(item)
-                    found.setText(0, seg)
-                    if i < len(segs) - 1 and style is not None:
-                        found.setIcon(0, style.standardIcon(QStyle.SP_DirIcon))
-                item = found
-            item.setData(0, _PATH_ROLE, path)
+            self._insert_leaf(root, path, path)
+        # 合成卡片区：顶部「合成卡片」分组下列出可选卡片（排除当前编辑卡 = 自身）
+        available = [p for p in self._composite_paths if p != self._exclude_ref]
+        if available:
+            comp_root = QTreeWidgetItem(root)
+            comp_root.setText(0, "合成卡片")
+            comp_root.setIcon(0, make_icon("composite"))
+            for path in available:
+                self._insert_leaf(comp_root, path, CompositeCard.marker_for(path))
 
     def _update_ok(self) -> None:
         it = self._tw.currentItem()
@@ -194,12 +223,16 @@ class StepListView(QGraphicsView):
 
     edited = pyqtSignal()
     errors_changed = pyqtSignal(int)   # 错误卡片数量变化（工具条统计）
+    composite_jump_requested = pyqtSignal(str)   # 右键合成卡片 → 跳转其编辑界面（ref）
 
     def __init__(self, mgr: StepManager, clipboard: StepClipboard,
-                 parent: Optional[QWidget] = None) -> None:
+                 parent: Optional[QWidget] = None,
+                 composite_store: "Optional[CompositeCardStore]" = None) -> None:
         super().__init__(parent)
         self._mgr = mgr
         self._clipboard = clipboard
+        self._composite_store = composite_store   # 选择器列出合成卡片用（None → 仅模板）
+        self._exclude_ref: Optional[str] = None   # 编辑合成卡片时排除自身（防递归）
         self._step_list: Optional[StepList] = None
         self._cards: List[StepCard] = []
         self._proxies: List[QGraphicsProxyWidget] = []
@@ -233,11 +266,14 @@ class StepListView(QGraphicsView):
 
     # ---- 绑定 / 刷新 ----
     def set_list(self, step_list: Optional[StepList],
-                 mgr: Optional[StepManager] = None) -> None:
-        """绑定列表并重建卡片；``mgr`` 可选更新（同一实例常可省略）。"""
+                 mgr: Optional[StepManager] = None,
+                 exclude_ref: Optional[str] = None) -> None:
+        """绑定列表并重建卡片；``mgr`` 可选更新；``exclude_ref`` = 编辑合成卡片时
+        排除自身的引用路径（选择器过滤，防递归）。"""
         self._step_list = step_list
         if mgr is not None:
             self._mgr = mgr
+        self._exclude_ref = exclude_ref
         self.refresh()
 
     def refresh(self) -> None:
@@ -327,12 +363,19 @@ class StepListView(QGraphicsView):
     def _set_error_label(self, card: StepCard) -> None:
         """按卡片当前 io 校验同步其下方错误标签（合规 → 移除）。
 
+        占位卡片（:class:`PlaceholderStep`）无 io 校验失败，但仍是「错误卡」
+        （模板缺失/签名不匹配）——标签写明失败原因，与 io 非法卡同计同定位。
+
         文本格式「⚠: 原因1, 原因2」；标签在卡片外正下方居中（y = 卡底 + 4）。
         完整文本宽于卡片时以省略号截断到卡宽（:class:`_ErrorLabelItem` 悬停
         浮窗显示完整文本，见 QToolTip）。
         """
         label = self._error_labels.get(card)
-        reasons = card.step.io.error_reasons()
+        step = card.step
+        if isinstance(step, PlaceholderStep):
+            reasons = ["无法还原：%s" % step._reason]   # 占位卡：写明失败原因
+        else:
+            reasons = step.io.error_reasons()
         if not reasons:
             if label is not None:
                 self._scene.removeItem(label)
@@ -438,9 +481,13 @@ class StepListView(QGraphicsView):
         return False
 
     def error_card_indices(self) -> List[int]:
-        """错误卡片序号（1 起，与序号标签一致）：io 校验失败（= 错误标签显示的卡）。"""
+        """错误卡片序号（1 起，与序号标签一致）：io 校验失败 **或** 占位卡片。
+
+        占位卡片（:class:`PlaceholderStep`）虽 io 合规（空签名），但模板缺失/
+        签名不匹配无法执行——计入错误数、可定位跳转、禁止执行（与 io 非法卡同）。
+        """
         return [i + 1 for i, c in enumerate(self._cards)
-                if not c.step.io.is_valid]
+                if not c.step.io.is_valid or isinstance(c.step, PlaceholderStep)]
 
     def _count_errors(self) -> int:
         return len(self.error_card_indices())
@@ -658,6 +705,11 @@ class StepListView(QGraphicsView):
         multi = len(self._multi) > 1
         idx = self._cards.index(card)
         menu = QMenu(self)
+        # 合成卡片：额外提供「跳转到合成卡片编辑」（仅单选；多选不锚定单卡 ref）
+        a_jump = None
+        if not multi and isinstance(card.step, CompositeCard):
+            a_jump = menu.addAction("跳转到合成卡片编辑…")
+            menu.addSeparator()
         a_before = menu.addAction("添加到此步骤前方…")
         a_after = menu.addAction("添加到此步骤后方…")
         menu.addSeparator()
@@ -672,6 +724,9 @@ class StepListView(QGraphicsView):
             for a in (a_before, a_after, a_cut, a_paste):
                 a.setEnabled(False)
         action = menu.exec_(global_pos)
+        if a_jump is not None and action is a_jump:
+            self.composite_jump_requested.emit(card.step.ref)
+            return
         if action is a_before:
             self._add_step(idx)
         elif action is a_after:
@@ -699,13 +754,21 @@ class StepListView(QGraphicsView):
 
     # ---- 操作 ----
     def _add_step(self, index: int) -> None:
-        dlg = TemplateChooserDialog(self._mgr, self)
+        composite_paths = (self._composite_store.paths()
+                           if self._composite_store is not None else None)
+        dlg = TemplateChooserDialog(
+            self._mgr, self,
+            composite_paths=composite_paths, exclude_ref=self._exclude_ref)
         if dlg.exec_() != QDialog.Accepted:
             return
         path = dlg.selected_path()
         if not path:
             return
-        step = self._mgr.create_step(path)
+        # 合成卡片引用标记 → 合成卡片实例；否则按模板路径实例化
+        if CompositeCard.is_marker(path):
+            step = CompositeCard.from_marker(path, self._mgr)
+        else:
+            step = self._mgr.create_step(path)
         sl = self._step_list
         if sl is None:
             return
@@ -769,6 +832,8 @@ if __name__ == "__main__":
     from model.step_list_store import StepListStore
     from model.step_manager import StepManager
     from model.variable_tree import VariableTree
+    from model.composite_card import CompositeCard
+    from model.composite_card_store import CompositeCardStore
 
     app = QApplication.instance() or QApplication(sys.argv)
 
@@ -936,6 +1001,66 @@ class DemoStep(Step):
     dlg._tw.setCurrentItem(delay)
     dlg.accept()
     assert dlg.result() == 0
+
+    # ---- 合成卡片区：选择器列出合成卡片；exclude_ref 排除自身；_add_step 实例化 ----
+    cstore = CompositeCardStore.create_empty()
+    cstore.add_group("组")
+    cstore.add_list("组/卡A", StepList.create_empty())
+    cstore.add_list("卡B", StepList.create_empty())
+    # 含合成卡片区：顶部多一个「合成卡片」分组，叶子 UserRole = 引用标记
+    cdlg = TemplateChooserDialog(mgr, None, composite_paths=cstore.paths())
+    ctop = [cdlg._tw.topLevelItem(i).text(0)
+            for i in range(cdlg._tw.topLevelItemCount())]
+    assert ctop == ["控制流程", "示例", "合成卡片"], ctop
+    csec = cdlg._tw.topLevelItem(2)
+    assert csec is not None and csec.childCount() == 2          # 组/卡A 拆成 组>卡A、卡B
+    # 顺序由 paths() 排序决定（卡B < 组/卡A）→ 按名查找更稳
+    grp_a = leaf_b = None
+    for i in range(csec.childCount()):
+        ch = csec.child(i)
+        if ch is None:
+            continue
+        if ch.text(0) == "组":
+            grp_a = ch
+        elif ch.text(0) == "卡B":
+            leaf_b = ch
+    assert grp_a is not None and grp_a.childCount() == 1
+    leaf_a = grp_a.child(0)
+    assert leaf_a is not None
+    assert leaf_a.data(0, _PATH_ROLE) == "@合成卡片:组/卡A"     # 引用标记
+    assert leaf_b is not None and leaf_b.data(0, _PATH_ROLE) == "@合成卡片:卡B"
+    # 选中合成卡片叶子 → selected_path 返回标记；OK 可用
+    cdlg._tw.setCurrentItem(leaf_b)
+    assert cdlg.selected_path() == "@合成卡片:卡B"
+    assert cdlg._ok.isEnabled() is True
+    # exclude_ref 排除自身（编辑 卡A 时不含 卡A，防递归）：卡A 被过滤、卡B 仍在
+    cdlg_ex = TemplateChooserDialog(mgr, None, composite_paths=cstore.paths(),
+                                    exclude_ref="组/卡A")
+    csec_ex = cdlg_ex._tw.topLevelItem(2)
+    assert csec_ex is not None
+    # 组/卡A 过滤后整组「组」消失（其唯一成员被排除）→ 仅剩 卡B
+    assert csec_ex.childCount() == 1
+    only = csec_ex.child(0)
+    assert only is not None and only.text(0) == "卡B"
+    assert only.data(0, _PATH_ROLE) == "@合成卡片:卡B"
+    # _add_step：补丁选择器返回合成卡片标记 → 列表新增一张 CompositeCard
+    cv = StepListView(mgr, StepClipboard(), composite_store=cstore)
+    csl = StepList.create_empty()
+    cv.set_list(csl, mgr)
+    cedited = []
+    cv.edited.connect(lambda: cedited.append(1))
+    orig_path2 = TemplateChooserDialog.selected_path
+    TemplateChooserDialog.exec_ = lambda self: QDialog.Accepted
+    TemplateChooserDialog.selected_path = lambda self: "@合成卡片:卡B"
+    try:
+        cv._add_step(0)
+    finally:
+        TemplateChooserDialog.selected_path = orig_path2
+    assert len(csl) == 1
+    assert isinstance(csl[0], CompositeCard) and csl[0].ref == "卡B"
+    assert cedited == [1]
+    # 卡片显示合成卡片的叶子名（用户给的命名，多个合成卡片可区分）
+    assert cv._cards[0]._name.text() == "卡B"
 
     # ---- I-1：卡片内 io 编辑 → edited（宿主保存链路；经真实 textChanged 路径） ----
     # 重建后的卡片仍可编辑不崩：同一 step 曾多次建卡（io 多个已生成控件，旧控件已销毁）

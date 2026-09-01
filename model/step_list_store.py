@@ -459,11 +459,10 @@ class DemoStep(Step):
         raise AssertionError("键含 '/' 应抛 ValueError")
     except ValueError:
         pass
-    try:
-        StepListStore.from_json({"坏": ["not*valid*"]}, mgr)
-        raise AssertionError("坏格式串应抛 ValueError")
-    except ValueError as exc:
-        assert "第 0 条" in str(exc)
+    # 坏格式串 → 不再抛错，而是落为红色占位卡片（resilient；详见 model.step_list 冒烟）
+    bad_store = StepListStore.from_json({"坏": ["not*valid*"]}, mgr)
+    from model.placeholder_step import PlaceholderStep
+    assert isinstance(bad_store.get("坏")[0], PlaceholderStep)
 
     # 嵌套深度上限：深层嵌套 → 可控 ValueError（而非 RecursionError）
     deep_s = cur_s = {}

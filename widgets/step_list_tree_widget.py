@@ -769,19 +769,10 @@ class StepListTreeWidget(QTreeWidget):
         else:
             parent = target_path.rsplit("/", 1)[0] if "/" in target_path else ""
         snap = [(p.rsplit("/", 1)[-1], self._triples_of(p)) for p in paths]
-        # 事务性预检：删除源之前先验证全部格式串可还原（模板缺失/未加载 →
-        # from_format_strings 抛 ValueError）。旧实现先删后插：异常时源已删、
-        # 插入中断 → 列表真丢，异常穿透 dropEvent 被 Qt 吞掉（用户：拖拽哪个
-        # 哪个就消失）。预检失败 → 弹窗提示 + 拒绝，任何数据都不动。
-        for _n, triples in snap:
-            for _rel, is_group, fmts in triples:
-                if is_group or fmts is None:
-                    continue
-                try:
-                    StepList.from_format_strings(fmts, self._manager)
-                except ValueError as e:
-                    QMessageBox.warning(self, "移动", "移动失败：%s" % e)
-                    return False
+        # 占位卡片机制（PlaceholderStep）保证 from_format_strings 永不抛错——
+        # 不可还原的步骤落为红色占位卡（原格式串保留），故「剪切粘贴」式移动无
+        # 数据丢失风险，无需旧版的删除前预检（旧预检为防 from_format_strings
+        # 抛异常致「先删源后插中断 → 列表真丢」；现占位兜底，该风险已消除）。
         for p in paths:
             try:
                 self._store.remove(p)
@@ -1645,9 +1636,10 @@ class DemoStep(Step):
     # 选中行仍在（旧实现选中行被 Qt 删掉）
     assert [it.data(0, _PATH_ROLE) for it in tw_reg.selectedItems()] == ["丙"]
 
-    # ---- 事务性移动：格式串不可还原（模板缺失/未加载）→ 拒绝且数据不动 ----
-    # 旧实现先删源后解码插入：from_format_strings 抛异常时源已删、插入中断
-    # → 列表真丢（探针复现），异常穿透 dropEvent 被 Qt 吞 → 「拖拽哪个丢哪个」
+    # ---- 移动含不可还原步骤的列表：占位兜底 → 移动成功、步骤不丢 ----
+    # 占位卡片机制下 from_format_strings 永不抛错：不可还原的步骤落为红色占位卡
+    # （原格式串保留），故「剪切粘贴」式移动无数据丢失，移动成功（旧版因
+    # from_format_strings 抛异常而拒绝移动；现占位兜底，已无该限制）。
     pkg_t = KscpPackage.create_empty()
     tree_t = VariableTree.create_empty()
     mgr_t = StepManager(pkg_t, tree_t)            # 未 load → 注册表空
@@ -1655,21 +1647,19 @@ class DemoStep(Step):
     store_t.add_list("x1", StepList.create_empty())
     store_t.add_list("x2", StepList.create_empty())
     store_t.add_list("x3", StepList.create_empty())
-    # x2 放进一个「格式串不可还原」的列表：步骤来自已 load 的 mgr，
-    # 目标 mgr_t 未 load → from_format_strings 无匹配模板
+    # x2 放进一个「格式串不可还原」的步骤：来自已 load 的 mgr，
+    # 目标 mgr_t 未 load → from_format_strings 无匹配模板 → 占位卡
     sl_x = StepList.create_empty()
     sl_x.add(mgr.create_step("示例"))              # 来自上文已 load 的 mgr
     store_t.get("x2").add(sl_x[0])
     tw_t = StepListTreeWidget(store_t, mgr_t, StepClipboard(), lambda: None)
-    _warn = QMessageBox.warning
-    QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.Ok)
-    try:
-        assert not tw_t._move_paths(
-            ["x2"], "x1", QAbstractItemView.OnItem)   # 不可还原 → 拒绝
-    finally:
-        QMessageBox.warning = _warn
+    from model.placeholder_step import PlaceholderStep
+    assert tw_t._move_paths(["x2"], "x1", QAbstractItemView.OnItem) is True
+    # x2 移到 x1 之后（OnItem = 目标之后）；步骤保留为占位卡（原串不丢）
     assert [p for p, _g in store_t.walk()] == ["x1", "x2", "x3"], \
-        [p for p, _g in store_t.walk()]               # 源未删 → 数据不动
+        [p for p, _g in store_t.walk()]
+    moved = store_t.get("x2")
+    assert isinstance(moved[0], PlaceholderStep)   # 不可还原 → 占位卡（数据保留）
 
     # ---- 删除空组（无列表）→ 不崩溃，显示删除后首个列表 ----
     store_pn = StepListStore.create_empty()

@@ -30,6 +30,13 @@ StepCard[valid="false"] {
     border-color: rgba(198, 86, 76, 0.85);
 }
 
+/* 占位卡片（无法还原：模板缺失/签名不匹配）：红背景（与 io 非法同级红，
+   二者互斥——占位 io 空签名恒合规 valid=true）；state=error 已给红边框 */
+StepCard[broken="true"] {
+    background: rgba(232, 128, 118, 0.32);
+    border-color: rgba(198, 86, 76, 0.9);
+}
+
 /* 选中高亮：蓝边框（放最后，覆盖状态/非法边框色；背景色不变） */
 StepCard[selected="true"] {
     border-width: 2px;
