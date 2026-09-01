@@ -12,10 +12,10 @@ KScript 变量类型 = `VariableType` 子类（模型注册）+ `register_editor
 
 ## Checklist
 
-**1. 模型注册**（`model/project_variable.py`）：
+**1. 模型注册**（`model/变量.project_variable.py`）：
 - 子类化 `VariableType`，设置 `name` / `is_resource` / `suffixes` / `description`：
   - 资源类：`is_resource=True`、`suffixes=(...)`（小写含点）；`normalize` 委托
-    `model.path_util.norm_maybe_root`；`is_valid` 检查 `data.startswith("assets/")`
+    `model.工程.path_util.norm_maybe_root`；`is_valid` 检查 `data.startswith("assets/")`
     + 后缀 + `package.is_file(data)`；`to_actual` 返回 `package.read_file(data)`
     （仿 `_ImageType`）
   - 字面值类：`is_valid` 只查数据类型（`_StringType`/`_NumberType` 可作蓝本）
@@ -23,7 +23,7 @@ KScript 变量类型 = `VariableType` 子类（模型注册）+ `register_editor
   新类型只剩三行声明
 - 末尾 `ProjectVariable.register_type(实例)` 注册
 
-**2. GUI 编辑器注册**（`widgets/variable_tree_widget.py`）：
+**2. GUI 编辑器注册**（`widgets/树.variable_tree_widget.py`）：
 - `register_editor("类型名", fn)`，`fn(var, package, on_changed) -> QWidget`；
   资源类仿 `_image_editor`（信息区 + `ResourceTreeWidget.pick_resource(pkg, tuple(var.suffixes), w)`
   选择按钮，按后缀过滤）；字面值类用 QLineEdit 实时校验
@@ -32,16 +32,16 @@ KScript 变量类型 = `VariableType` 子类（模型注册）+ `register_editor
 
 **3. 联动坑（先 grep 全库，含各模块 `__main__` 冒烟）**：把某名字当「未注册类型」
 示例的用例，注册新类型后必须换成别的占位名：
-- `model/step.py`：注解未注册用例
-- `model/step_manager.py`：坏注解模板
-- `model/variable_tree.py`：`filter_by_type("未知")` 用例
-- `model/project_variable.py` 自身冒烟：`create("未知")` 抛 ValueError 用例 +
+- `model/步骤.step.py`：注解未注册用例
+- `model/步骤.step_manager.py`：坏注解模板
+- `model/变量.variable_tree.py`：`filter_by_type("未知")` 用例
+- `model/变量.project_variable.py` 自身冒烟：`create("未知")` 抛 ValueError 用例 +
   「自定义类型演示」——**演示类若与新类型同名，会在运行期覆盖内置注册**
   （测试恰好仍过、极难察觉）
 （基线教训：注册 audio 时靠全库 grep 才找全，漏一处必红）
 
 **4. 可选联动（注意副作用）**：
-- `model/step_io.py`：资源类槽经 `_type_is_resource` 自动获得选择按钮；但
+- `model/步骤.step_io.py`：资源类槽经 `_type_is_resource` 自动获得选择按钮；但
   `_IMAGE_EXTS` **同时**用于整合选择器「资源」页过滤**和资源类常量的合法性校验**
   ——直接往里塞新后缀会让 image 槽误接受新类型常量；如需资源页直选新类型，
   应按槽类型拆分过滤列表（否则只能经变量引用选择）

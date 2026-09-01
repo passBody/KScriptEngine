@@ -15,12 +15,12 @@ KScript 的 action = `Step` 子类模板（`actions/<类别>/<名字>.py`），�
 **1. 文件骨架**（仿照 `actions/输入/多次点击.py` 与 `actions/输入/按键.py`）：
 - 模块 docstring 分「输入槽 / 运行规则」两段；类 `name`/`description`/`input_class`/`output_class`
 - 输入/输出 dataclass 的字段**注解必须是已注册的变量类型名**（`"number"`/`"string"`/`"image"` 等，未知类型在加载时被 StepManager 跳过并记日志）
-- **非必须参数**用 `optional(default)` 标记（`from model.step import Step, optional`）：
+- **非必须参数**用 `optional(default)` 标记（`from model.步骤.step import Step, optional`）：
   `素材图片: "image" = optional("")` —— 可选槽**空值不校验**（卡片不报错）、
   **解析为 None** 传入 run()、一旦填值仍按类型校验；仅输入槽支持、输出槽恒必须；
   **run() 必须容忍可选槽的 None**（典型：编辑期辅助参数，如鼠标点击的素材图片）
 - 输入模拟类模板必须提供 `_new_control()` 桩工厂（冒烟替换用，仿 `按键.py`）
-- 鼠标类自定义视图的**素材预览/设置点位复用** `widgets.mark_preview_view.MarkPreviewView`
+- 鼠标类自定义视图的**素材预览/设置点位复用** `widgets.卡片.mark_preview_view.MarkPreviewView`
   （io/素材槽/mode/read_points/write_points 参数化，合成样式 dot/rect/dots 齐备）——
   不要在新 action 里再复制一份缩略图/弹窗代码
 - `__all__ = ["类名"]`
@@ -37,7 +37,7 @@ KScript 的 action = `Step` 子类模板（`actions/<类别>/<名字>.py`），�
   `_mod._new_control = lambda: 桩()`。**绝不用 `import 模块 as _mod`** —— 包导入缓存
   使桩挂到旧模块对象上，冒烟会触发真实按键/鼠标（按键.py 顶部有完整注释）
 - `time.sleep` 同样经 `_mod.time.sleep` 桩替换（冒烟不等真实延时）
-- **步骤内长等待用 `from model.run_interrupt import interruptible_sleep`**（立即停止 ~20ms
+- **步骤内长等待用 `from model.执行.run_interrupt import interruptible_sleep`**（立即停止 ~20ms
   内中断；未登记事件时即普通 sleep）——延时、连点间隔、拖拽插值均已接入；
   冒烟对应经 `_mod.interruptible_sleep` 桩替换
 - 冒烟**零真实输入**：桩记录调用并断言参数（如 `called == [(key, duration)]`）

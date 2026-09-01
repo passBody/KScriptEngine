@@ -37,7 +37,7 @@ uv pip install --no-index --find-links wheels/ -e .   # 或按 export 清单安�
 
 **关于 Qt 插件弹窗**（"no Qt platform plugin could be initialized"）：
 venv 等独立部署下 PyQt5 可能把插件目录解析到基础 Python 安装目录。
-程序主入口已自动指路（`widgets/ui_common.ensure_qt_plugin_path`）；
+程序主入口已自动指路（`widgets/通用/ui_common.ensure_qt_plugin_path`）；
 模块冒烟等任意脚本由 `tools/fix_qt_plugins.py` 安装的 sitecustomize 兜底
 （Python 3.14 起不再从当前目录加载 sitecustomize，故须装入 site-packages）。
 如仍报错，可手工把 PyQt5 安装目录下的 `PyQt5/Qt5/plugins` 整个文件夹

@@ -12,7 +12,7 @@ Python 3.14 起不再从当前目录/脚本目录加载 sitecustomize（安全�
 根因：venv 中 PyQt5 把插件目录解析到**基础 Python 安装目录**（如
 ``C:/0_self/bin/Python314/platforms``），导致「no Qt platform plugin
 could be initialized」弹窗、进程以 127 退出。程序主入口 main() 会调用
-:func:`widgets.ui_common.ensure_qt_plugin_path`（同逻辑），但模块冒烟与
+:func:`widgets.通用.ui_common.ensure_qt_plugin_path`（同逻辑），但模块冒烟与
 任意脚本调不到——由本文件兜底。
 
 setdefault 语义：用户手工设置的环境变量优先，不会被覆盖。
