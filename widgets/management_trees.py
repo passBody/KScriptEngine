@@ -13,19 +13,20 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional
 
-from PyQt5.QtCore import QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QPushButton,
+    QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from model.kscp_package import KscpPackage
 from model.log_model import LogModel
 from model.step_list import StepList
 from model.step_list_store import StepListStore
+from model.step_page_store import StepPageStore
 from model.step_manager import StepManager
 from model.composite_card import repoint_refs, repoint_param_refs, CompositeCard
 from model.composite_card_store import CompositeCardStore
@@ -49,14 +50,15 @@ __all__ = [
 ]
 
 
-class ManagementTree:
-    """管理树基类（预留接口）：提供左侧树控件 + 中间预览控件。
+class ManagementTree(QObject):
+    """管理树基类（QObject：子类可定义 pyqtSignal）：提供左侧树控件 + 中间预览控件。
 
     子类实现 :meth:`_build_tree` / :meth:`_build_preview`（或重写
     :meth:`tree_widget` / :meth:`preview_widget`）。控件懒构建并缓存。
     """
 
     def __init__(self, name: str) -> None:
+        super().__init__()
         self._name = name
         self._tree: Optional[QWidget] = None
         self._preview: Optional[QWidget] = None
@@ -169,7 +171,18 @@ class StepManagementTree(ManagementTree):
 
 
 class StepListManagementTree(ManagementTree):
-    """步骤列表管理树：StepListTreeWidget + 宿主（占位/列表视图）。"""
+    """步骤列表管理树：执行列表页容器（标题右击重命名 + 下拉切换 +
+    添加页/删除该页）+ 每页一棵缓存的 StepListTreeWidget + 共享宿主。
+
+    页信号（main_widget 接线）：``page_changed/page_added/page_renamed/
+    page_removed``；``list_selected`` 为当前页选中列表路径的跨页统一出口。
+    """
+
+    page_changed = pyqtSignal(str)          # 当前页切换（新页名）
+    page_added = pyqtSignal(str)
+    page_renamed = pyqtSignal(str, str)     # (old, new)
+    page_removed = pyqtSignal(str)
+    list_selected = pyqtSignal(str)         # 当前页选中列表路径
 
     def __init__(self, package: KscpPackage, tree: VariableTree,
                  mgr: Optional[StepManager] = None,
@@ -183,65 +196,271 @@ class StepListManagementTree(ManagementTree):
         else:
             self._mgr = StepManager(package, tree)
             self._mgr.load()
+        # step_list.json：v2 = 顶层执行列表页；v1（顶层含列表叶子）自动包成
+        # 单页「执行列表1」。文件已存在时打开不改写（v1 文件保持原样，见
+        # StepPageStore docstring 的格式检测说明）
         if package.exists("step_list.json"):
-            self._store = StepListStore.from_json(
+            self._page_store = StepPageStore.from_json(
                 package.read_file("step_list.json"), self._mgr)
         else:
-            self._store = StepListStore.create_empty()
+            self._page_store = StepPageStore.create_empty()
             self._save_store()
+        self._page_store.ensure_default_page()
+        self._current_page: str = self._page_store.page_names()[0]
         self._cstore = composite_store   # 合成卡片存储（阶段4：选择器插入合成卡片用）
         self._clipboard = clipboard if clipboard is not None else StepClipboard()
-        self._sl_tree: Optional[StepListTreeWidget] = None
+        self._page_trees: Dict[str, StepListTreeWidget] = {}   # 页名 → 树（懒建缓存）
+        self._page_current: Dict[str, Optional[str]] = {}      # 每页各自记住选中列表
+        self._page_container: Optional[QWidget] = None
+        self._page_title: Optional[QLabel] = None
+        self._page_menu_btn: Optional[QToolButton] = None
+        self._page_stack: Optional[QStackedWidget] = None
+        self._add_page_btn: Optional[QPushButton] = None
+        self._del_page_btn: Optional[QPushButton] = None
         self._host: Optional[StepListHost] = None
-        self._current: Optional[str] = None
+        self._current: Optional[str] = None   # 当前页内选中列表路径
+        self._read_only = False
         self._save_timer: Optional[QTimer] = None   # 落盘防抖（评审#10）
+
+    # ---- 页/存储访问 ----
+    @property
+    def page_store(self) -> StepPageStore:
+        return self._page_store
+
+    @property
+    def current_page(self) -> str:
+        return self._current_page
 
     @property
     def store(self) -> StepListStore:
-        """步骤列表存储（执行器数据源）。"""
-        return self._store
+        """当前页的步骤列表存储（执行器数据源；兼容既有调用方）。"""
+        return self._page_store.get_page(self._current_page)
 
     @property
     def current_path(self) -> Optional[str]:
-        """当前选中的步骤列表路径（「仅执行当前列表」范围用）；未选 → None。"""
+        """当前页内选中的步骤列表路径（「仅执行当前列表」范围用）；未选 → None。"""
         return self._current
 
+    def current_tree(self) -> Optional[StepListTreeWidget]:
+        """当前页的树（未构建 → None）。"""
+        return self._page_trees.get(self._current_page)
+
+    def trees(self) -> List[StepListTreeWidget]:
+        """全部已构建的页树（执行期只读/高亮清扫用）。"""
+        return list(self._page_trees.values())
+
     def set_read_only(self, ro: bool) -> None:
-        """执行期只读：树可点击切换查看列表（禁拖拽/右键/快捷键/勾选），
-        卡片视图禁编辑保留悬停动画。"""
-        if self._sl_tree is not None:
-            self._sl_tree.set_read_only(ro)
+        """执行期只读：全部页树可点击切换查看（禁拖拽/右键/快捷键/勾选）、
+        卡片视图禁编辑保留悬停动画；添加页/删除该页禁用，标题重命名禁用
+        （handler 内守卫）；下拉切换保持可用（执行中可查看其他页）。"""
+        self._read_only = ro
+        for t in self._page_trees.values():
+            t.set_read_only(ro)
         if self._host is not None:
             self._host.set_read_only(ro)
+        if self._add_page_btn is not None:
+            self._add_page_btn.setEnabled(not ro)
+            self._del_page_btn.setEnabled(not ro)
 
     def icon(self) -> QIcon:
         return make_icon("step")
 
     def _save_store(self) -> None:
-        self._package.write_file("step_list.json", self._store.to_json_bytes())
+        self._package.write_file("step_list.json", self._page_store.to_json_bytes())
 
     def refresh_cards(self) -> None:
         """变量树变化 → 宿主重检卡片颜色（不重建）。"""
         if self._host is not None:
             self._host.refresh_validity()
 
+    # ---- 页容器构建 ----
     def tree_widget(self) -> QWidget:
-        if self._sl_tree is None:
-            self._sl_tree = StepListTreeWidget(
-                self._store, self._mgr, self._clipboard,
-                self._save_store, None)
-            self._sl_tree.list_selected.connect(self._on_list_selected)
-            self._sl_tree.store_changed.connect(self._on_store_changed)
-        assert self._sl_tree is not None
-        return self._sl_tree
+        if self._page_container is None:
+            self._build_page_container()
+        assert self._page_container is not None
+        return self._page_container
 
+    def _build_page_container(self) -> None:
+        """树面板 = 标题行（标题右击重命名 + 下拉切换）+ 页操作按钮行
+        （添加页/删除该页）+ QStackedWidget（每页一棵树）。"""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        title_row = QHBoxLayout()
+        self._page_title = QLabel(self._current_page)
+        self._page_title.setStyleSheet(
+            "font-weight:bold; font-size:14px; color:#333;")
+        self._page_title.setToolTip("右击重命名当前执行列表")
+        self._page_title.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._page_title.customContextMenuRequested.connect(
+            self._on_page_title_menu)
+        title_row.addWidget(self._page_title)
+        title_row.addStretch()
+        self._page_menu_btn = QToolButton()
+        self._page_menu_btn.setText("切换 ▾")
+        self._page_menu_btn.setPopupMode(QToolButton.InstantPopup)
+        self._page_menu_btn.setToolTip("切换到其他执行列表")
+        self._page_menu_btn.setMenu(self._build_page_menu())
+        title_row.addWidget(self._page_menu_btn)
+        lay.addLayout(title_row)
+
+        btn_row = QHBoxLayout()
+        self._add_page_btn = QPushButton("添加页")
+        self._add_page_btn.setToolTip("新建一个执行列表并跳转过去")
+        self._add_page_btn.clicked.connect(self._on_add_page_clicked)
+        self._del_page_btn = QPushButton("删除该页")
+        self._del_page_btn.setToolTip("删除当前执行列表（至少保留一页）")
+        self._del_page_btn.clicked.connect(self._on_del_page_clicked)
+        btn_row.addWidget(self._add_page_btn)
+        btn_row.addWidget(self._del_page_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
+        self._page_stack = QStackedWidget()
+        for name in self._page_store.page_names():
+            self._page_stack.addWidget(self._tree_for_page(name))
+        lay.addWidget(self._page_stack, 1)
+        self._page_container = box
+
+    def _tree_for_page(self, name: str) -> StepListTreeWidget:
+        """页名 → 缓存的树实例（闭包携带页名转发信号）。"""
+        if name not in self._page_trees:
+            tree = StepListTreeWidget(
+                self._page_store.get_page(name), self._mgr, self._clipboard,
+                self._save_store, None)
+            tree.list_selected.connect(
+                lambda path, n=name: self._on_list_selected(n, path))
+            tree.store_changed.connect(
+                lambda n=name: self._on_store_changed(n))
+            self._page_trees[name] = tree
+        return self._page_trees[name]
+
+    def _build_page_menu(self) -> QMenu:
+        """下拉切换菜单：全部页标题、当前页勾选。"""
+        menu = QMenu(self._page_menu_btn)
+        for name in self._page_store.page_names():
+            act = menu.addAction(name)
+            act.setCheckable(True)
+            act.setChecked(name == self._current_page)
+            act.triggered.connect(lambda _=False, n=name: self._activate_page(n))
+        return menu
+
+    def _refresh_page_menu(self) -> None:
+        if self._page_menu_btn is not None:
+            self._page_menu_btn.setMenu(self._build_page_menu())
+
+    # ---- 页操作 ----
+    def _activate_page(self, name: str) -> None:
+        """切换当前页：栈切树、标题/菜单刷新、恢复该页选中列表（无则首个）、
+        宿主重绑、emit page_changed。"""
+        if name == self._current_page or name not in self._page_store.page_names():
+            return
+        self._current_page = name
+        tree = self._tree_for_page(name)
+        self._page_stack.setCurrentWidget(tree)
+        if self._page_title is not None:
+            self._page_title.setText(name)
+        self._refresh_page_menu()
+        if name in self._page_current:
+            self._current = self._page_current[name]
+            self._show_current()
+        else:
+            # 首次进入该页：自动选中首个列表（同打开工程行为）；无列表 → 占位
+            self._current = None
+            first = tree.first_list_path()
+            if first:
+                item = tree.find_item(first)
+                if item is not None:
+                    tree.setCurrentItem(item)   # 触发 list_selected → 宿主联动
+            else:
+                self._show_current()            # 空页 → 宿主回占位页
+        self.page_changed.emit(name)
+
+    def _on_page_title_menu(self, pos) -> None:
+        """标题右击菜单：重命名（执行期只读守卫）。"""
+        if self._read_only or self._page_title is None:
+            return
+        menu = QMenu(self._page_title)
+        a_rename = menu.addAction("重命名")
+        a = menu.exec_(self._page_title.mapToGlobal(pos))
+        if a is a_rename:
+            self._rename_current_page()
+
+    def _rename_current_page(self) -> None:
+        """重命名当前页；重名/非法名 → 日志报错并阻止（不落盘、不切换）。"""
+        old = self._current_page
+        new, ok = QInputDialog.getText(
+            self._page_container, "重命名执行列表", "标题：", text=old)
+        if not ok or not new.strip() or new.strip() == old:
+            return
+        new = new.strip()
+        try:
+            self._page_store.rename_page(old, new)
+        except (ValueError, FileExistsError) as e:
+            LogModel.instance().error("重命名执行列表失败：%s" % e)
+            return
+        self._page_trees[new] = self._page_trees.pop(old)     # 缓存树/选中记录重键
+        if old in self._page_current:
+            self._page_current[new] = self._page_current.pop(old)
+        self._current_page = new
+        if self._page_title is not None:
+            self._page_title.setText(new)
+        self._refresh_page_menu()
+        self._save_store()
+        self.page_renamed.emit(old, new)
+
+    def _on_add_page_clicked(self) -> None:
+        """添加页：命名（默认建议「执行列表N」）→ 建页 → 跳转新页。
+        重名/非法名 → 日志报错并阻止。"""
+        if self._read_only:
+            return
+        base = "执行列表%d" % (len(self._page_store.page_names()) + 1)
+        name, ok = QInputDialog.getText(
+            self._page_container, "添加执行列表", "标题：", text=base)
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        try:
+            self._page_store.add_page(name)
+        except (ValueError, FileExistsError) as e:
+            LogModel.instance().error("添加执行列表失败：%s" % e)
+            return
+        self._page_stack.addWidget(self._tree_for_page(name))
+        self._save_store()
+        self.page_added.emit(name)
+        self._activate_page(name)              # 跳转到新页
+
+    def _on_del_page_clicked(self) -> None:
+        """删除当前页（守卫：最后一页拒绝）；成功 → 激活首剩页。"""
+        if self._read_only:
+            return
+        name = self._current_page
+        try:
+            self._page_store.remove_page(name)
+        except (ValueError, FileNotFoundError) as e:
+            LogModel.instance().error("删除执行列表失败：%s" % e)
+            return
+        tree = self._page_trees.pop(name, None)
+        if tree is not None:
+            self._page_stack.removeWidget(tree)
+            tree.deleteLater()
+        self._page_current.pop(name, None)
+        self._save_store()
+        self.page_removed.emit(name)
+        self._current_page = ""                # 强制走切换路径
+        self._activate_page(self._page_store.page_names()[0])
+
+    # ---- 编辑/落盘 ----
     def _on_edited(self) -> None:
         """视图内容编辑（io/签名/激活切换）→ 防抖落盘 + 树勾选框同步激活态。
 
         防抖 500ms：连续键入合并为一次写盘（此前每键一次全量序列化——评审#10）。
         """
-        if self._sl_tree is not None:
-            self._sl_tree.refresh_active_marks()
+        t = self.current_tree()
+        if t is not None:
+            t.refresh_active_marks()
         if self._save_timer is None:
             self._save_timer = QTimer()
             self._save_timer.setSingleShot(True)
@@ -261,77 +480,94 @@ class StepListManagementTree(ManagementTree):
 
     def _refresh_tree_marks(self, _n: int) -> None:
         """卡片错误数变化 → 按列表 io 校验重标树错误条目（红加粗，见 refresh_error_marks）。"""
-        if self._sl_tree is not None:
-            self._sl_tree.refresh_error_marks()
+        t = self.current_tree()
+        if t is not None:
+            t.refresh_error_marks()
 
     # ---- 宿主联动 ----
-    def _on_list_selected(self, path: str) -> None:
-        self._current = path
-        if self._host is not None:
-            try:
-                self._host.set_list(self._store.get(path), self._mgr)
-            except FileNotFoundError:
-                self._host.set_list(None)
-
-    def _on_store_changed(self) -> None:
-        """树内容变更（勾选激活/添加/粘贴/删除）→ 宿主同步当前列表。
-
-        删除 → 占位页；其余（尤其树勾选框切换激活，list_selected 不触发）
-        → 重建卡片画面，激活切换立即刷新视图。
-        """
-        if self._host is None or self._current is None:
+    def _show_current(self) -> None:
+        """按当前页当前选中列表重绑宿主；未选/被删 → 占位页。"""
+        if self._host is None:
+            return
+        if self._current is None:
+            self._host.set_list(None)
             return
         try:
-            lst = self._store.get(self._current)
+            self._host.set_list(self.store.get(self._current), self._mgr)
+        except FileNotFoundError:
+            self._host.set_list(None)
+
+    def _on_list_selected(self, page: str, path: str) -> None:
+        """某页树选中列表：记录该页选中态；当前页 → 联动宿主 + 统一出口信号。"""
+        self._page_current[page] = path
+        if page != self._current_page:
+            return
+        self._current = path
+        self._show_current()
+        self.list_selected.emit(path)
+
+    def _on_store_changed(self, page: str) -> None:
+        """当前页树内容变更（勾选激活/添加/粘贴/删除）→ 宿主同步当前列表。
+
+        删除 → 占位页；其余（尤其树勾选框切换激活，list_selected 不触发）
+        → 重建卡片画面，激活切换立即刷新视图。后台页变更不联动（宿主只显示当前页）。
+        """
+        if page != self._current_page or self._host is None or self._current is None:
+            return
+        try:
+            lst = self.store.get(self._current)
         except FileNotFoundError:
             self._host.set_list(None)
         else:
             self._host.set_list(lst, self._mgr)
 
     def repoint_composite_refs(self, old_path: str, new_path: str) -> int:
-        """合成卡片重命名时，把本步骤列表存储内引用 ``old_path`` 的条目改指
+        """合成卡片重命名时，把**全部页**内引用 ``old_path`` 的条目改指
         ``new_path``；返回改动数。
 
         改的是 :class:`CompositeCard` 实例的 ``ref/name``（步骤列表里只存标记串，
         ``to_format_string`` 用 ``self.ref``，故改实例即改未来落盘的标记）。
         改完落盘 ``step_list.json`` 并重建当前卡片画面（卡片名立即更新）。
         """
-        n = repoint_refs(self._store, old_path, new_path)
+        n = 0
+        for name in self._page_store.page_names():
+            n += repoint_refs(self._page_store.get_page(name), old_path, new_path)
         if n:
             self._save_store()
-            self._on_store_changed()    # 重绑宿主：StepCard 重读 step.name → 卡片名刷新
+            self._on_store_changed(self._current_page)   # 重绑宿主：卡片名立即更新
         return n
 
     def resync_composite_steps(self, ref: str) -> None:
-        """合成卡片签名变更后，重同步本存储内引用该卡的 CompositeCard 步骤 io。
+        """合成卡片签名变更后，重同步**全部页**内引用该卡的 CompositeCard 步骤 io。
 
-        遍历所有步骤列表，对 ref 匹配的 CompositeCard 步骤调 resync_io（按新签名
-        重建类型化 io，保留已填值）。当前列表有变化 → 刷新宿主卡片（io 变了）。
+        对 ref 匹配的 CompositeCard 步骤调 resync_io（按新签名重建类型化 io，
+        保留已填值）。当前页当前列表有变化 → 刷新宿主卡片（io 变了）。
         """
         current_changed = False
-        for path, is_group in self._store.walk():
-            if is_group:
-                continue
-            try:
-                sl = self._store.get(path)
-            except FileNotFoundError:
-                continue
-            sl_changed = False
-            for step in sl.steps:
-                if isinstance(step, CompositeCard) and step.ref == ref:
-                    if step.resync_io():
-                        sl_changed = True
-            if sl_changed and path == self._current:
-                current_changed = True
+        for name in self._page_store.page_names():
+            sl_store = self._page_store.get_page(name)
+            for path, is_group in sl_store.walk():
+                if is_group:
+                    continue
+                try:
+                    sl = sl_store.get(path)
+                except FileNotFoundError:
+                    continue
+                for step in sl.steps:
+                    if isinstance(step, CompositeCard) and step.ref == ref:
+                        if step.resync_io() \
+                                and name == self._current_page \
+                                and path == self._current:
+                            current_changed = True
         if current_changed and self._host is not None and self._current is not None:
             try:
-                sl = self._store.get(self._current)
+                sl = self.store.get(self._current)
             except FileNotFoundError:
                 return
             self._host.set_list(sl, self._mgr)
 
     def add_template_to_current(self, path: str) -> bool:
-        """模板树「加入当前列表」闭环：实例化模板并追加到当前选中列表。
+        """模板树「加入当前列表」闭环：实例化模板并追加到当前页选中列表。
 
         未选中列表 / 列表被删 / 模板创建失败 → 日志记录并返回 False（不弹窗，
         由调用方决定 UI 提示）；成功刷新宿主卡片与树标记并返回 True。
@@ -341,7 +577,7 @@ class StepListManagementTree(ManagementTree):
             return False
         try:
             step = self._mgr.create_step(path)
-            lst = self._store.get(self._current)
+            lst = self.store.get(self._current)
         except (ValueError, FileNotFoundError) as e:
             LogModel.instance().error("加入当前列表失败：%s" % e)
             return False
@@ -349,9 +585,10 @@ class StepListManagementTree(ManagementTree):
         self._save_store()
         if self._host is not None:
             self._host.set_list(lst, self._mgr)
-        if self._sl_tree is not None:
-            self._sl_tree.refresh_error_marks()
-            self._sl_tree.refresh_active_marks()
+        t = self.current_tree()
+        if t is not None:
+            t.refresh_error_marks()
+            t.refresh_active_marks()
         LogModel.instance().info("模板「%s」已加入列表「%s」" % (path, self._current))
         return True
 
@@ -880,20 +1117,98 @@ if __name__ == "__main__":
 
     slm = StepListManagementTree(pkg, tree)
     assert slm.name == "步骤列表"
-    assert isinstance(slm.tree_widget(), StepListTreeWidget)
+    _box = slm.tree_widget()
+    assert isinstance(_box, QWidget)                # 树面板 = 页容器
+    assert slm.current_page == "执行列表1"           # 空工程 → 默认单页
+    assert isinstance(slm.current_tree(), StepListTreeWidget)
+    assert slm._page_title is not None and slm._page_title.text() == "执行列表1"
+    assert slm._page_menu_btn is not None and slm._page_menu_btn.menu() is not None
+    assert slm._add_page_btn is not None and slm._del_page_btn is not None
+    assert slm.store is slm._page_store.get_page("执行列表1")   # store = 当前页
     host = slm.preview_widget()
     assert isinstance(host, StepListHost)
     assert host.currentIndex() == 0                 # 未选列表 → 占位页
 
-    # 列表选择联动：添加列表 → 刷新树 → 选中 → 宿主切换
+    # 列表选择联动：添加列表 → 刷新树 → 选中 → 宿主切换（跨页出口信号同发）
     sl = StepList.create_empty()
-    slm._store.add_list("主列表", sl)
+    slm.store.add_list("主列表", sl)
     slm._save_store()
-    tw = slm.tree_widget()
+    tw = slm.current_tree()
     tw.refresh()
+    _sel = []
+    slm.list_selected.connect(_sel.append)
     tw.list_selected.emit("主列表")
     assert host.currentIndex() == 1
     assert host._view._step_list is sl
+    assert _sel == ["主列表"]
+    assert slm.current_path == "主列表"
+
+    # ---- 页操作（QInputDialog 打桩）：添加页跳转 / 重命名 / 删除该页 / 查重阻止 ----
+    from PyQt5.QtWidgets import QInputDialog as _QID
+    _orig_get_text = _QID.getText
+    _dlg_vals = []
+
+    def _get_text_seq(_parent, _title, _label, **_k):
+        return (_dlg_vals.pop(0), True)
+
+    _QID.getText = staticmethod(_get_text_seq)
+    # ① 添加页：建议名（弹窗返回「坐标页」）→ 新页创建并跳转
+    _dlg_vals.append("坐标页")
+    _page_added = []
+    _page_changed = []
+    slm.page_added.connect(_page_added.append)
+    slm.page_changed.connect(_page_changed.append)
+    slm._on_add_page_clicked()
+    assert slm.page_store.page_names() == ["执行列表1", "坐标页"]
+    assert slm.current_page == "坐标页", slm.current_page
+    assert slm._page_title.text() == "坐标页"
+    assert _page_added == ["坐标页"] and _page_changed == ["坐标页"]
+    assert isinstance(slm.current_tree(), StepListTreeWidget)
+    assert slm.current_tree() is not tw                 # 每页一棵缓存树
+    # ② 查重阻止：重名 → 日志报错、不落盘
+    LogModel.instance().clear()
+    _dlg_vals.append("执行列表1")
+    slm._on_add_page_clicked()
+    assert slm.page_store.page_names() == ["执行列表1", "坐标页"]
+    assert any("已存在" in e.message for e in LogModel.instance().entries)
+    # ③ 重命名当前页：成功 + 缓存重键 + 落盘
+    _dlg_vals.append("坐标采集")
+    _renamed = []
+    slm.page_renamed.connect(lambda o, n: _renamed.append((o, n)))
+    slm._rename_current_page()
+    assert slm.current_page == "坐标采集"
+    assert _renamed == [("坐标页", "坐标采集")]
+    assert slm._page_trees.get("坐标采集") is not None
+    assert slm._page_trees.get("坐标页") is None
+    assert '"坐标采集"' in pkg.read_file("step_list.json").decode("utf-8")
+    # ④ 重命名查重阻止
+    LogModel.instance().clear()
+    _dlg_vals.append("执行列表1")
+    slm._rename_current_page()
+    assert slm.current_page == "坐标采集"
+    assert any("已存在" in e.message for e in LogModel.instance().entries)
+    # ⑤ 切回第一页：选中态各自保留
+    slm._activate_page("执行列表1")
+    assert slm.current_page == "执行列表1"
+    assert slm.current_path == "主列表"                # 第一页的选中态还在
+    assert host._view._step_list is sl
+    # ⑥ 删除该页：删当前页（执行列表1）→ 激活首剩页；最后一页守卫
+    slm._on_del_page_clicked()
+    assert slm.page_store.page_names() == ["坐标采集"]
+    assert slm.current_page == "坐标采集"
+    LogModel.instance().clear()
+    slm._on_del_page_clicked()                        # 最后一页 → 拒绝 + 日志
+    assert slm.page_store.page_names() == ["坐标采集"]
+    assert any("至少保留" in e.message for e in LogModel.instance().entries)
+    # ⑦ 只读：全部页树只读 + 页操作按钮禁用 + 下拉切换保持可用
+    slm.set_read_only(True)
+    assert all(t._read_only for t in slm.trees())
+    assert not slm._add_page_btn.isEnabled() and not slm._del_page_btn.isEnabled()
+    assert slm._page_menu_btn.isEnabled()
+    assert host._view._read_only
+    slm.set_read_only(False)
+    assert not slm._page_title is None
+    _QID.getText = _orig_get_text
 
     # 落盘防抖（评审#10）：编辑 → 500ms 单发定时器，到期才写盘
     slm._on_edited()
@@ -930,10 +1245,11 @@ class DemoStep(Step):
     tree2 = VariableTree.create_empty()
     slm2 = StepListManagementTree(pkg2, tree2)
     sl2 = StepList.create_empty()
-    slm2._store.add_list("主列表", sl2)
+    slm2.store.add_list("主列表", sl2)
     slm2._save_store()
     host2 = slm2.preview_widget()               # 先建宿主再选中（联动发生在选中时）
-    tw2 = slm2.tree_widget()
+    slm2.tree_widget()                          # 构建页容器（懒建每页树）
+    tw2 = slm2.current_tree()
     tw2.refresh()
     tw2.list_selected.emit("主列表")
     assert host2.currentIndex() == 1
@@ -1068,9 +1384,10 @@ class DemoStep(Step):
     call_step.io.change_value("input", 0, "5")
     call_step.io.change_value("output", 0, "n1")
     use_list = StepList.create_empty(); use_list.add(call_step)
-    slm_c._store.add_list("用卡", use_list)
-    sltw_c = slm_c.tree_widget(); sltw_c.refresh()
-    sltw_c.list_selected.emit("用卡")              # → _on_selected → _current = "用卡"
+    slm_c.store.add_list("用卡", use_list)
+    slm_c.tree_widget()                            # 构建页容器（懒建每页树）
+    sltw_c = slm_c.current_tree(); sltw_c.refresh()
+    sltw_c.list_selected.emit("用卡")              # → _on_list_selected → _current = "用卡"
     assert slm_c.current_path == "用卡"
     assert call_step.io.output_types == ["number"]
     # SRC 签名变更（加输出 z）→ resync_composite_steps → 步骤 io 按新签名重建（保留值）

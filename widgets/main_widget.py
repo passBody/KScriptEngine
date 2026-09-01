@@ -389,8 +389,9 @@ class MainWindow(QMainWindow):
         if not self._managers:
             return
         m0 = self._managers[0]
-        if isinstance(m0, StepListManagementTree) and m0._sl_tree is not None:
-            m0._sl_tree.set_running_path(None)
+        if isinstance(m0, StepListManagementTree):
+            for t in m0.trees():
+                t.set_running_path(None)
 
     def _on_step_status(self, step) -> None:
         """步骤状态变化（GUI 线程，经桥 queued）：卡片重检颜色 + 树高亮执行中列表。"""
@@ -399,14 +400,15 @@ class MainWindow(QMainWindow):
         m0 = self._managers[0]
         if isinstance(m0, StepListManagementTree):
             m0.refresh_cards()
-            if m0._sl_tree is not None:
+            t = m0.current_tree()
+            if t is not None:
                 # 找当前 RUNNING 的步骤 → 高亮其列表；无则清高亮
                 running = None
                 for s, path in self._step_paths.items():
                     if s.status is StepStatus.RUNNING:
                         running = path
                         break
-                m0._sl_tree.set_running_path(running)
+                t.set_running_path(running)
 
     def _attach_progress(self) -> None:
         """为当前 runner 挂进度监听（工作线程 emit → 桥 → 状态栏 i/n）。"""
@@ -876,14 +878,15 @@ class MainWindow(QMainWindow):
         vtw.tree_changed.connect(comp_mgr.refresh_cards)
         # 进入工程第一画面：store 非空 → 自动选中第一个步骤列表（显示序 DFS 首个列表）
         # 树/宿主均为懒构建 → 先构建再选中；宿主须在联动前构建，否则列表不显示
-        sl_tree = sl_mgr.tree_widget()
-        assert isinstance(sl_tree, StepListTreeWidget)
+        sl_mgr.tree_widget()               # 页容器（标题/下拉/添加页/删除该页 + 每页一棵树）
+        sl_tree = sl_mgr.current_tree()
+        assert sl_tree is not None
         sl_mgr.preview_widget()
         # 步骤列表视图错误/占位卡片数 → 执行按钮启用态（>0 禁止执行，执行中除外）。
         # 须在首个列表加载（setCurrentItem → errors_changed）前连，否则首列表计数漏收。
         self._sl_error_count = 0          # 重置（重开工程：旧宿主计数作废）
         sl_mgr.preview_widget().errors_changed.connect(self._on_sl_errors_changed)
-        sl_tree.list_selected.connect(self._on_exec_list_changed)   # 单列表范围跟随选中
+        sl_mgr.list_selected.connect(self._on_exec_list_changed)   # 跨页统一出口
         first_path = sl_tree.first_list_path()
         if first_path:
             item = sl_tree.find_item(first_path)
@@ -1012,28 +1015,31 @@ class DemoStep(Step):
     assert vtw._tree is sl_mgr._tree
     host = sl_mgr.preview_widget()
     assert isinstance(host, StepListHost)
-    assert isinstance(sl_mgr.tree_widget(), StepListTreeWidget)
+    sl_mgr.tree_widget()                              # 页容器构建
+    assert sl_mgr.current_tree() is not None
+    assert sl_mgr.current_page == "执行列表1"
 
     # 空 store → step_list.json 已写盘（镜像 variables.json 模式）
     assert win._package is not None
     assert win._package.exists("step_list.json")
-    assert sl_mgr._store.paths() == []
+    assert sl_mgr.store.paths() == []
 
-    # 经 store API 添加列表 → 保存落盘（store 与包同实例）
+    # 经 store API 添加列表 → 保存落盘（store 与包同实例；v2 顶层 = 页）
     sl = StepList.create_empty()
     s = sl_mgr._mgr.create_step("示例")
     s.io.change_value("input", 0, "5")
     s.io.change_value("output", 0, "n1")
     sl.add(s)
-    sl_mgr._store.add_list("主列表", sl)
+    sl_mgr.store.add_list("主列表", sl)
     sl_mgr._save_store()
     raw = win._package.read_file("step_list.json")
-    assert '"主列表"' in raw.decode("utf-8")
+    assert '"主列表"' in raw.decode("utf-8") \
+        and '"执行列表1"' in raw.decode("utf-8")
 
     # list_selected → 宿主视图出现卡片
-    tw = sl_mgr.tree_widget()
+    tw = sl_mgr.current_tree()
     assert isinstance(tw, StepListTreeWidget)
-    tw.refresh()                     # store 经 API 直改（950 行绕过树操作）→ 重建树含「主列表」
+    tw.refresh()                     # store 经 API 直改（绕过树操作）→ 重建树含「主列表」
     tw.list_selected.emit("主列表")
     assert host.currentIndex() == 1
     assert len(host._view.cards) == 1
@@ -1080,7 +1086,7 @@ class DemoStep(Step):
     assert host._toolbar_status.text() == "无错误卡片"
 
     # 当前列表被删 → 宿主回占位页
-    sl_mgr._store.remove("主列表")
+    sl_mgr.store.remove("主列表")
     tw.store_changed.emit()
     assert host.currentIndex() == 0
 
@@ -1096,11 +1102,11 @@ class DemoStep(Step):
     s2.io.change_value("input", 0, "5")
     s2.io.change_value("output", 0, "n1")
     sl2 = StepList.create_empty()
-    slm2._store.add_list("乙", sl2)                    # walk 序首位；空列表
-    slm2._store.add_group("组甲")
+    slm2.store.add_list("乙", sl2)                    # walk 序首位；空列表
+    slm2.store.add_group("组甲")
     sl3 = StepList.create_empty()
     sl3.add(s2)
-    slm2._store.add_list("组甲/丙", sl3)               # 显示序 DFS 第一个列表
+    slm2.store.add_list("组甲/丙", sl3)               # 显示序 DFS 第一个列表
     slm2._save_store()
     pkg2.save(tmp2)
 
@@ -1108,7 +1114,7 @@ class DemoStep(Step):
     win2.show()
     sl_mgr2 = win2._managers[0]
     assert isinstance(sl_mgr2, StepListManagementTree)
-    tw2 = sl_mgr2.tree_widget()
+    tw2 = sl_mgr2.current_tree()
     assert isinstance(tw2, StepListTreeWidget)
     assert tw2.first_list_path() == "乙"                # walk 序（= 显示序 = 执行序）首个列表
     host2 = sl_mgr2.preview_widget()
@@ -1116,13 +1122,13 @@ class DemoStep(Step):
     assert host2.currentIndex() == 1                    # 非占位：自动切到列表视图
     assert len(host2._view.cards) == 0                 # 「乙」为空列表 → 无卡片
     assert sl_mgr2._current == "乙"                     # 树中选中项 = 第一个列表
-    assert host2._view._step_list is sl_mgr2._store.get("乙")
+    assert host2._view._step_list is sl_mgr2.store.get("乙")
 
     # ---- 模板树「加入当前列表」闭环：信息面板 → 实例化加入当前列表 ----
     spanel2 = win2._step_mgr.preview_widget()
     assert isinstance(spanel2, StepInfoPanel)
     win2._on_add_template("示例")
-    assert len(sl_mgr2._store.get("乙").steps) == 1
+    assert len(sl_mgr2.store.get("乙").steps) == 1
     assert len(host2._view.cards) == 1                 # 宿主刷新出新卡片
     # 失败路径：未选中列表 → 提示框
     _infos = []
@@ -1142,9 +1148,9 @@ class DemoStep(Step):
     assert it2 is not None
     tw2.setCurrentItem(it2)                      # 切到含步骤 s2 的列表
     assert sl_mgr2._current == "组甲/丙"
-    assert host2._view._step_list is sl_mgr2._store.get("组甲/丙")
+    assert host2._view._step_list is sl_mgr2.store.get("组甲/丙")
     card2 = host2._view.cards[0]
-    assert card2.step is sl_mgr2._store.get("组甲/丙").steps[0]
+    assert card2.step is sl_mgr2.store.get("组甲/丙").steps[0]
     assert card2.property("active") is True
     it2.setCheckState(0, Qt.Unchecked)           # 树勾选框：停用列表内全部步骤
     assert host2._view.cards[0].step.enabled is False
@@ -1262,7 +1268,7 @@ class DemoStep(Step):
         assert win_exec._runner.state is StepRunnerState.READY
         # 编辑锁定：步骤列表树走只读模式（可点击查看、禁编辑；不整树禁用——
         # 禁用会吞 hover 事件导致卡片缩放动画消失）；其余树整树禁用
-        sl_tree = win_exec._managers[0]._sl_tree
+        sl_tree = win_exec._managers[0].current_tree()
         assert sl_tree is not None
         var_tree = win_exec._managers[2].tree_widget()
         win_exec._set_exec_locked(True)
@@ -1368,7 +1374,7 @@ class DemoStep(Step):
             s_i3.io.change_value("output", 0, "n1")
             sl_i3 = StepList.create_empty()
             sl_i3.add(s_i3)
-            slm_i3._store.add_list("主列表", sl_i3)
+            slm_i3.store.add_list("主列表", sl_i3)
             slm_i3._save_store()
             win_i3 = MainWindow()
             win_i3._open_package(pkg_i3, None)
@@ -1385,7 +1391,7 @@ class DemoStep(Step):
             step3.status = StepStatus.RUNNING
             assert len(fired3) == 1, fired3             # 状态变更 → 桥 → 卡片刷新
             app.processEvents()
-            stree3 = win_i3._managers[0]._sl_tree
+            stree3 = win_i3._managers[0].current_tree()
             assert stree3 is not None
             assert stree3._running_path == "主列表"      # 树高亮正在执行的列表
             it3 = stree3.find_item("主列表")
@@ -1463,10 +1469,10 @@ class DemoStep(Step):
         stale_gen = win_exec._runner_gen - 1             # 旧代际
         win_exec._exec_bridge.runner_state.emit((stale_gen, StepRunnerState.READY))
         assert "执行中" in win_exec._exec_status.text()  # 陈旧 READY 被忽略
-        assert win_exec._managers[0]._sl_tree._read_only  # 编辑仍锁定（只读模式）
+        assert win_exec._managers[0].current_tree()._read_only  # 编辑仍锁定（只读模式）
         win_exec._exec_bridge.runner_state.emit((win_exec._runner_gen, StepRunnerState.READY))
         assert "待命" in win_exec._exec_status.text()    # 当前代际状态正常刷新（解锁）
-        assert not win_exec._managers[0]._sl_tree._read_only
+        assert not win_exec._managers[0].current_tree()._read_only
         win_exec._exec_btn.click()                       # 复位：停监听
     finally:
         _make_hotkey_listener = _orig_mk_listener2
@@ -1503,7 +1509,7 @@ class DemoStep(Step):
     listL.add(card_step)
     sl_mgr_j.store.add_list("L", listL)
     sl_mgr_j._save_store()
-    sl_tw_j = sl_mgr_j.tree_widget()
+    sl_tw_j = sl_mgr_j.current_tree()
     sl_tw_j.refresh()
     sl_tw_j.list_selected.emit("L")            # 选中 L → 宿主显示其卡片
     sl_host_j = sl_mgr_j.preview_widget()
@@ -1562,11 +1568,11 @@ class DemoStep(Step):
     assert host_e._view.jump_to_error() is True       # 跳转错误可定位到占位卡
     assert win_e._exec_btn is not None and not win_e._exec_btn.isEnabled()  # 禁止执行
     # 切到「干净」列表 → 错误数归零、执行按钮恢复
-    sl_mgr_e.tree_widget().list_selected.emit("干净")
+    sl_mgr_e.current_tree().list_selected.emit("干净")
     assert win_e._sl_error_count == 0
     assert win_e._exec_btn.isEnabled()
     # 切回「坏列表」→ 再次禁用；_exec_has_errors 兜底扫描亦为 True
-    sl_mgr_e.tree_widget().list_selected.emit("坏列表")
+    sl_mgr_e.current_tree().list_selected.emit("坏列表")
     assert not win_e._exec_btn.isEnabled()
     assert win_e._exec_has_errors() is True
 
