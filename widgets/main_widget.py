@@ -70,11 +70,11 @@ _ICON_PATH = os.path.join(
 
 class _ExecBridge(QObject):
     """执行器跨线程桥：工作线程 emit → Qt queued 到 GUI 线程刷新。"""
-    runner_state = pyqtSignal(object)     # (gen, StepRunnerState)：代际标记防陈旧覆盖
-    hotkey_toggle = pyqtSignal()
+    runner_state = pyqtSignal(object)     # (page, gen, state)：页+代际标记防陈旧覆盖
+    hotkey_toggle = pyqtSignal(str)       # page：某页热键按下（监听回调闭包携带页名）
     log_changed = pyqtSignal()            # LogModel 变更（worker 线程记日志）→ GUI 线程刷计数
-    step_status = pyqtSignal(object)      # 步骤状态变更（执行线程）→ GUI 线程刷卡片颜色/树高亮
-    progress = pyqtSignal(object)         # (第几步, 总数)：执行进度 → 状态栏
+    step_status = pyqtSignal(object)      # (page, step)：步骤状态变更 → 卡片颜色/树高亮
+    progress = pyqtSignal(object)         # (page, 第几步, 总数)：执行进度 → 状态栏
 
 
 # 模拟注入点：冒烟测试替换以避开真实热键/线程（与 picker 包装同思路）
@@ -106,8 +106,9 @@ class MainWindow(QMainWindow):
         self._status_python: Optional[QLabel] = None
         self._manage_btn: Optional[QToolButton] = None
         self._step_mgr: Optional[StepManagementTree] = None
-        self._runner: Optional[StepRunner] = None
-        self._hotkey_listener: Optional[HotkeyListener] = None
+        self._runners: Dict[str, StepRunner] = {}            # 页名 → 执行器（READY 后保留复用）
+        self._runner_gens: Dict[str, int] = {}               # 页名 → 代际（陈旧状态过滤）
+        self._hotkey_listeners: Dict[str, HotkeyListener] = {}   # 页名 → 常驻热键监听器
         self._exec_btn: Optional[QToolButton] = None       # 活动栏底部「执行」按钮
         self._settings_btn: Optional[QToolButton] = None   # 活动栏底部「设置」按钮
         self._exec_status: Optional[QLabel] = None
@@ -118,11 +119,11 @@ class MainWindow(QMainWindow):
         self._exec_bridge.step_status.connect(self._on_step_status)
         self._exec_bridge.progress.connect(self._on_progress)
         self._exec_locked = False
-        self._exec_scope = "all"     # 执行范围：all=全部列表 / current=仅当前列表
+        self._exec_scope = "all"     # 执行范围（仅作用于当前页）：all=全部列表 / current=仅当前列表
         self._sl_error_count = 0     # 当前步骤列表视图的错误/占位卡片数（>0 → 禁止执行）
-        self._runner_gen = 0                     # 执行器代际：陈旧 runner 迟到状态被忽略
-        self._step_hooks: List[Tuple[object, Callable]] = []   # 执行期步骤状态监听（卡片刷新）
-        self._step_paths: Dict[object, str] = {}   # 执行期 step → 列表路径（树高亮映射）
+        self._current_page = ""      # 当前执行列表页（sl_mgr 页信号驱动）
+        self._step_hooks: Dict[str, List[Tuple[object, Callable]]] = {}   # 页名 → 步骤状态监听
+        self._step_paths: Dict[str, Dict[object, str]] = {}   # 页名 → step→列表路径（树高亮）
 
         self._central = QStackedWidget()
         self.setCentralWidget(self._central)
@@ -239,80 +240,78 @@ class MainWindow(QMainWindow):
         warn = sum(1 for e in m.entries if e.level == LogLevel.WARNING)
         self._status_counts.setText("错误: %d  警告: %d" % (err, warn))
 
+    # ---- 页热键监听（常驻：工程打开即生效） ----
+    def _start_page_listeners(self) -> None:
+        """为每个配置了热键的页建常驻监听器（每热键一个 pynput 监听线程）。"""
+        self._stop_page_listeners()
+        if not self._managers or self._package is None:
+            return
+        sl_mgr = self._managers[0]
+        assert isinstance(sl_mgr, StepListManagementTree)
+        hotkeys = self._page_hotkeys()
+        for page in sl_mgr.page_store.page_names():
+            hk = hotkeys.get(page, "")
+            if hk:
+                self._hotkey_listeners[page] = _make_hotkey_listener(
+                    hk, lambda p=page: self._exec_bridge.hotkey_toggle.emit(p))
+                self._hotkey_listeners[page].start()
+        LogModel.instance().info(
+            "执行列表热键监听已启动：%s"
+            % ("、".join(sorted(self._hotkey_listeners)) or "（无）"))
+
+    def _stop_page_listeners(self) -> None:
+        for lst in self._hotkey_listeners.values():
+            lst.stop()
+        self._hotkey_listeners.clear()
+
     # ---- 执行器接线 ----
     def _on_exec_clicked(self) -> None:
-        """执行按钮：未监听 → 待命（启动热键监听）；已监听 → 停监听。"""
-        if self._hotkey_listener is None:
-            self._start_listening()
-        else:
-            self._stop_listening()
-
-    def _start_listening(self) -> None:
-        # 旧 runner 执行/停止中 → 拒绝并发双执行（同一 store 只允许一个执行器）
-        if self._runner is not None and self._runner.state is not StepRunnerState.READY:
-            self._set_exec_status("等待当前执行结束…")
-            LogModel.instance().info("执行器仍忙碌：等待当前执行结束后再待命")
-            self._update_exec_button()          # 按钮 checked 状态回正（拒绝路径）
-            return
+        """执行按钮：当前页 READY → 直接执行；否则 → 停止当前页。"""
         if self._package is None:
             return
-        sl_mgr = self._managers[0] if self._managers else None
-        assert isinstance(sl_mgr, StepListManagementTree)
-        only = None
-        if self._exec_scope == "current":
-            only = sl_mgr.current_path
-            if not only:
-                LogModel.instance().warning(
-                    "仅执行当前列表：未选中任何列表，按全部列表执行")
-        self._runner = _make_step_runner(
-            sl_mgr.store, only, self._current_stop_mode())
-        self._runner_gen += 1
-        gen = self._runner_gen
-        self._runner.add_state_listener(
-            lambda st, g=gen: self._exec_bridge.runner_state.emit((g, st)))
-        self._attach_progress()
-        hotkey = self._current_hotkey()
-        self._hotkey_listener = _make_hotkey_listener(
-            hotkey, self._exec_bridge.hotkey_toggle.emit)
-        self._hotkey_listener.start()
-        self._update_exec_button()
-        self._set_exec_status("待命：按 %s 执行/停止" % hotkey)
-        self._set_exec_locked(False)          # 重待命复位锁定（停止监听后立即重待命不卡死）
-        LogModel.instance().info("执行器待命：热键 %s（再按停止）" % hotkey)
-
-    def _stop_listening(self) -> None:
-        if self._hotkey_listener is not None:
-            self._hotkey_listener.stop()
-            self._hotkey_listener = None
-        if self._runner is not None:
-            self._runner.request_stop()          # 执行中 → 当前步骤完成后停
-            if self._runner.state is StepRunnerState.READY:
-                self._runner = None              # 已就绪 → 直接释放
-            # 非 READY → 保留引用（防并发双执行）：其自然结束 READY 时经 _on_runner_state 清理
-        self._update_exec_button()
-        self._set_exec_status("已停止监听")
-        LogModel.instance().info("执行器已停止监听")
-
-    def _handle_hotkey_toggle(self) -> None:
-        """热键按下（GUI 线程，经桥 queued）：READY → start；否则 → request_stop。"""
-        if self._runner is None:
-            return
-        if self._runner.state is StepRunnerState.READY:
-            # 安全网：待命期间引入了错误/占位卡片 → 禁止执行（按钮禁用是主防线，
-            # 此处兜底热键直触；含无法还原的占位卡或 io 非法卡一律不执行）
-            if self._exec_has_errors():
-                LogModel.instance().error(
-                    "禁止执行：待执行列表含错误/占位卡片，请先修正或删除后再执行")
-                self._stop_listening()
-                self._set_exec_status("禁止执行：含错误/占位卡片（已停止监听）")
-                return
-            self._attach_step_hooks()          # 执行前挂卡片状态监听
-            self._runner.start()
+        runner = self._runners.get(self._current_page)
+        if runner is not None and runner.state is not StepRunnerState.READY:
+            runner.request_stop()
         else:
-            self._runner.request_stop()
+            self._handle_hotkey_toggle(self._current_page)
 
-    def _exec_has_errors(self) -> bool:
-        """待执行范围（全部列表 / 仅当前列表）是否含错误/占位卡片。
+    def _handle_hotkey_toggle(self, page: str) -> None:
+        """某页热键按下（GUI 线程，经桥 queued）：READY → start；否则 → request_stop。"""
+        if not self._managers:
+            return
+        sl_mgr = self._managers[0]
+        if not isinstance(sl_mgr, StepListManagementTree):
+            return
+        if page not in sl_mgr.page_store.page_names():
+            return                     # 悬空热键（页已删）防御
+        runner = self._runners.get(page)
+        if runner is not None and runner.state is not StepRunnerState.READY:
+            runner.request_stop()      # toggle：执行中再按 = 停止
+            return
+        # 安全网：该页含错误/占位卡片 → 禁止执行（按钮禁用是主防线，此处兜底热键直触）
+        if self._exec_has_errors(page):
+            LogModel.instance().error(
+                "禁止执行：页「%s」含错误/占位卡片，请先修正或删除后再执行" % page)
+            self._set_exec_status("禁止执行：页「%s」含错误/占位卡片" % page)
+            return
+        only = None
+        if self._exec_scope == "current" and page == self._current_page:
+            only = sl_mgr.current_path   # 「仅执行当前列表」只作用于当前页
+        runner = _make_step_runner(
+            sl_mgr.page_store.get_page(page), only, self._current_stop_mode())
+        self._runners[page] = runner
+        gen = self._runner_gens.get(page, 0) + 1
+        self._runner_gens[page] = gen
+        runner.add_state_listener(
+            lambda st, g=gen, p=page: self._exec_bridge.runner_state.emit((p, g, st)))
+        runner.add_progress_listener(
+            lambda i, n, p=page: self._exec_bridge.progress.emit((p, i, n)))
+        self._attach_step_hooks(page)   # 执行前挂该页卡片状态监听
+        runner.start()
+        LogModel.instance().info("执行列表「%s」开始执行" % page)
+
+    def _exec_has_errors(self, page: Optional[str] = None) -> bool:
+        """待执行页（默认当前页）按执行范围是否含错误/占位卡片。
 
         占位卡片（:class:`PlaceholderStep`，模板缺失/签名不匹配）与 io 非法卡
         均视为不可执行。按钮禁用是主防线（随当前视图错误数变化）；本方法在
@@ -323,13 +322,18 @@ class MainWindow(QMainWindow):
         sl_mgr = self._managers[0]
         if not isinstance(sl_mgr, StepListManagementTree):
             return False
-        if self._exec_scope == "current" and sl_mgr.current_path:
+        page = page or self._current_page
+        if page not in sl_mgr.page_store.page_names():
+            return False
+        store = sl_mgr.page_store.get_page(page)
+        if self._exec_scope == "current" and page == self._current_page \
+                and sl_mgr.current_path:
             paths = [sl_mgr.current_path]
         else:
-            paths = [p for p, is_group in sl_mgr.store.walk() if not is_group]
+            paths = [p for p, is_group in store.walk() if not is_group]
         for p in paths:
             try:
-                sl = sl_mgr.store.get(p)
+                sl = store.get(p)
             except FileNotFoundError:
                 continue
             for s in sl.steps:
@@ -338,51 +342,74 @@ class MainWindow(QMainWindow):
         return False
 
     def _on_runner_state(self, payload) -> None:
-        """执行器状态变化（GUI 线程）：状态栏 + 编辑锁定 + 挂钩清理。"""
-        gen, st = payload
-        if gen != self._runner_gen:
-            return                      # 陈旧 runner（已停止）的迟到状态 → 忽略
+        """执行器状态变化（GUI 线程）：状态栏 + 编辑锁定（活跃重算）+ 挂钩清理。"""
+        page, gen, st = payload
+        if self._runner_gens.get(page) != gen:
+            return                      # 陈旧 runner（已重建）的迟到状态 → 忽略
         if st is StepRunnerState.RUNNING:
-            self._set_exec_status("执行中……（按热键停止）")
-            self._set_exec_locked(True)
+            self._recompute_lock()
         elif st is StepRunnerState.STOPPING:
-            self._set_exec_status("停止中……（%s）" % self._stop_hint())
+            pass
+        else:                           # READY：只摘该页 hooks
+            self._detach_step_hooks(page)
+            self._recompute_lock()
+        self._refresh_exec_status()
+
+    def _recompute_lock(self) -> None:
+        """按活跃执行器集合重算 UI 锁定（任一页非 READY → 锁定；不用加减计数防漏算）。"""
+        active = any(r.state is not StepRunnerState.READY
+                     for r in self._runners.values())
+        self._set_exec_locked(active)
+        self._update_exec_button()
+
+    def _refresh_exec_status(self) -> None:
+        """状态栏：当前页状态 + 后台页执行中提示。"""
+        if self._exec_status is None:
+            return
+        page = self._current_page
+        runner = self._runners.get(page)
+        hk = self._page_hotkeys().get(page, "")
+        if runner is not None and runner.state is StepRunnerState.RUNNING:
+            text = ("执行中……（页「%s」按 %s 停止）" % (page, hk)
+                    if hk else "执行中……（点执行按钮停止）")
+        elif runner is not None and runner.state is StepRunnerState.STOPPING:
+            text = "停止中……（%s）" % self._stop_hint()
         else:
-            self._set_exec_status(
-                "待命：按 %s 执行/停止" % self._current_hotkey())
-            self._set_exec_locked(False)
-            self._detach_step_hooks()
-            # 停止监听后自然结束的旧 runner：READY 回调清理引用（防并发双执行）
-            if self._runner is not None and self._hotkey_listener is None:
-                self._runner = None
+            text = ("待命：页「%s」按 %s 执行（再按停止）" % (page, hk)
+                    if hk else "页「%s」未绑定热键，点执行按钮运行" % page)
+        others = sum(1 for p, r in self._runners.items()
+                     if p != page and r.state is not StepRunnerState.READY)
+        if others:
+            text += "｜另 %d 页执行中" % others
+        self._set_exec_status(text)
 
     # ---- 执行期卡片状态刷新（spec §6 组件 6）：步骤状态 → 桥 → 重检卡片颜色 ----
-    def _attach_step_hooks(self) -> None:
-        """执行前：为 store 全部步骤挂状态监听（卡片颜色随执行刷新、
-        树高亮正在执行的列表）。"""
-        self._detach_step_hooks()              # 幂等：先清旧钩再挂新钩
-        self._step_paths = {}
+    def _attach_step_hooks(self, page: str) -> None:
+        """执行前：为该页 store 全部步骤挂状态监听（该页卡片颜色/树高亮随执行刷新）。"""
+        self._detach_step_hooks(page)          # 幂等：先清旧钩再挂新钩
+        self._step_paths[page] = {}
         if not self._managers:
             return
-        m0 = self._managers[0]
-        if not isinstance(m0, StepListManagementTree):
+        sl_mgr = self._managers[0]
+        if not isinstance(sl_mgr, StepListManagementTree):
             return
-        for path, is_group in m0.store.walk():
+        store = sl_mgr.page_store.get_page(page)
+        for path, is_group in store.walk():
             if is_group:
                 continue
-            for step in m0.store.get(path).steps:
-                self._step_paths[step] = path
-                cb = lambda s, _st: self._exec_bridge.step_status.emit(s)
+            for step in store.get(path).steps:
+                self._step_paths[page][step] = path
+                cb = lambda s, _st, p=page: self._exec_bridge.step_status.emit((p, s))
                 step.add_status_listener(cb)
-                self._step_hooks.append((step, cb))
+                self._step_hooks.setdefault(page, []).append((step, cb))
 
-    def _detach_step_hooks(self) -> None:
-        """执行结束：移除全部步骤状态监听并清空 + 清除树高亮。"""
-        for step, cb in self._step_hooks:
+    def _detach_step_hooks(self, page: str) -> None:
+        """该页执行结束：移除该页步骤状态监听并清空；当前页 → 清树高亮。"""
+        for step, cb in self._step_hooks.pop(page, []):
             step.remove_status_listener(cb)
-        self._step_hooks.clear()
-        self._step_paths = {}
-        self._clear_running_highlight()
+        self._step_paths.pop(page, None)
+        if page == self._current_page:
+            self._clear_running_highlight()
 
     def _clear_running_highlight(self) -> None:
         """清除步骤列表树的执行高亮（▶ 前缀/蓝色）。"""
@@ -393,83 +420,132 @@ class MainWindow(QMainWindow):
             for t in m0.trees():
                 t.set_running_path(None)
 
-    def _on_step_status(self, step) -> None:
-        """步骤状态变化（GUI 线程，经桥 queued）：卡片重检颜色 + 树高亮执行中列表。"""
+    def _on_step_status(self, payload) -> None:
+        """步骤状态变化（GUI 线程，经桥 queued）：该页卡片重检颜色 + 树高亮执行中列表。"""
+        page, step = payload
         if not self._managers:
             return
         m0 = self._managers[0]
-        if isinstance(m0, StepListManagementTree):
-            m0.refresh_cards()
-            t = m0.current_tree()
-            if t is not None:
-                # 找当前 RUNNING 的步骤 → 高亮其列表；无则清高亮
-                running = None
-                for s, path in self._step_paths.items():
-                    if s.status is StepStatus.RUNNING:
-                        running = path
-                        break
-                t.set_running_path(running)
-
-    def _attach_progress(self) -> None:
-        """为当前 runner 挂进度监听（工作线程 emit → 桥 → 状态栏 i/n）。"""
-        if self._runner is not None:
-            self._runner.add_progress_listener(
-                lambda i, n: self._exec_bridge.progress.emit((i, n)))
+        if not isinstance(m0, StepListManagementTree):
+            return
+        if page != self._current_page:
+            return                     # 后台页状态不刷宿主（宿主只显示当前页）
+        m0.refresh_cards()
+        t = m0.current_tree()
+        if t is not None:
+            # 找当前 RUNNING 的步骤 → 高亮其列表；无则清高亮
+            running = None
+            for s, path in self._step_paths.get(page, {}).items():
+                if s.status is StepStatus.RUNNING:
+                    running = path
+                    break
+            t.set_running_path(running)
 
     def _on_progress(self, payload) -> None:
-        """执行进度（GUI 线程，经桥 queued）：执行中 → 状态栏「执行中 i/n」。"""
-        i, n = payload
-        if self._runner is not None \
-                and self._runner.state is StepRunnerState.RUNNING:
+        """执行进度（GUI 线程，经桥 queued）：当前页执行中 → 状态栏「执行中 i/n」。"""
+        page, i, n = payload
+        if page != self._current_page:
+            return
+        runner = self._runners.get(page)
+        if runner is not None and runner.state is StepRunnerState.RUNNING:
             self._set_exec_status("执行中 %d/%d……（按热键停止）" % (i, n))
 
-    def _rebuild_runner(self) -> None:
-        """待命态按当前范围重建 runner（状态/进度监听一并重挂；热键 listener 保留）。
+    def _rebuild_runner(self, page: str) -> None:
+        """该页 runner 待命时按当前范围重建（状态/进度监听重挂）。
 
-        执行范围切换、或「仅执行当前列表」下切换选中列表时调用。
+        执行范围切换（全部页）、或「仅执行当前列表」下当前页选中列表变化时调用。
         """
-        if not self._managers or self._runner is None:
+        if not self._managers:
+            return
+        runner = self._runners.get(page)
+        if runner is None or runner.state is not StepRunnerState.READY:
             return
         sl_mgr = self._managers[0]
         assert isinstance(sl_mgr, StepListManagementTree)
-        only = sl_mgr.current_path if self._exec_scope == "current" else None
-        self._runner = _make_step_runner(
-            sl_mgr.store, only, self._current_stop_mode())
-        gen = self._runner_gen
-        self._runner.add_state_listener(
-            lambda st, g=gen: self._exec_bridge.runner_state.emit((g, st)))
-        self._attach_progress()
+        only = sl_mgr.current_path \
+            if (self._exec_scope == "current" and page == self._current_page) else None
+        self._runners[page] = _make_step_runner(
+            sl_mgr.page_store.get_page(page), only, self._current_stop_mode())
+        gen = self._runner_gens.get(page, 0)   # 重建复用当前代际
+        self._runners[page].add_state_listener(
+            lambda st, g=gen, p=page: self._exec_bridge.runner_state.emit((p, g, st)))
+        self._runners[page].add_progress_listener(
+            lambda i, n, p=page: self._exec_bridge.progress.emit((p, i, n)))
 
     def _set_exec_status(self, text: str) -> None:
         if self._exec_status is not None:
             self._exec_status.setText(text)
 
+    # ---- 页联动（sl_mgr 页信号） ----
+    def _on_page_changed(self, page: str) -> None:
+        """页切换：跟随当前页 + 刷新状态栏/按钮；scope=current 时重建该页 runner。"""
+        self._current_page = page
+        if self._exec_scope == "current":
+            self._rebuild_runner(page)
+        self._refresh_exec_status()
+        self._update_exec_button()
+
+    def _on_page_added(self, page: str) -> None:
+        """新增页：按 executor.json 映射为其建常驻监听（无热键则跳过）。"""
+        hk = self._page_hotkeys().get(page, "")
+        if hk:
+            self._hotkey_listeners[page] = _make_hotkey_listener(
+                hk, lambda p=page: self._exec_bridge.hotkey_toggle.emit(p))
+            self._hotkey_listeners[page].start()
+        self._update_exec_button()
+
+    def _on_page_renamed(self, old: str, new: str) -> None:
+        """页重命名：五个按页字典重键（热键映射跟随页名不变）。"""
+        for d in (self._runners, self._runner_gens, self._hotkey_listeners,
+                  self._step_hooks, self._step_paths):
+            if old in d:
+                d[new] = d.pop(old)
+        if self._current_page == old:
+            self._current_page = new
+        self._refresh_exec_status()
+        self._update_exec_button()
+
+    def _on_page_removed(self, page: str) -> None:
+        """删除页：停其监听器、摘钩、清理字典（防悬空热键回调）。"""
+        lst = self._hotkey_listeners.pop(page, None)
+        if lst is not None:
+            lst.stop()
+        self._detach_step_hooks(page)
+        for d in (self._runners, self._runner_gens):
+            d.pop(page, None)
+        self._recompute_lock()
+        self._refresh_exec_status()
+        self._update_exec_button()
+
     # ---- 执行/设置按钮（活动栏底部） ----
     def _update_exec_button(self) -> None:
-        """执行按钮视觉态：待命（监听中）→ 绿色 checked + tooltip「停止监听」；否则复原。
+        """执行按钮视觉态：当前页执行中 → 绿色 checked + tooltip「停止当前页」；
+        否则复原（点击 = 直接执行当前页，不再有武装概念）。
 
         启用态：执行中（``_exec_locked``，保留停止通道）或当前步骤列表无错误/占位
         卡片时可用；**有错误/占位卡片时禁用**（无法还原或 io 非法的步骤禁止执行）。
         """
         if self._exec_btn is None:
             return
-        listening = self._hotkey_listener is not None
+        runner = self._runners.get(self._current_page)
+        running = runner is not None and runner.state is not StepRunnerState.READY
         scope_text = "全部列表" if self._exec_scope == "all" else "当前列表"
-        self._exec_btn.setChecked(listening)
+        self._exec_btn.setChecked(running)
         # 执行中保留停止通道；否则仅当当前视图无错误/占位卡片时可用
         self._exec_btn.setEnabled(self._exec_locked or self._sl_error_count == 0)
-        if listening:
-            self._exec_btn.setToolTip("停止监听")
+        hk = self._page_hotkeys().get(self._current_page, "")
+        if running:
+            self._exec_btn.setToolTip("停止当前页执行")
         elif self._sl_error_count > 0:
             self._exec_btn.setToolTip(
                 "当前列表有 %d 张错误/占位卡片，禁止执行（修正或删除后即可执行）"
                 % self._sl_error_count)
         else:
             self._exec_btn.setToolTip(
-                "执行（范围：%s，右键切换）：点击进入待命，按下热键开始执行，"
-                "再按停止（%s）。\n"
-                "热键勿与步骤按键冲突（模拟按键也会被监听）；模拟输入到游戏窗口需管理员运行。"
-                % (scope_text, self._stop_hint()))
+                "执行当前页（范围：%s，右键切换）：点击执行，执行中再点停止（%s）。\n"
+                "当前页热键：%s。热键勿与步骤按键冲突（模拟按键也会被监听）；"
+                "模拟输入到游戏窗口需管理员运行。"
+                % (scope_text, self._stop_hint(), hk or "未绑定（设置中配置）"))
 
     # ---- 执行范围（全部列表 / 仅当前列表；右键执行按钮切换） ----
     def _on_sl_errors_changed(self, n: int) -> None:
@@ -496,50 +572,76 @@ class MainWindow(QMainWindow):
             self._set_exec_scope("current")
 
     def _set_exec_scope(self, scope: str) -> None:
-        """切换执行范围；待命态立即重建 runner，执行中下次待命生效。"""
+        """切换执行范围（作用于当前页）；全部页 READY 的 runner 立即重建，
+        执行中的下次待命生效。"""
         if scope == self._exec_scope:
             return
         self._exec_scope = scope
-        if self._runner is not None and self._runner.state is StepRunnerState.READY:
-            self._rebuild_runner()
+        for page in list(self._runners):
+            self._rebuild_runner(page)
         self._update_exec_button()
         LogModel.instance().info(
             "执行范围已设为：%s"
             % ("全部列表" if scope == "all" else "仅当前列表"))
 
     def _on_exec_list_changed(self, _path: str) -> None:
-        """选中列表变化：仅执行当前列表且待命中 → runner 跟随新列表。"""
-        if self._exec_scope == "current" and self._runner is not None \
-                and self._runner.state is StepRunnerState.READY:
-            self._rebuild_runner()
+        """当前页选中列表变化：仅执行当前列表且该页待命 → runner 跟随新列表。"""
+        if self._exec_scope == "current":
+            self._rebuild_runner(self._current_page)
 
     def _on_settings_clicked(self) -> None:
-        """打开设置弹窗（触发热键 + 停止方式）；保存 → .kscp/executor.json。"""
+        """打开设置弹窗（各页热键表格 + 停止方式）；保存 → .kscp/executor.json。"""
         if self._package is None:
             return
+        sl_mgr = self._managers[0]
+        assert isinstance(sl_mgr, StepListManagementTree)
         dlg = SettingsDialog(
-            self._current_hotkey(), self._current_stop_mode(), self)
+            sl_mgr.page_store.page_names(), self._page_hotkeys(),
+            self._current_stop_mode(), self)
         if dlg.exec_() != QDialog.Accepted:
             return
-        self._apply_settings(dlg.hotkey(), dlg.stop_mode())
+        self._apply_settings(dlg.hotkeys(), dlg.stop_mode())
 
-    def _current_hotkey(self) -> str:
-        """当前生效热键：.kscp 内 executor.json 优先（工程自带配置）；缺失/非法 → 默认 `` ` ``。
+    def _page_hotkeys(self) -> Dict[str, str]:
+        """当前各页热键映射（页名 → 单字符或空串）。
 
-        开包后热键完全随工程走——**不读写 setting.json**（executor.json 一旦
-        存在即唯一来源，避免两处配置互相覆盖的困惑）。
+        executor.json v2 读 ``pages``；旧格式（无 pages）→ 顶层 ``hotkey``
+        归第一页、其余页空；文件缺失/损坏 → 第一页默认 `` ` ``（旧单页 UX），
+        其余页空。未知页忽略；非法值按空处理。
         """
+        result: Dict[str, str] = {}
+        if not self._managers:
+            return result
+        sl_mgr = self._managers[0]
+        if not isinstance(sl_mgr, StepListManagementTree):
+            return result
+        pages = sl_mgr.page_store.page_names()
+        if not pages:
+            return result
+        data = None
         if self._package is not None and self._package.exists("executor.json"):
             try:
                 data = json.loads(
                     self._package.read_file("executor.json").decode("utf-8"))
-                if isinstance(data, dict) and isinstance(data.get("hotkey"), str) \
-                        and len(data["hotkey"]) == 1:
-                    return data["hotkey"]
-                LogModel.instance().warning("executor.json 热键配置非法，使用默认热键")
+                if not isinstance(data, dict):
+                    data = None
             except (ValueError, UnicodeDecodeError):
+                data = None
+            if data is None:
                 LogModel.instance().warning("executor.json 无法读取，使用默认热键")
-        return "`"
+        if data is not None and isinstance(data.get("pages"), dict):
+            for p in pages:
+                hk = data["pages"].get(p)
+                result[p] = hk if isinstance(hk, str) and len(hk) == 1 else ""
+        else:
+            # 旧格式（无 pages）：顶层 hotkey 归第一页，其余页空；非法/缺失 → 默认 "`"
+            legacy = data.get("hotkey") if data is not None else None
+            first = legacy if isinstance(legacy, str) and len(legacy) == 1 else "`"
+            for i, p in enumerate(pages):
+                result[p] = first if i == 0 else ""
+        if data is None:
+            result[pages[0]] = "`"
+        return result
 
     def _current_stop_mode(self) -> str:
         """当前停止方式：executor.json 的 stop_mode（immediate/after_step）。
@@ -568,17 +670,27 @@ class MainWindow(QMainWindow):
             return "立即停止"
         return "当前步骤结束后停止"
 
-    def _apply_settings(self, key: str, stop_mode: str) -> None:
-        """保存热键 + 停止方式到工程包 executor.json（有路径则立即落盘 .kscp）。
+    def _apply_settings(self, hotkeys: Dict[str, str], stop_mode: str) -> None:
+        """保存各页热键 + 停止方式到工程包 executor.json（有路径立即落盘 .kscp）。
 
-        不写 setting.json（executor.json 为唯一来源）。待命（监听中）时
-        重建监听器使新热键即时生效；执行器同样按新停止方式重建。
+        不写 setting.json（executor.json 为唯一来源）。保存后按新映射重建
+        全部页常驻监听（空热键页不建监听）；各页 READY 执行器按新停止方式
+        重建（立即生效；执行中下次待命生效）。
         """
         mode = "immediate" if stop_mode == "immediate" else "after_step"
+        pages_map: Dict[str, str] = {}
+        if self._managers:
+            sl_mgr = self._managers[0]
+            if isinstance(sl_mgr, StepListManagementTree):
+                pages_map = {p: hotkeys.get(p, "")
+                             for p in sl_mgr.page_store.page_names()}
         if self._package is not None:
+            first = next(iter(pages_map), None)
+            legacy = pages_map.get(first, "") if first else ""
             self._package.write_file(
                 "executor.json",
-                json.dumps({"hotkey": key, "stop_mode": mode},
+                json.dumps({"hotkey": legacy or "`", "stop_mode": mode,
+                            "pages": pages_map},
                            ensure_ascii=False).encode("utf-8"))
             if self._kscp_path:
                 try:
@@ -586,19 +698,16 @@ class MainWindow(QMainWindow):
                 except OSError as e:
                     QMessageBox.warning(self, "设置", "工程文件保存失败：%s" % e)
                     LogModel.instance().error("设置保存到 .kscp 失败：%s" % e)
-        # 待命中 → 用新热键重建监听（旧监听器销毁）
-        if self._hotkey_listener is not None:
-            self._hotkey_listener.stop()
-            self._hotkey_listener = None
-            self._hotkey_listener = _make_hotkey_listener(
-                key, self._exec_bridge.hotkey_toggle.emit)
-            self._hotkey_listener.start()
-            self._set_exec_status("待命：按 %s 执行/停止" % key)
-        # 待命执行器按新停止方式重建（立即生效；执行中下次待命生效）
-        if self._runner is not None and self._runner.state is StepRunnerState.READY:
-            self._rebuild_runner()
+        # 按新映射重建全部常驻监听（旧监听器销毁）
+        self._start_page_listeners()
+        # 各页待命执行器按新停止方式重建
+        for page in list(self._runners):
+            if self._runners[page].state is StepRunnerState.READY:
+                self._rebuild_runner(page)
+        self._refresh_exec_status()
+        self._update_exec_button()
         LogModel.instance().info(
-            "执行设置已更新：热键 %s，停止方式 %s" % (key, mode))
+            "执行设置已更新：%d 页热键，停止方式 %s" % (len(pages_map), mode))
 
     def _set_exec_locked(self, locked: bool) -> None:
         """执行期间锁定所有影响执行器的 GUI 编辑入口：
@@ -892,6 +1001,15 @@ class MainWindow(QMainWindow):
             item = sl_tree.find_item(first_path)
             if item is not None:
                 sl_tree.setCurrentItem(item)   # 触发 list_selected → 宿主显示
+        # 页联动：当前页跟随 + 页增删改同步执行器/监听器字典 + 常驻热键监听
+        self._current_page = sl_mgr.current_page
+        sl_mgr.page_changed.connect(self._on_page_changed)
+        sl_mgr.page_added.connect(self._on_page_added)
+        sl_mgr.page_renamed.connect(self._on_page_renamed)
+        sl_mgr.page_removed.connect(self._on_page_removed)
+        self._start_page_listeners()
+        self._refresh_exec_status()
+        self._update_exec_button()
         if self._manage_btn is not None:
             self._manage_btn.setEnabled(True)
         if self._project_widget is None:
@@ -1214,7 +1332,7 @@ class DemoStep(Step):
         QFileDialog.getSaveFileName = orig_gsf
     assert calls == []
 
-    # ---- 执行器接线：按钮/状态栏/锁定/热键 toggle 逻辑 ----
+    # ---- 执行器接线：按钮/状态栏/锁定/热键 toggle 逻辑（多页） ----
     # 冒烟不得真实全局监听：桩替换监听工厂（__main__ 模块命名空间内直接改全局）
     class _StubListener:
         def __init__(self, hotkey, on_toggle):
@@ -1233,7 +1351,12 @@ class DemoStep(Step):
         win_exec = MainWindow()
         win_exec._open_package(KscpPackage.create_empty(), None)
         app.processEvents()
-        assert win_exec._runner is None
+        assert win_exec._runners == {}
+        assert win_exec._current_page == "执行列表1"
+        # 开包即常驻热键监听：executor.json 缺失 → 第一页默认 "`"
+        assert set(win_exec._hotkey_listeners) == {"执行列表1"}
+        _lst = win_exec._hotkey_listeners["执行列表1"]
+        assert isinstance(_lst, _StubListener) and _lst.started and _lst.hotkey == "`"
         # C1: 状态栏计数监听经桥（worker 线程日志不得同步操作 QLabel）
         assert not any(cb is win_exec._update_status_counts
                        for cb in LogModel.instance()._listeners), \
@@ -1251,21 +1374,14 @@ class DemoStep(Step):
         for _b in (win_exec._exec_btn, win_exec._settings_btn):
             assert _b.size() == QSize(48, 48), _b.size()
             assert _b.iconSize() == QSize(36, 36), _b.iconSize()
-        # 点击执行按钮 → 进入待命（listener 启动 + 按钮绿色 checked）；再点 → 停止监听
+        # 点击执行按钮 → 直接执行当前页（空 store → start 后仍 READY）
         win_exec._exec_btn.click()
-        assert win_exec._hotkey_listener is not None
-        assert isinstance(win_exec._hotkey_listener, _StubListener)
-        assert win_exec._hotkey_listener.started
-        assert win_exec._exec_btn.isChecked(), "待命中执行按钮应呈 checked（绿色）"
-        assert "待命" in win_exec._exec_status.text()
-        win_exec._exec_btn.click()
-        assert win_exec._hotkey_listener is None
-        assert not win_exec._exec_btn.isChecked()
-        # 热键 toggle：READY → start；RUNNING → request_stop（空 store 无步骤 → 恒 READY）
-        win_exec._exec_btn.click()          # 待命
-        win_exec._handle_hotkey_toggle()    # 模拟热键按下（无步骤 → start 后仍 READY）
-        assert win_exec._runner is not None
-        assert win_exec._runner.state is StepRunnerState.READY
+        assert isinstance(win_exec._runners["执行列表1"], StepRunner)
+        assert win_exec._runners["执行列表1"].state is StepRunnerState.READY
+        # 热键 toggle：READY → start；未知页热键（页已删防御）→ 静默忽略
+        win_exec._exec_bridge.hotkey_toggle.emit("执行列表1")
+        win_exec._exec_bridge.hotkey_toggle.emit("不存在的页")
+        assert win_exec._runners["执行列表1"].state is StepRunnerState.READY
         # 编辑锁定：步骤列表树走只读模式（可点击查看、禁编辑；不整树禁用——
         # 禁用会吞 hover 事件导致卡片缩放动画消失）；其余树整树禁用
         sl_tree = win_exec._managers[0].current_tree()
@@ -1288,14 +1404,6 @@ class DemoStep(Step):
         assert win_exec._manage_btn.isEnabled()        # 已开包 → 解锁后恢复可用
         assert win_exec._settings_btn.isEnabled()
         assert win_exec._a_new.isEnabled() and win_exec._a_open.isEnabled()
-        # I1: 停止监听后立即重新待命 → 编辑锁定复位（待命成功路径解锁）
-        win_exec._exec_btn.click()               # 停止监听
-        assert win_exec._hotkey_listener is None
-        win_exec._set_exec_locked(True)
-        assert sl_tree._read_only
-        win_exec._start_listening()              # 重待命：成功路径应解锁
-        assert not sl_tree._read_only, "重待命后编辑仍锁定（卡死）"
-        assert win_exec._hotkey_listener is not None
         # 未开包：无活动栏 → 执行/设置按钮不存在（无入口，安全）
         win_bare = MainWindow()
         assert win_bare._exec_btn is None and win_bare._settings_btn is None
@@ -1304,7 +1412,7 @@ class DemoStep(Step):
         assert win_bare._manage_btn.minimumWidth() >= fm.horizontalAdvance("管理")
         assert win_bare._manage_btn.toolButtonStyle() == Qt.ToolButtonTextOnly
 
-        # ---- I2: 执行中重待命不得并发双执行（假 runner 状态可控） ----
+        # ---- I2: 每页单 runner + toggle 语义（假 runner 状态可控） ----
         class _FakeRunner:
             """桩执行器：状态手动置位，记录 start/request_stop 调用。"""
 
@@ -1340,28 +1448,26 @@ class DemoStep(Step):
             win_i2 = MainWindow()
             win_i2._open_package(KscpPackage.create_empty(), None)
             app.processEvents()
-            win_i2._exec_btn.click()                    # 待命 → 假 runner（READY）
-            fake1 = win_i2._runner
+            win_i2._exec_btn.click()                    # 直接执行当前页 → 假 runner
+            fake1 = win_i2._runners["执行列表1"]
             assert isinstance(fake1, _FakeRunner)
             assert fake1.stop_mode == "after_step"      # executor.json 缺失 → 默认停止方式
+            assert fake1.calls == ["start"], fake1.calls
             fake1._set(StepRunnerState.RUNNING)         # 模拟开始执行
             app.processEvents()
             assert "执行中" in win_i2._exec_status.text()
-            win_i2._exec_btn.click()                    # 停止监听（执行中）
-            assert win_i2._runner is fake1, "执行中停止监听须保留 runner 引用"
-            assert fake1.calls == ["stop"], fake1.calls
-            win_i2._exec_btn.click()                    # 立即重待命 → 守卫拦截
-            assert win_i2._runner is fake1, "执行中重待命不得创建第二个 runner（并发双执行）"
-            assert "等待当前执行结束" in win_i2._exec_status.text()
-            fake1._set(StepRunnerState.READY)           # 旧 runner 自然结束
+            win_i2._exec_btn.click()                    # 执行中点击 → request_stop
+            assert win_i2._runners["执行列表1"] is fake1
+            assert fake1.calls == ["start", "stop"], fake1.calls
+            win_i2._exec_bridge.hotkey_toggle.emit("执行列表1")   # 热键再按 → 再 stop（幂等）
+            assert fake1.calls == ["start", "stop", "stop"], fake1.calls
+            assert win_i2._runners["执行列表1"] is fake1          # 同一页不得并发双执行
+            fake1._set(StepRunnerState.READY)           # 自然结束
             app.processEvents()
-            assert win_i2._runner is None, "旧 runner READY 后引用应清理"
-            win_i2._exec_btn.click()                    # READY 后再待命 → 正常创建
-            assert isinstance(win_i2._runner, _FakeRunner)
-            # I3: 空 store → attach 无 hook；且不崩
-            win_i2._handle_hotkey_toggle()              # READY → attach（空）→ start
-            assert win_i2._step_hooks == []
-            win_i2._exec_btn.click()                    # 复位：停监听
+            assert win_i2._runners["执行列表1"] is fake1          # READY 后保留复用
+            win_i2._exec_btn.click()                    # READY 再点 → 重建新 runner
+            assert isinstance(win_i2._runners["执行列表1"], _FakeRunner)
+            assert win_i2._runners["执行列表1"] is not fake1
             # I3: 含步骤 store → attach 后挂钩、状态变更刷卡片、detach 后清空
             pkg_i3 = KscpPackage.create_empty()
             pkg_i3.write_file("actions/示例.py", GOOD.encode("utf-8"))
@@ -1379,15 +1485,14 @@ class DemoStep(Step):
             win_i3 = MainWindow()
             win_i3._open_package(pkg_i3, None)
             app.processEvents()
-            win_i3._exec_btn.click()                    # 待命 → 假 runner
-            fake3 = win_i3._runner
+            win_i3._exec_btn.click()                    # 直接执行 → 假 runner + hooks + start
+            fake3 = win_i3._runners["执行列表1"]
             assert isinstance(fake3, _FakeRunner)
-            assert win_i3._step_hooks == []
-            win_i3._handle_hotkey_toggle()              # READY → attach + start
-            assert len(win_i3._step_hooks) == 1, win_i3._step_hooks
+            assert fake3.calls == ["start"], fake3.calls
+            assert len(win_i3._step_hooks["执行列表1"]) == 1, win_i3._step_hooks
             fired3 = []
             win_i3._exec_bridge.step_status.connect(lambda _s=None: fired3.append(1))
-            step3 = win_i3._step_hooks[0][0]
+            step3 = win_i3._step_hooks["执行列表1"][0][0]
             step3.status = StepStatus.RUNNING
             assert len(fired3) == 1, fired3             # 状态变更 → 桥 → 卡片刷新
             app.processEvents()
@@ -1405,77 +1510,155 @@ class DemoStep(Step):
             app.processEvents()
             fake3._set(StepRunnerState.READY)           # 执行结束 → detach
             app.processEvents()
-            assert win_i3._step_hooks == [], win_i3._step_hooks   # detach 后清空
+            assert win_i3._step_hooks.get("执行列表1", []) == [], win_i3._step_hooks
             step3.status = StepStatus.PENDING
             assert len(fired3) == 2, fired3             # detach 后不再通知
 
             # ---- 执行范围（单列表）：切换 → 待命 runner 重建并携带 only_path ----
             assert win_i3._exec_scope == "all"
             win_i3._set_exec_scope("current")
-            assert win_i3._runner is not None
-            assert win_i3._runner.only == "主列表", win_i3._runner.only
+            assert win_i3._runners["执行列表1"].only == "主列表", \
+                win_i3._runners["执行列表1"].only
             # ---- 执行进度：桥 → 状态栏「执行中 i/n」 ----
-            win_i3._runner._set(StepRunnerState.RUNNING)
+            win_i3._runners["执行列表1"]._set(StepRunnerState.RUNNING)
             app.processEvents()
-            win_i3._on_progress((1, 2))
+            win_i3._on_progress(("执行列表1", 1, 2))
             assert "1/2" in win_i3._exec_status.text(), win_i3._exec_status.text()
-            win_i3._runner._set(StepRunnerState.READY)
+            win_i3._runners["执行列表1"]._set(StepRunnerState.READY)
             app.processEvents()
             win_i3._set_exec_scope("all")
-            assert win_i3._runner is not None and win_i3._runner.only is None
-            win_i3._exec_btn.click()                    # 复位：停监听
+            assert win_i3._runners["执行列表1"].only is None
+
+            # ---- 并发多页：双页工程双监听器 + 独立 toggle + 锁定计数 + 页联动 ----
+            pkg_mp = KscpPackage.create_empty()
+            pkg_mp.write_file("actions/示例.py", GOOD.encode("utf-8"))
+            tree_mp = VariableTree.create_empty()
+            tree_mp.add("n1", ProjectVariable.create("number", 100, pkg_mp))
+            pkg_mp.write_file("variables.json", tree_mp.to_json_bytes())
+            slm_mp = StepListManagementTree(pkg_mp, tree_mp)
+            _s_mp = slm_mp._mgr.create_step("示例")
+            _s_mp.io.change_value("input", 0, "5")
+            _s_mp.io.change_value("output", 0, "n1")
+            sl_mp1 = StepList.create_empty()
+            sl_mp1.add(_s_mp)
+            slm_mp.store.add_list("主列表", sl_mp1)
+            slm_mp.page_store.add_page("执行列表2")
+            slm_mp._save_store()
+            pkg_mp.write_file(
+                "executor.json",
+                json.dumps({"hotkey": "f", "stop_mode": "immediate",
+                            "pages": {"执行列表1": "f", "执行列表2": "g"}},
+                           ensure_ascii=False).encode("utf-8"))
+            win_mp = MainWindow()
+            win_mp._open_package(pkg_mp, None)
+            app.processEvents()
+            assert set(win_mp._hotkey_listeners) == {"执行列表1", "执行列表2"}
+            assert win_mp._hotkey_listeners["执行列表1"].hotkey == "f"
+            assert win_mp._hotkey_listeners["执行列表2"].hotkey == "g"
+            # 页1 热键触发 → runner1；页2 热键触发 → runner2（互异实例，各自 start）
+            win_mp._exec_bridge.hotkey_toggle.emit("执行列表1")
+            win_mp._exec_bridge.hotkey_toggle.emit("执行列表2")
+            fake_m1 = win_mp._runners["执行列表1"]
+            fake_m2 = win_mp._runners["执行列表2"]
+            assert isinstance(fake_m1, _FakeRunner) and isinstance(fake_m2, _FakeRunner)
+            assert fake_m1 is not fake_m2
+            assert fake_m1.calls == ["start"] and fake_m2.calls == ["start"]
+            # 停止中文案随停止方式（immediate）
+            fake_m1._set(StepRunnerState.STOPPING)
+            app.processEvents()
+            assert "立即停止" in win_mp._exec_status.text(), win_mp._exec_status.text()
+            # 并发锁定：页1 RUNNING → 锁；页1 READY（页2 仍 RUNNING）→ 仍锁；页2 READY → 解锁
+            fake_m1._set(StepRunnerState.RUNNING)
+            app.processEvents()
+            assert win_mp._exec_locked
+            fake_m2._set(StepRunnerState.RUNNING)
+            fake_m1._set(StepRunnerState.READY)
+            app.processEvents()
+            assert win_mp._exec_locked, "页2 仍执行中 → 保持锁定"
+            assert "另 1 页执行中" in win_mp._exec_status.text()   # 后台页提示
+            fake_m2._set(StepRunnerState.READY)
+            app.processEvents()
+            assert not win_mp._exec_locked
+            # 页删除联动：停监听 + 清理 + 悬空热键防御
+            win_mp._managers[0].page_store.remove_page("执行列表2")   # 管理树已完成删除
+            win_mp._on_page_removed("执行列表2")
+            assert "执行列表2" not in win_mp._hotkey_listeners
+            assert "执行列表2" not in win_mp._runners
+            win_mp._exec_bridge.hotkey_toggle.emit("执行列表2")   # 悬空 → 无操作不崩
+            assert "执行列表2" not in win_mp._runners
+            # 页重命名联动：字典重键 + 当前页跟随
+            win_mp._on_page_renamed("执行列表1", "重命名页")
+            assert "重命名页" in win_mp._runners and "执行列表1" not in win_mp._runners
+            assert win_mp._current_page == "重命名页"
+            # 每页独立代际：陈旧页状态迟到 → 忽略（不误锁）
+            _gen_now = win_mp._runner_gens["重命名页"]
+            win_mp._exec_bridge.runner_state.emit(
+                ("重命名页", _gen_now - 1, StepRunnerState.RUNNING))
+            app.processEvents()
+            assert not win_mp._exec_locked               # 陈旧状态被忽略
         finally:
             _make_step_runner = _orig_mk_runner
     finally:
         _make_hotkey_listener = _orig_mk_listener
 
-    # ---- 设置按钮（活动栏底部）与热键/停止方式落盘 ----
+    # ---- 设置按钮（活动栏底部）与各页热键/停止方式落盘 ----
     # 设置按钮 = 瞬时按钮（点击后无样式残留）；弹窗细节冒烟见 widgets.settings_dialog
     assert not win_exec._settings_btn.isCheckable()
-    # _apply_settings：只写工程包 executor.json（不碰 setting.json——executor.json 唯一来源）
-    win_exec._apply_settings("g", "immediate")
-    assert win_exec._package.exists("executor.json")
-    data = json.loads(win_exec._package.read_file("executor.json").decode("utf-8"))
-    assert data == {"hotkey": "g", "stop_mode": "immediate"}, data
-    # 工程优先：_current_hotkey 读 executor.json；缺失回退默认 "`"
-    assert win_exec._current_hotkey() == "g"
-    # _current_stop_mode：读 executor.json；立即停止 → 状态栏文案随之变化
-    assert win_exec._current_stop_mode() == "immediate"
-    win_exec._exec_bridge.runner_state.emit(
-        (win_exec._runner_gen, StepRunnerState.STOPPING))
-    assert "立即停止" in win_exec._exec_status.text()
-    win_exec._package.remove("executor.json")
-    try:
-        assert win_exec._current_hotkey() == "`"      # 缺失 → 默认热键
-        assert win_exec._current_stop_mode() == "after_step"
-    finally:
-        win_exec._package.write_file(
-            "executor.json", b'{"hotkey": "g"}')
-    # 旧格式（无 stop_mode 字段）→ 静默回退 after_step（不打扰）
-    assert win_exec._current_stop_mode() == "after_step"
-    win_exec._package.write_file(
-        "executor.json", '{"hotkey": "g", "stop_mode": "bad"}'.encode("utf-8"))
-    assert win_exec._current_stop_mode() == "after_step"   # 非法值 → 回退 + 告警日志
-
-    # ---- 代际标记（随附修复）：陈旧 runner 迟到 READY 不覆盖新 runner 状态 ----
-    # 本段再次点击执行按钮 → 重新桩替换监听工厂（冒烟不得真实全局监听）
-    _orig_mk_listener2 = _make_hotkey_listener
+    # 本段 _apply_settings 会重建监听 → 重新桩替换监听工厂（冒烟不得真实全局监听）
+    _orig_mk_listener0 = _make_hotkey_listener
     _make_hotkey_listener = lambda h, cb: _StubListener(h, cb)
     try:
-        win_exec._exec_btn.click()                       # 停监听（旧 runner 收尾）
-        win_exec._exec_btn.click()                       # 再待命 → 新 runner（新代际）
+        # _apply_settings：只写工程包 executor.json（不碰 setting.json——executor.json 唯一来源）
+        win_exec._apply_settings({"执行列表1": "g"}, "immediate")
+        assert win_exec._package.exists("executor.json")
+        data = json.loads(win_exec._package.read_file("executor.json").decode("utf-8"))
+        assert data == {"hotkey": "g", "stop_mode": "immediate",
+                        "pages": {"执行列表1": "g"}}, data
+        # _page_hotkeys 读回：v2 pages 映射；保存后监听已按新热键重建
+        assert win_exec._page_hotkeys() == {"执行列表1": "g"}
+        assert win_exec._hotkey_listeners["执行列表1"].hotkey == "g"
+        # _current_stop_mode：立即停止 → 停止方式提示文案随之变化
+        # （STOPPING 状态栏文案按 runner 实际状态刷新，已在多页假 runner 段验证）
+        assert win_exec._current_stop_mode() == "immediate"
+        assert win_exec._stop_hint() == "立即停止"
+        win_exec._package.remove("executor.json")
+        try:
+            assert win_exec._page_hotkeys() == {"执行列表1": "`"}   # 缺失 → 第一页默认热键
+            assert win_exec._current_stop_mode() == "after_step"
+        finally:
+            win_exec._package.write_file(
+                "executor.json", b'{"hotkey": "g"}')
+        # 旧格式（无 pages）→ 顶层 hotkey 归第一页；无 stop_mode → 静默回退 after_step
+        assert win_exec._page_hotkeys() == {"执行列表1": "g"}
+        assert win_exec._current_stop_mode() == "after_step"
+        win_exec._package.write_file(
+            "executor.json",
+            '{"hotkey": "g", "stop_mode": "bad", "pages": {"执行列表1": "ab"}}'
+            .encode("utf-8"))
+        assert win_exec._current_stop_mode() == "after_step"        # 非法值 → 回退 + 告警日志
+        assert win_exec._page_hotkeys() == {"执行列表1": ""}        # 非法热键（多字符）→ 空
+
+        # ---- 每页代际标记：陈旧 runner 迟到 READY 不覆盖新 runner 状态 ----
+        win_exec._package.write_file(
+            "executor.json",
+            json.dumps({"hotkey": "`", "stop_mode": "after_step",
+                        "pages": {"执行列表1": "`"}},
+                       ensure_ascii=False).encode("utf-8"))   # 恢复合法配置
+        win_exec._exec_btn.click()                       # 当前页 runner READY → 重建（新代际）
+        page = win_exec._current_page
         win_exec._set_exec_status("执行中……（按热键停止）")
         win_exec._set_exec_locked(True)
-        stale_gen = win_exec._runner_gen - 1             # 旧代际
-        win_exec._exec_bridge.runner_state.emit((stale_gen, StepRunnerState.READY))
+        stale_gen = win_exec._runner_gens[page] - 1      # 旧代际
+        win_exec._exec_bridge.runner_state.emit(
+            (page, stale_gen, StepRunnerState.READY))
         assert "执行中" in win_exec._exec_status.text()  # 陈旧 READY 被忽略
         assert win_exec._managers[0].current_tree()._read_only  # 编辑仍锁定（只读模式）
-        win_exec._exec_bridge.runner_state.emit((win_exec._runner_gen, StepRunnerState.READY))
+        win_exec._exec_bridge.runner_state.emit(
+            (page, win_exec._runner_gens[page], StepRunnerState.READY))
         assert "待命" in win_exec._exec_status.text()    # 当前代际状态正常刷新（解锁）
         assert not win_exec._managers[0].current_tree()._read_only
-        win_exec._exec_btn.click()                       # 复位：停监听
     finally:
-        _make_hotkey_listener = _orig_mk_listener2
+        _make_hotkey_listener = _orig_mk_listener0
 
     # ---- 右键合成卡片「跳转到编辑」：切活动栏 + 选中卡片 + 打开编辑 ----
     tmp_j = tempfile.mktemp(suffix=".kscp")
