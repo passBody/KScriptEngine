@@ -23,7 +23,7 @@
 """
 from typing import Callable, List, Optional, Tuple
 
-from PyQt5.QtCore import QPoint, QRect, Qt, pyqtSignal
+from PyQt5.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QDialog, QGraphicsPixmapItem, QGraphicsScene, QLabel, QMessageBox,
@@ -89,14 +89,53 @@ def compose_mark(pixmap: QPixmap, points: List[Tuple[int, int]],
 
 
 class ClickPreviewLabel(QLabel):
-    """可点击预览缩略图：左键点击发出 :data:`clicked`（→ 弹出窗口查看）。"""
+    """可点击预览缩略图：存原图、**随自身尺寸缩放显示**；左键点击发出 :data:`clicked`。
+
+    随尺寸缩放（resizeEvent 重缩放）是防重叠的关键：卡片空间不足时本标签被
+    压缩，若固定高度缩放图会超出标签边界、视觉上压住下方按钮（用户报告）。
+    """
 
     clicked = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._raw: Optional[QPixmap] = None
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumHeight(_PREVIEW_MIN_H)
+        self.setMaximumHeight(_PREVIEW_MAX_H)
+        # 高度可压缩（Ignored）：卡片纵向空间不足时缩略图让步收缩
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
+        self.setStyleSheet("background:#f4f7fc; border:1px solid #d5dbe3;")
+        self.setToolTip("点击弹出窗口查看")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
+
+    def set_raw(self, pix: QPixmap) -> None:
+        """存原图并按当前尺寸缩放显示。"""
+        self._raw = pix
+        self._rescale()
+
+    def clear_image(self, text: str = "无素材") -> None:
+        self._raw = None
+        self.setPixmap(QPixmap())          # 清掉旧 pixmap，避免文字与图重叠
+        self.setText(text)
+
+    def _rescale(self) -> None:
+        if self._raw is None or self._raw.isNull():
+            return
+        size = self.size()
+        if size.width() <= 0 or size.height() <= 0:
+            size = QSize(_PREVIEW_MAX_H * 2, _PREVIEW_MAX_H)   # 未布局兜底
+        self.setText("")
+        self.setPixmap(self._raw.scaled(
+            size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        super().resizeEvent(event)
+        self._rescale()
 
 
 class ImagePreviewDialog(QDialog):
@@ -165,14 +204,6 @@ class MarkPreviewView(QWidget):
         hint.setWordWrap(True)
 
         self.preview_label = ClickPreviewLabel()
-        self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumHeight(_PREVIEW_MIN_H)
-        self.preview_label.setMaximumHeight(_PREVIEW_MAX_H)
-        # 高度可压缩（Ignored）：1k 显示器卡片纵向空间有限，防按钮被挤出重叠
-        self.preview_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
-        self.preview_label.setStyleSheet(
-            "background:#f4f7fc; border:1px solid #d5dbe3;")
-        self.preview_label.setToolTip("点击弹出窗口查看")
         self.preview_label.clicked.connect(self._open_preview)
 
         self.btn_mark = QPushButton(mark_button)
@@ -180,7 +211,7 @@ class MarkPreviewView(QWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(6)
+        lay.setSpacing(8)                      # 预览与按钮间留足间距（防贴压）
         lay.addWidget(hint)
         lay.addWidget(self.preview_label)
         lay.addWidget(self.btn_mark)
@@ -238,11 +269,9 @@ class MarkPreviewView(QWidget):
     def _refresh_preview(self) -> None:
         pix = self.preview_pixmap()
         if pix.isNull():
-            self.preview_label.setText("无素材")
+            self.preview_label.clear_image()
         else:
-            self.preview_label.setText("")
-            self.preview_label.setPixmap(pix.scaledToHeight(
-                _PREVIEW_MAX_H - 8, Qt.SmoothTransformation))
+            self.preview_label.set_raw(pix)   # 随标签尺寸缩放（见 ClickPreviewLabel）
 
     # ---- 弹窗 / 标注 ----
     def _open_preview(self) -> None:
@@ -343,5 +372,18 @@ if __name__ == "__main__":
     io.change_value("input", 2, "")
     assert view.preview_pixmap().isNull()
     assert view.preview_label.text() == "无素材"
+
+    # 防重叠：纵向压缩 → 标签变小、pixmap 随尺寸缩放不超出标签边界，
+    # 按钮顶边始终位于标签底边之下（用户报告：按钮压住预览图下半部分）
+    io.change_value("input", 2, "{{图}}")
+    view.resize(200, 120)
+    view.show()
+    app.processEvents()
+    _pm = view.preview_label.pixmap()
+    assert _pm is not None and not _pm.isNull()
+    assert _pm.width() <= view.preview_label.width() + 1, (_pm.width(),
+                                                          view.preview_label.width())
+    assert _pm.height() <= view.preview_label.height() + 1
+    assert view.btn_mark.y() >= view.preview_label.y() + view.preview_label.height()
 
     print("MarkPreviewView smoke OK")

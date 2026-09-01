@@ -31,8 +31,8 @@ from typing import Optional, Tuple
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QToolButton,
-    QVBoxLayout, QWidget,
+    QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QScrollArea,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from model.step import Step, StepStatus
@@ -132,14 +132,19 @@ class StepCard(QFrame):
 
         self._info = step.info_widget(self)
         self._io_widget = step.io.gen_widget(self)
+        # 输入输出区可滚动：参数过多时在卡片内滚动查看，不撑破卡片/遮挡其它控件
+        self._io_scroll = QScrollArea(self)
+        self._io_scroll.setWidgetResizable(True)
+        self._io_scroll.setFrameShape(QFrame.NoFrame)
+        self._io_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._io_scroll.setWidget(self._io_widget)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 8)
         lay.setSpacing(4)
         lay.addLayout(top)
         lay.addWidget(self._info)
-        lay.addWidget(self._io_widget)
-        lay.addStretch()
+        lay.addWidget(self._io_scroll, 1)      # 占剩余空间（stretch）
 
         # 颜色刷新钩子①：io 文本框编辑（QLineEdit 输入即重检；用户输入 → 通知内容已改）
         # 弱引用传卡（防自引用环，见 _notify_io_edited）
@@ -387,6 +392,32 @@ if __name__ == "__main__":
     card3.io_changed.connect(lambda: fired.append(1))
     card3._io_widget.input_fields[0].setText("9")   # 模拟用户输入 → textChanged
     assert fired == [1], fired
+
+    # ---- S-1：输入输出区可滚动——多参数步骤在卡片内滚动，不撑破卡片 ----
+    import dataclasses as _dc
+    _ManyInput = _dc.make_dataclass(
+        "_ManyInput", [("f%d" % i, "number", 0) for i in range(12)])
+    _ManyOutput = _dc.make_dataclass("_ManyOutput", [])
+
+    class _ManyStep(Step):
+        name = "多参数步骤"
+        description = "滚动测试"
+        input_class = _ManyInput
+        output_class = _ManyOutput
+
+        def run(self) -> int:
+            return 1
+
+    _sm = _ManyStep.create_default(tree, pkg)
+    _cm = StepCard(_sm)
+    _cm.show()
+    app.processEvents()
+    assert _cm._io_scroll is not None
+    assert _cm._io_scroll.widget() is _cm._io_widget   # 滚动容器包裹 io 控件
+    _vbar = _cm._io_scroll.verticalScrollBar()
+    assert _vbar.maximum() > 0, _vbar.maximum()        # 内容超出可视区 → 可滚动
+    assert _cm._io_widget.height() > _cm._io_scroll.viewport().height()
+    _cm.close()
 
     # ---- I-2：picker 包装链扁平（_kscript_orig 回溯计数 = 1，重建不累积） ----
     s4 = _StubStep.create_default(tree, pkg)
