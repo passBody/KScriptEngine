@@ -18,12 +18,12 @@
 |---|---|
 | R1 | step_list.json v2：顶层键 = 执行列表名，值 = 既有组/列表嵌套结构；旧格式自动迁移（顶层任一值为数组 → 包成单页「执行列表1」），**打开不改写旧文件** |
 | R2 | 树面板换页 UI：顶部标题（右击重命名，值 = JSON 键）；标题右方下拉切换按钮（列出全部页，点击切换）；下方「添加页」按钮（命名弹窗 → 新建并跳转）与「删除该页」按钮（最后一页守卫）；**新建/重命名查重**——重名/非法名 → 日志报错并阻止命名行为 |
-| R3 | 每页热键：executor.json `pages` 映射（页 → 单字符或空）；**每热键一个常驻 HotkeyListener**（工程打开即生效，取消"待命/停监听"武装流程） |
-| R4 | 热键 toggle：该页 READY → 启动（错误/占位卡守卫）；RUNNING/STOPPING → request_stop；同一页单 runner 防双执行 |
+| R3 | 每页热键：executor.json `pages` 映射（页 → 单字符或空）；**每热键一个常驻 HotkeyListener**（工程打开即创建监听线程；热键仅在**该页待命中**生效，执行按钮 = 待命开关） |
+| R4 | 热键 toggle（**仅该页待命中生效**）：READY → 启动（错误/占位卡守卫）；RUNNING/STOPPING → request_stop；同一页单 runner 防双执行 |
 | R5 | 并发：多页同时执行互不干扰（页间 store 独立 → 无交叉复位；immediate 停止线程本地隔离）；共享全局变量/日志为 last-writer-wins（用户已知并接受） |
 | R6 | UI 锁定按活跃执行器集合重算（任一页非 READY → 锁）；每页独立代际过滤陈旧状态；step hooks 按页挂/摘 |
 | R7 | 设置弹窗改集中表格：每页一行（页名 + 热键编辑框可空 + 清除按钮）；保存前页间热键查重（大小写不敏感），冲突弹窗阻止 |
-| R8 | 执行按钮 = 当前页 toggle（点击直接执行/停止）；状态栏 = 当前页状态 + 「另 N 页执行中」 |
+| R8 | 执行按钮 = 当前页**待命开关**（点击变绿进入待命、**不执行步骤**；再点关闭待命，执行中同时停止）；状态栏 = 当前页状态 + 「另 N 页执行中」 |
 | R9 | 页增删改联动：页重命名 → 执行器/监听器字典重键；页删除 → 停监听 + 清理 + 悬空热键防御 |
 | R10 | 兼容：executor.json 旧格式（无 pages）→ 顶层 hotkey 归第一页；缺失 → 第一页默认 `` ` ``；step_list.json v1 顶层全组文件与 v2 本质不可区分 → 按 v2 解读（文档明示） |
 
@@ -56,10 +56,13 @@
 ### 3.4 热键常驻 + 每页单 runner
 
 - 打开工程 `_start_page_listeners()`：按 `_page_hotkeys()` 为每个非空热键建
-  监听器（回调闭包携带页名 → 桥 `hotkey_toggle(page)`）。
-- `_handle_hotkey_toggle(page)`：该页 runner 非 READY → request_stop（toggle）；
-  否则错误兜底 → 建 runner（scope=current 且是当前页才传 only_path）→ 挂该页
-  hooks → start。runner READY 后保留复用（同页防双执行）。
+  监听器（回调闭包携带页名 → 桥 `hotkey_toggle(page)`）；监听线程常驻，
+  **热键触发以该页待命（`_armed[page]`）为门槛**。
+- 执行按钮 `_on_exec_clicked()`：当前页待命开关——点击变绿待命（不执行步骤），
+  再点关闭待命（执行中同时 request_stop）。
+- `_handle_hotkey_toggle(page)`：未待命 → 忽略；该页 runner 非 READY →
+  request_stop（toggle）；否则错误兜底 → 建 runner（scope=current 且是当前页
+  才传 only_path）→ 挂该页 hooks → start。runner READY 后保留复用（同页防双执行）。
 
 ### 3.5 UI 锁定与状态
 
