@@ -48,6 +48,7 @@ ZIP 归档，内含：
 .kscp
 │  step_list.json     步骤列表（组/列表/步骤，执行序）
 │  variables.json     全局变量树
+│  composites.json    合成卡片定义（tree + 三段签名 sigs）
 │  executor.json      执行热键配置（工程自带）
 ├─assets/             资源（图片等）
 └─actions/            步骤模板（随工程分发，打开工程用包内版本）
@@ -59,5 +60,13 @@ ZIP 归档，内含：
 全量回归一条命令：
 
 ```bash
-python tests/smoke_all.py   # 36 模块冒烟 + 3 个工程加载自检，失败非零退出
+python tests/smoke_all.py   # 48 模块冒烟 + 1 个工程加载自检，失败非零退出
 ```
+
+## 文档
+
+- **docs/工程分析.md** —— 工程全景分析（架构/模块表/评审债单/实现状态，随代码维护）
+- **docs/README.md** —— 文档导航索引
+- **docs/superpowers/specs & plans/** —— 设计文档存档（14 spec + 9 plan，历史时点）
+- **.claude/skills/** —— 项目技能：添加 action / 添加变量类型
+
