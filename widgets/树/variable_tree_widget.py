@@ -4,7 +4,7 @@
 ========================
 
 :class:`VariableTreeWidget` 继承 :class:`QTreeWidget`，管理
-:class:`model.variable_tree.VariableTree`（存于工程 ``variables.json``）。左树 +
+:class:`model.变量.variable_tree.VariableTree`（存于工程 ``variables.json``）。左树 +
 :class:`VariableEditPanel` 中编辑卡，按变量类型生成专属编辑器（预留接口），
 实时校验、禁用提交非法值；image 类变量经资源选择器改值。
 
@@ -31,13 +31,13 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from model.kscp_package import KscpPackage
+from model.工程.kscp_package import KscpPackage
 from model.log_model import LogModel
-from model.project_variable import ProjectVariable
-from model.variable_tree import VariableTree
-from widgets.image_overlay import ImageOverlay
-from widgets.resource_tree_widget import ResourceTreeWidget
-from widgets.ui_common import ClickableLabel
+from model.变量.project_variable import ProjectVariable
+from model.变量.variable_tree import VariableTree
+from widgets.通用.image_overlay import ImageOverlay
+from widgets.树.resource_tree_widget import ResourceTreeWidget
+from widgets.通用.ui_common import ClickableLabel
 
 __all__ = ["VariableTreeWidget", "VariableEditPanel", "CreateVariableDialog"]
 

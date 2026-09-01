@@ -6,7 +6,7 @@
 :class:`MouseOffset`：鼠标偏移指定坐标
 """
 from dataclasses import dataclass
-from model.step import Step
+from model.步骤.step import Step
 
 from libs.key_control import InputControl
 from model.log_model import LogModel

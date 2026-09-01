@@ -37,7 +37,7 @@
         → 同类型出；str/bytes 进 → 优先 numpy.ndarray（不可用则 PIL.Image，再不行则
         QImage）。注：内部先「展平到白底 RGB888」再标注，带透明通道的图会合成到白底。
         'show' 与取消/失败时返回原输入 ``image_data``（未修改）。
-    pos_info : :class:`model.point_timeline.PointTimeline` 或 None
+    pos_info : :class:`model.执行.point_timeline.PointTimeline` 或 None
         坐标点 + 每点点击前等待的秒数（首点恒为 0）。dot/rect/dots 标注完成时返回；
         'show' / 取消 / dots 空点 / 尺寸不符 时返回 None。遍历方式::
 
@@ -90,7 +90,7 @@ from typing import Any, Optional, Tuple
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if __package__ is None and _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
-from model.point_timeline import PointTimeline
+from model.执行.point_timeline import PointTimeline
 
 from PyQt5.QtCore import Qt, QPoint, QRect, QByteArray, QBuffer, QIODevice, QEventLoop
 from PyQt5.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QPixmap

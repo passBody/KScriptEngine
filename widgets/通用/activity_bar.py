@@ -95,7 +95,7 @@ class ActivityBar(QWidget):
 
 
 # ================================================================
-# 冒烟演示：直接 ``python -m widgets.activity_bar`` 运行
+# 冒烟演示：直接 ``python -m widgets.通用.activity_bar`` 运行
 # ================================================================
 if __name__ == "__main__":
     import sys

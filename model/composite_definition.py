@@ -1,44 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-合成卡片定义（body + 签名 的纯数据捆绑）
-======================================
+兼容垫片：模块已移至 :mod:`model.合成卡片.composite_definition`（重构 2026-09-02）
+========================================================
 
-:class:`CompositeDefinition` 把一张合成卡片的**定义体**（:class:`StepList`）
-与其**参数签名**（:class:`CompositeSignature`）捆在一起，供
-:class:`CompositeCardStore` 存取与 :class:`CompositeCard` 运行期解析。
-
-本模块属 model 层：顶层不导入 PyQt5。
+旧 ``.kscp`` 工程包内的步骤模板与旧脚本仍从本路径导入，本模块仅
+re-export 保持兼容。新代码请从 ``model.合成卡片.composite_definition`` 导入。
 """
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-
-from model.composite_signature import CompositeSignature
-
-if TYPE_CHECKING:
-    from model.step_list import StepList
-
-__all__ = ["CompositeDefinition"]
-
-
-@dataclass
-class CompositeDefinition:
-    """一张合成卡片的定义：体内步骤列表 + 参数签名。"""
-    body: "StepList"
-    signature: CompositeSignature = field(default_factory=CompositeSignature.empty)
-
-
-# ================================================================
-# 冒烟演示：直接 ``python -m model.composite_definition`` 运行
-# ================================================================
-if __name__ == "__main__":
-    from model.step_list import StepList
-    from model.composite_signature import Param
-
-    body = StepList.create_empty()
-    d = CompositeDefinition(body, CompositeSignature(inputs=[Param("x", "number")]))
-    assert d.body is body
-    assert d.signature.input_names() == ["x"]
-    # 签名默认空
-    d2 = CompositeDefinition(StepList.create_empty())
-    assert d2.signature.is_empty()
-    print("CompositeDefinition smoke OK")
+from model.合成卡片.composite_definition import *  # noqa: F401,F403
+from model.合成卡片.composite_definition import __all__

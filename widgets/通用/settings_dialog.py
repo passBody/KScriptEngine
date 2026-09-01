@@ -163,7 +163,7 @@ class SettingsDialog(QDialog):
 
 
 # ================================================================
-# 冒烟演示：直接 ``python -m widgets.settings_dialog`` 运行
+# 冒烟演示：直接 ``python -m widgets.通用.settings_dialog`` 运行
 # ================================================================
 if __name__ == "__main__":
     import sys

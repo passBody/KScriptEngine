@@ -6,9 +6,9 @@
 :class:`MainWindow` 是 KScript 的主窗口。无工程时显示「新建 / 打开」两个大卡片；
 打开 ``.kscp`` 后，左侧是管理树切换栏 + 当前管理树，中间是当前管理树的大预览。
 
-界面组件按职责拆分：管理树簇见 :mod:`widgets.management_trees`，活动栏见
-:mod:`widgets.activity_bar`，设置弹窗见 :mod:`widgets.settings_dialog`，
-通用小件（图标/窗口尺寸/落地卡片/标题面板/占位）见 :mod:`widgets.ui_common`。
+界面组件按职责拆分：管理树簇见 :mod:`widgets.树.management_trees`，活动栏见
+:mod:`widgets.通用.activity_bar`，设置弹窗见 :mod:`widgets.通用.settings_dialog`，
+通用小件（图标/窗口尺寸/落地卡片/标题面板/占位）见 :mod:`widgets.通用.ui_common`。
 本模块保留主窗口本体 + 执行器接线 + 程序入口。
 
 启动::
@@ -34,29 +34,29 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from model.hotkey import HotkeyListener
-from model.kscp_package import KscpPackage
+from model.执行.hotkey import HotkeyListener
+from model.工程.kscp_package import KscpPackage
 from model.log_model import LogLevel, LogModel
-from model.step import StepStatus
-from model.step_manager import StepManager
-from model.step_runner import StepRunner, StepRunnerState
-from model.variable_tree import VariableTree
-from model.composite_card import CompositeCard
-from model.composite_card_store import CompositeCardStore
-from model.placeholder_step import PlaceholderStep
-from widgets.log_widget import LogWidget
-from widgets.step_list_tree_widget import StepListTreeWidget
-from widgets.step_tree_widget import StepInfoPanel, StepTreeWidget
-from widgets.variable_tree_widget import VariableTreeWidget
-from widgets.activity_bar import ActivityBar
-from widgets.management_trees import (
+from model.步骤.step import StepStatus
+from model.步骤.step_manager import StepManager
+from model.执行.step_runner import StepRunner, StepRunnerState
+from model.变量.variable_tree import VariableTree
+from model.合成卡片.composite_card import CompositeCard
+from model.合成卡片.composite_card_store import CompositeCardStore
+from model.合成卡片.placeholder_step import PlaceholderStep
+from widgets.通用.log_widget import LogWidget
+from widgets.树.step_list_tree_widget import StepListTreeWidget
+from widgets.树.step_tree_widget import StepInfoPanel, StepTreeWidget
+from widgets.树.variable_tree_widget import VariableTreeWidget
+from widgets.通用.activity_bar import ActivityBar
+from widgets.树.management_trees import (
     ManagementTree, ResourceManagementTree, StepListHost,
     StepListManagementTree, StepManagementTree, VariableManagementTree,
     CompositeManagementTree,
 )
-from widgets.step_list_view import StepClipboard
-from widgets.settings_dialog import SettingsDialog
-from widgets.ui_common import (
+from widgets.卡片.step_list_view import StepClipboard
+from widgets.通用.settings_dialog import SettingsDialog
+from widgets.通用.ui_common import (
     LandingCard, TitledPanel, ensure_qt_plugin_path, make_icon, window_size,
 )
 
@@ -1090,10 +1090,10 @@ if __name__ == "__main__":
 
     from PyQt5.QtWidgets import QApplication, QInputDialog
 
-    from model.project_variable import ProjectVariable
-    from model.step import StepStatus
-    from model.step_list import StepList
-    from model.step_runner import StepRunner, StepRunnerState
+    from model.变量.project_variable import ProjectVariable
+    from model.步骤.step import StepStatus
+    from model.步骤.step_list import StepList
+    from model.执行.step_runner import StepRunner, StepRunnerState
 
     app = QApplication.instance() or QApplication(sys.argv)
 
@@ -1642,7 +1642,7 @@ class DemoStep(Step):
         _make_hotkey_listener = _orig_mk_listener
 
     # ---- 设置按钮（活动栏底部）与各页热键/停止方式落盘 ----
-    # 设置按钮 = 瞬时按钮（点击后无样式残留）；弹窗细节冒烟见 widgets.settings_dialog
+    # 设置按钮 = 瞬时按钮（点击后无样式残留）；弹窗细节冒烟见 widgets.通用.settings_dialog
     assert not win_exec._settings_btn.isCheckable()
     # 本段 _apply_settings 会重建监听 → 重新桩替换监听工厂（冒烟不得真实全局监听）
     _orig_mk_listener0 = _make_hotkey_listener
@@ -1766,9 +1766,9 @@ class DemoStep(Step):
     # 错误数含该卡、跳转错误可定位（用户：占位卡应计入错误数并禁止执行）。
     import base64 as _b64
     import json as _json
-    from model.step_io import StepIOWidget
-    from model.variable_tree import VariableTree
-    from model.placeholder_step import PlaceholderStep
+    from model.步骤.step_io import StepIOWidget
+    from model.变量.variable_tree import VariableTree
+    from model.合成卡片.placeholder_step import PlaceholderStep
     pkg_e = KscpPackage.create_empty()
     # 一条不可还原的格式串（name「别的步骤」无匹配模板）+ 空列表「干净」作对照
     fake_fmt = _b64.urlsafe_b64encode(_json.dumps(

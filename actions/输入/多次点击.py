@@ -25,8 +25,8 @@ from typing import List, Optional, Tuple
 
 from libs.key_control import InputControl
 from model.log_model import LogModel
-from model.run_interrupt import interruptible_sleep
-from model.step import Step, StepStatus
+from model.执行.run_interrupt import interruptible_sleep
+from model.步骤.step import Step, StepStatus
 
 __all__ = ["MultiClick"]
 
@@ -102,10 +102,10 @@ if __name__ == "__main__":
 
     from PyQt5.QtWidgets import QApplication
 
-    from model.kscp_package import KscpPackage
+    from model.工程.kscp_package import KscpPackage
     from model.log_model import LogModel
-    from model.project_variable import ProjectVariable
-    from model.variable_tree import VariableTree
+    from model.变量.project_variable import ProjectVariable
+    from model.变量.variable_tree import VariableTree
 
     # actions/__init__.py 已登记本模块：桩须挂在当前执行命名空间（见 按键.py 注释）
     _mod = sys.modules[__name__]

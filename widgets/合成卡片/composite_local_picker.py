@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QMenu, QWidget,
 )
 
-from model.composite_signature import CompositeSignature
+from model.合成卡片.composite_signature import CompositeSignature
 
 __all__ = ["make_composite_local_picker"]
 
@@ -104,14 +104,14 @@ def _coerce(vtype: str, text: str):
 
 
 # ================================================================
-# 冒烟演示：直接 ``python -m widgets.composite_local_picker`` 运行
+# 冒烟演示：直接 ``python -m widgets.合成卡片.composite_local_picker`` 运行
 # ================================================================
 if __name__ == "__main__":
     import sys
     from PyQt5.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(sys.argv)
-    from model.composite_signature import Param, LocalVar
+    from model.合成卡片.composite_signature import Param, LocalVar
 
     sig = CompositeSignature(inputs=[Param("x", "number"), Param("s", "string")],
                              outputs=[Param("y", "number")],

@@ -22,8 +22,8 @@ from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import QVBoxLayout, QWidget
 
 from libs.key_control import InputControl
-from model.step import Step, optional
-from widgets.mark_preview_view import MarkPreviewView
+from model.步骤.step import Step, optional
+from widgets.卡片.mark_preview_view import MarkPreviewView
 
 __all__ = ["MouseClick"]
 
@@ -117,9 +117,9 @@ if __name__ == "__main__":
 
     from PyQt5.QtWidgets import QApplication
 
-    from model.kscp_package import KscpPackage
-    from model.project_variable import ProjectVariable
-    from model.variable_tree import VariableTree
+    from model.工程.kscp_package import KscpPackage
+    from model.变量.project_variable import ProjectVariable
+    from model.变量.variable_tree import VariableTree
 
     # actions/__init__.py 已登记本模块：runpy 执行前会先被包导入（sys.modules 里
     # 是旧命名空间）。桩必须挂在当前执行命名空间（run 的闭包指向它），否则冒烟会
@@ -187,7 +187,7 @@ if __name__ == "__main__":
         # 无法被 libpng 解码；此处为等价有效 1x1 RGBA 透明 PNG（同尺寸同格式）。
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQAB"
         "pfZFQAAAAABJRU5ErkJggg=="))     # 1x1 PNG
-    from model.project_variable import ProjectVariable
+    from model.变量.project_variable import ProjectVariable
     tree.add("图", ProjectVariable.create("image", "assets/底图.png", pkg))
     m3 = MouseClick.create_default(tree, pkg)
     m3.io.change_value("input", 3, "{{图}}")
@@ -214,8 +214,8 @@ if __name__ == "__main__":
     assert not view._preview_pixmap().isNull()
 
     # 点击缩略图 → 独立弹窗：**无父窗口**（父窗口在 QGraphicsProxyWidget 内
-    # 会被 proxy 内嵌渲染、嵌在卡片里 —— 同 model.step_io 默认选择器的教训）
-    from widgets.mark_preview_view import ImagePreviewDialog
+    # 会被 proxy 内嵌渲染、嵌在卡片里 —— 同 model.步骤.step_io 默认选择器的教训）
+    from widgets.卡片.mark_preview_view import ImagePreviewDialog
     _captured = []
     from PyQt5.QtWidgets import QDialog
     _orig_exec = QDialog.exec_

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 from libs.key_control import InputControl
 from model.log_model import LogModel
-from model.step import Step, StepStatus
+from model.步骤.step import Step, StepStatus
 
 __all__ = ["KeyClick"]
 
@@ -72,10 +72,10 @@ if __name__ == "__main__":
 
     from PyQt5.QtWidgets import QApplication
 
-    from model.kscp_package import KscpPackage
+    from model.工程.kscp_package import KscpPackage
     from model.log_model import LogModel
-    from model.project_variable import ProjectVariable
-    from model.variable_tree import VariableTree
+    from model.变量.project_variable import ProjectVariable
+    from model.变量.variable_tree import VariableTree
 
     # actions/__init__.py 已登记本模块：runpy 执行前会先被包导入（sys.modules 里
     # 是旧命名空间）。桩必须挂在当前执行命名空间（run 的闭包指向它），否则冒烟会

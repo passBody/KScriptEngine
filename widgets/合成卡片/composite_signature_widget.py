@@ -20,8 +20,8 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from model.composite_signature import CompositeSignature, LocalVar, Param
-from model.project_variable import ProjectVariable
+from model.合成卡片.composite_signature import CompositeSignature, LocalVar, Param
+from model.变量.project_variable import ProjectVariable
 
 __all__ = ["CompositeSignatureDialog", "CompositeSignatureWidget"]
 
@@ -276,7 +276,7 @@ class CompositeSignatureDialog(QDialog):
 
 
 # ================================================================
-# 冒烟演示：直接 ``python -m widgets.composite_signature_widget`` 运行
+# 冒烟演示：直接 ``python -m widgets.合成卡片.composite_signature_widget`` 运行
 # ================================================================
 if __name__ == "__main__":
     import sys

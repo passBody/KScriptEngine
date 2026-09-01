@@ -4,7 +4,7 @@
 ========================
 
 :class:`ResourceTreeWidget` 继承 :class:`QTreeWidget`，管理
-:class:`model.kscp_package.KscpPackage` 中 ``assets/`` 目录的资源。支持
+:class:`model.工程.kscp_package.KscpPackage` 中 ``assets/`` 目录的资源。支持
 Ctrl/Shift 多选、右键上下文菜单（复制/粘贴/剪切/重命名/删除/添加），并可通过
 :meth:`preview_widget` 显示预览面板（png 缩略图 / 只读文本 / 二进制占位）。
 
@@ -41,9 +41,9 @@ from PyQt5.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from model.kscp_package import KscpPackage
-from widgets.image_overlay import ImageOverlay
-from widgets.ui_common import ClickableLabel
+from model.工程.kscp_package import KscpPackage
+from widgets.通用.image_overlay import ImageOverlay
+from widgets.通用.ui_common import ClickableLabel
 
 if TYPE_CHECKING:
     ...
@@ -524,7 +524,7 @@ class ResourceTreeWidget(QTreeWidget):
 
 
 # ================================================================
-# 冒烟演示：直接 ``python -m widgets.resource_tree_widget`` 运行
+# 冒烟演示：直接 ``python -m widgets.树.resource_tree_widget`` 运行
 # ================================================================
 if __name__ == "__main__":
     import sys

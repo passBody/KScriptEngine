@@ -16,7 +16,7 @@
 from dataclasses import dataclass
 
 from libs.key_control import InputControl
-from model.step import Step
+from model.步骤.step import Step
 
 __all__ = ["MouseScroll"]
 
@@ -61,8 +61,8 @@ if __name__ == "__main__":
 
     from PyQt5.QtWidgets import QApplication
 
-    from model.kscp_package import KscpPackage
-    from model.variable_tree import VariableTree
+    from model.工程.kscp_package import KscpPackage
+    from model.变量.variable_tree import VariableTree
 
     # actions/__init__.py 已登记本模块：桩须挂在当前执行命名空间（见 按键.py 注释）
     _mod = sys.modules[__name__]

@@ -35,14 +35,14 @@ from PyQt5.QtWidgets import (
     QToolButton, QVBoxLayout, QWidget,
 )
 
-from model.step import Step, StepStatus
-from model.placeholder_step import PlaceholderStep
+from model.步骤.step import Step, StepStatus
+from model.合成卡片.placeholder_step import PlaceholderStep
 
 __all__ = ["StepCard", "card_size_for_screen"]
 
 # 卡片样式表：毛玻璃/圆角/柔和状态色 + 属性选择器（动态状态经属性切换）
 _CARD_QSS_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "view", "cards.qss")
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "view", "cards.qss")
 
 # 文件缺失/损坏时的最小兜底样式（评审#9：模块级读取会让整个 widgets 包导入失败）
 _FALLBACK_CARD_QSS = "StepCard { border-radius: 8px; }"
@@ -272,7 +272,7 @@ class StepCard(QFrame):
 
 
 # ================================================================
-# 冒烟演示：直接 ``python -m widgets.step_card`` 运行
+# 冒烟演示：直接 ``python -m widgets.卡片.step_card`` 运行
 # ================================================================
 if __name__ == "__main__":
     import sys
@@ -280,14 +280,14 @@ if __name__ == "__main__":
     from PyQt5.QtCore import QPoint
     from PyQt5.QtWidgets import QApplication
 
-    from model.step import Step
-    from model.kscp_package import KscpPackage
-    from model.project_variable import ProjectVariable
-    from model.variable_tree import VariableTree
+    from model.步骤.step import Step
+    from model.工程.kscp_package import KscpPackage
+    from model.变量.project_variable import ProjectVariable
+    from model.变量.variable_tree import VariableTree
 
     app = QApplication.instance() or QApplication(sys.argv)
 
-    # 桩步骤（与 model.step 冒烟同款）
+    # 桩步骤（与 model.步骤.step 冒烟同款）
     from dataclasses import dataclass
 
     @dataclass

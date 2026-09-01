@@ -4,7 +4,7 @@
 ========================
 
 :class:`StepTreeWidget` 继承 :class:`QTreeWidget`,管理
-:class:`model.step_manager.StepManager` 注册的步骤模板:左侧树展示模板
+:class:`model.步骤.step_manager.StepManager` 注册的步骤模板:左侧树展示模板
 (组 = ``actions/`` 目录含空组,叶子 = 已注册模板),右侧 :class:`StepInfoPanel`
 显示选中模板的只读信息(名称/描述/分组/输入输出参数**左右两栏对齐**)。
 
@@ -19,7 +19,7 @@
 ::
 
     from model import KscpPackage
-    from widgets.step_tree_widget import StepTreeWidget
+    from widgets.树.step_tree_widget import StepTreeWidget
     tree = StepTreeWidget(pkg)
     tree.preview_widget()   # 信息面板
 """
@@ -37,10 +37,10 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from model.kscp_package import KscpPackage
-from model.step_manager import StepManager
-from model.variable_tree import VariableTree
-from widgets.ui_common import make_icon
+from model.工程.kscp_package import KscpPackage
+from model.步骤.step_manager import StepManager
+from model.变量.variable_tree import VariableTree
+from widgets.通用.ui_common import make_icon
 
 __all__ = ["StepTreeWidget", "StepInfoPanel", "MoveStepDialog"]
 
@@ -544,7 +544,7 @@ class MoveStepDialog(QDialog):
         return text
 
 # ================================================================
-# 冒烟演示：直接 ``python -m widgets.step_tree_widget`` 运行
+# 冒烟演示：直接 ``python -m widgets.树.step_tree_widget`` 运行
 # ================================================================
 if __name__ == "__main__":
     import os
@@ -553,7 +553,7 @@ if __name__ == "__main__":
 
     from PyQt5.QtWidgets import QApplication
 
-    from model.kscp_package import KscpPackage
+    from model.工程.kscp_package import KscpPackage
 
     app = QApplication.instance() or QApplication(sys.argv)
 

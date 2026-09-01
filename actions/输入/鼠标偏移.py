@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import time
 
 from libs.key_control import InputControl
-from model.step import Step
+from model.步骤.step import Step
 
 __all__ = ["MouseMove"]
 

@@ -48,7 +48,7 @@ def validate_char_key(key, name):
 def _interruptible_sleep(seconds):
     """插值等待：执行器「立即停止」时提前返回 True（惰性导入避免循环依赖）。"""
     try:
-        from model.run_interrupt import interruptible_sleep
+        from model.执行.run_interrupt import interruptible_sleep
         return interruptible_sleep(seconds)
     except ImportError:
         time.sleep(seconds)

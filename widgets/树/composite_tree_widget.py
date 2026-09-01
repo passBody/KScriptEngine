@@ -4,12 +4,12 @@
 ========================
 
 :class:`CompositeTreeWidget` 是「合成卡片列表模型」
-（:class:`model.composite_card_store.CompositeCardStore`）的管理树：组 = 文件夹
+（:class:`model.合成卡片.composite_card_store.CompositeCardStore`）的管理树：组 = 文件夹
 图标，叶子 = 合成卡片（只显示键值）。上下文菜单支持添加卡片 / 添加组 / 复制 /
 剪切 / 粘贴 / 重命名 / 删除；点击卡片发 :data:`composite_selected`，任何变更后
 发 :data:`store_changed` 并调用 ``on_changed`` 回调（上层保存 ``composites.json``）。
 
-与 :class:`widgets.step_list_tree_widget.StepListTreeWidget` 同构（结构/拖拽/右键
+与 :class:`widgets.树.step_list_tree_widget.StepListTreeWidget` 同构（结构/拖拽/右键
 菜单同款），唯二区别：
 
 * **无激活勾选框**：合成卡片体内步骤的激活在卡片视图编辑（同步骤列表），
@@ -39,11 +39,11 @@ from PyQt5.QtWidgets import (
     QStyle, QTreeWidget, QTreeWidgetItem, QWidget,
 )
 
-from model.step_list import StepList
-from model.composite_card_store import CompositeCardStore
-from model.composite_local_tree import build_validation_tree
-from model.step_manager import StepManager
-from widgets.step_list_view import StepClipboard
+from model.步骤.step_list import StepList
+from model.合成卡片.composite_card_store import CompositeCardStore
+from model.合成卡片.composite_local_tree import build_validation_tree
+from model.步骤.step_manager import StepManager
+from widgets.卡片.step_list_view import StepClipboard
 
 __all__ = ["CompositeTreeWidget"]
 
@@ -785,22 +785,22 @@ class CompositeTreeWidget(QTreeWidget):
 
 
 # ================================================================
-# 冒烟演示：直接 ``python -m widgets.composite_tree_widget`` 运行
+# 冒烟演示：直接 ``python -m widgets.树.composite_tree_widget`` 运行
 # ================================================================
 if __name__ == "__main__":
     import sys
 
     from PyQt5.QtWidgets import QApplication, QInputDialog, QMessageBox
 
-    from model.kscp_package import KscpPackage
-    from model.project_variable import ProjectVariable
-    from model.step import Step
-    from model.step_list import StepList
-    from model.step_manager import StepManager
-    from model.variable_tree import VariableTree
-    from model.composite_card import CompositeCard
-    from model.composite_card_store import CompositeCardStore
-    from widgets.step_list_view import StepClipboard
+    from model.工程.kscp_package import KscpPackage
+    from model.变量.project_variable import ProjectVariable
+    from model.步骤.step import Step
+    from model.步骤.step_list import StepList
+    from model.步骤.step_manager import StepManager
+    from model.变量.variable_tree import VariableTree
+    from model.合成卡片.composite_card import CompositeCard
+    from model.合成卡片.composite_card_store import CompositeCardStore
+    from widgets.卡片.step_list_view import StepClipboard
 
     app = QApplication.instance() or QApplication(sys.argv)
 
@@ -992,7 +992,7 @@ class DemoStep(Step):
     # ---- Issue 2：带参卡片 body 步骤绑 {{全局}} → 校验树无该名 → 红卡
     # （编辑期即红，与运行期局部树缺失 → ERROR 一致，修「编辑期不红、运行期才红」）；
     # 绑 {{输入参数}} → 合规（校验树 inputs 预填）----
-    from model.composite_signature import Param, CompositeSignature
+    from model.合成卡片.composite_signature import Param, CompositeSignature
     sig2 = CompositeSignature(inputs=[Param("x", "number")],
                               outputs=[Param("y", "number")])
     bodyP = StepList.create_empty()

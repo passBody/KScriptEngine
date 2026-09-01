@@ -6,7 +6,7 @@
 :class:`Number2String`：数字转字符串
 """
 from dataclasses import dataclass
-from model.step import Step, optional
+from model.步骤.step import Step, optional
 
 from model.log_model import LogModel
 
@@ -51,10 +51,10 @@ if __name__ == "__main__":
 
     from PyQt5.QtWidgets import QApplication
 
-    from model.kscp_package import KscpPackage
+    from model.工程.kscp_package import KscpPackage
     from model.log_model import LogModel
-    from model.project_variable import ProjectVariable
-    from model.variable_tree import VariableTree
+    from model.变量.project_variable import ProjectVariable
+    from model.变量.variable_tree import VariableTree
 
     app = QApplication.instance() or QApplication(sys.argv)
 

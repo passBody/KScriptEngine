@@ -22,26 +22,26 @@ from PyQt5.QtWidgets import (
     QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from model.kscp_package import KscpPackage
+from model.工程.kscp_package import KscpPackage
 from model.log_model import LogModel
-from model.step_list import StepList
-from model.step_list_store import StepListStore
-from model.step_page_store import StepPageStore
-from model.step_manager import StepManager
-from model.composite_card import repoint_refs, repoint_param_refs, CompositeCard
-from model.composite_card_store import CompositeCardStore
-from model.composite_signature import CompositeSignature, LocalVar
-from model.composite_local_tree import build_validation_tree
-from model.variable_tree import VariableTree
-from widgets.resource_tree_widget import ResourceTreeWidget
-from widgets.variable_tree_widget import VariableTreeWidget
-from widgets.step_tree_widget import StepTreeWidget
-from widgets.step_list_tree_widget import StepListTreeWidget
-from widgets.composite_tree_widget import CompositeTreeWidget
-from widgets.composite_signature_widget import CompositeSignatureDialog
-from widgets.composite_local_picker import make_composite_local_picker
-from widgets.step_list_view import StepClipboard, StepListView
-from widgets.ui_common import make_icon, placeholder
+from model.步骤.step_list import StepList
+from model.步骤.step_list_store import StepListStore
+from model.步骤.step_page_store import StepPageStore
+from model.步骤.step_manager import StepManager
+from model.合成卡片.composite_card import repoint_refs, repoint_param_refs, CompositeCard
+from model.合成卡片.composite_card_store import CompositeCardStore
+from model.合成卡片.composite_signature import CompositeSignature, LocalVar
+from model.合成卡片.composite_local_tree import build_validation_tree
+from model.变量.variable_tree import VariableTree
+from widgets.树.resource_tree_widget import ResourceTreeWidget
+from widgets.树.variable_tree_widget import VariableTreeWidget
+from widgets.树.step_tree_widget import StepTreeWidget
+from widgets.树.step_list_tree_widget import StepListTreeWidget
+from widgets.树.composite_tree_widget import CompositeTreeWidget
+from widgets.合成卡片.composite_signature_widget import CompositeSignatureDialog
+from widgets.合成卡片.composite_local_picker import make_composite_local_picker
+from widgets.卡片.step_list_view import StepClipboard, StepListView
+from widgets.通用.ui_common import make_icon, placeholder
 
 __all__ = [
     "ManagementTree", "PlaceholderManagementTree", "ResourceManagementTree",
@@ -770,7 +770,7 @@ class CompositeManagementTree(ManagementTree):
 
         纯局部作用域：body 步骤只能绑签名参数（入参/出参/局部）。换 io._tree 为
         **校验树**（inputs 也预填，区别于运行期 :func:`build_local_tree`）→
-        body 步骤绑 ``{{全局}}`` 时 :attr:`~model.step_io.StepIOWidget.is_valid`
+        body 步骤绑 ``{{全局}}`` 时 :attr:`~model.步骤.step_io.StepIOWidget.is_valid`
         判 False → 卡片即时红标（与运行期局部树缺失该名 → ERROR 一致，修
         「编辑期不红、运行期才红」的不一致）。
         参数less（空签名）→ body 走全局树（同 v1，运行期不换树）。
@@ -1078,22 +1078,22 @@ class PlaceholderManagementTree(ManagementTree):
 
 
 # ================================================================
-# 冒烟演示：直接 ``python -m widgets.management_trees`` 运行
+# 冒烟演示：直接 ``python -m widgets.树.management_trees`` 运行
 # ================================================================
 if __name__ == "__main__":
     import sys
 
     from PyQt5.QtWidgets import QApplication, QLabel
 
-    from model.kscp_package import KscpPackage
-    from model.project_variable import ProjectVariable
-    from model.step_list import StepList
-    from model.step_manager import StepManager
-    from model.variable_tree import VariableTree
-    from model.composite_card import CompositeCard
-    from model.composite_card_store import CompositeCardStore
-    from widgets.composite_tree_widget import CompositeTreeWidget
-    from widgets.step_list_view import StepClipboard
+    from model.工程.kscp_package import KscpPackage
+    from model.变量.project_variable import ProjectVariable
+    from model.步骤.step_list import StepList
+    from model.步骤.step_manager import StepManager
+    from model.变量.variable_tree import VariableTree
+    from model.合成卡片.composite_card import CompositeCard
+    from model.合成卡片.composite_card_store import CompositeCardStore
+    from widgets.树.composite_tree_widget import CompositeTreeWidget
+    from widgets.卡片.step_list_view import StepClipboard
 
     app = QApplication.instance() or QApplication(sys.argv)
 
@@ -1310,7 +1310,7 @@ class DemoStep(Step):
     cmgr.set_read_only(True)
     cmgr.set_read_only(False)
     # v2：选中带参卡片 → 签名表载入 + body 宿主 + 局部选择器（不抛）
-    from model.composite_signature import Param, CompositeSignature
+    from model.合成卡片.composite_signature import Param, CompositeSignature
     sig = CompositeSignature(inputs=[Param("x", "number")],
                              outputs=[Param("y", "number")])
     bodyP = StepList.create_empty()
@@ -1335,7 +1335,7 @@ class DemoStep(Step):
     # 弹窗编辑：_open_signature_dialog → 确定 → _on_signature_changed 落盘
     # （打桩 exec_：返回 Accepted 前先编辑弹窗内 widget，模拟用户「确定」）
     from PyQt5.QtWidgets import QDialog as _QDialog
-    from widgets.composite_signature_widget import (
+    from widgets.合成卡片.composite_signature_widget import (
         CompositeSignatureDialog as _CSD)
     _orig_exec = _CSD.exec_
     try:

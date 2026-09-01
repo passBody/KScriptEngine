@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))   # 便于 import 项目包（如 widgets.ui_common）
+sys.path.insert(0, str(ROOT))   # 便于 import 项目包（如 widgets.通用.ui_common）
 
 MODULES = [
     "actions.控制流程.time_delay", "actions.控制流程.输出日志",
@@ -26,23 +26,23 @@ MODULES = [
     "actions.输入.按键", "actions.输入.鼠标点击", "actions.输入.鼠标移动",
     "actions.输入.鼠标滚轮", "actions.输入.鼠标拖动", "actions.输入.多次点击",
     "libs.key_control.base",
-    "model.hotkey", "model.kscp_package", "model.log_model", "model.path_util",
-    "model.project_variable", "model.run_interrupt", "model.settings",
-    "model.step", "model.step_io",
-    "model.step_list", "model.step_list_store", "model.step_manager",
-    "model.step_page_store", "model.step_runner", "model.variable_tree",
-    "model.composite_card", "model.composite_card_store",
-    "model.composite_definition", "model.composite_local_tree",
-    "model.composite_signature", "model.placeholder_step",
-    "widgets.activity_bar", "widgets.image_overlay", "widgets.log_widget",
-    "widgets.main_widget", "widgets.management_trees",
-    "widgets.mark_preview_view",
-    "widgets.composite_local_picker", "widgets.composite_signature_widget",
-    "widgets.composite_tree_widget",
-    "widgets.resource_tree_widget", "widgets.settings_dialog",
-    "widgets.step_card", "widgets.step_list_tree_widget",
-    "widgets.step_list_view", "widgets.step_tree_widget",
-    "widgets.ui_common", "widgets.variable_tree_widget",
+    "model.执行.hotkey", "model.工程.kscp_package", "model.log_model", "model.工程.path_util",
+    "model.变量.project_variable", "model.执行.run_interrupt", "model.工程.settings",
+    "model.步骤.step", "model.步骤.step_io",
+    "model.步骤.step_list", "model.步骤.step_list_store", "model.步骤.step_manager",
+    "model.步骤.step_page_store", "model.执行.step_runner", "model.变量.variable_tree",
+    "model.合成卡片.composite_card", "model.合成卡片.composite_card_store",
+    "model.合成卡片.composite_definition", "model.合成卡片.composite_local_tree",
+    "model.合成卡片.composite_signature", "model.合成卡片.placeholder_step",
+    "widgets.通用.activity_bar", "widgets.通用.image_overlay", "widgets.通用.log_widget",
+    "widgets.main_widget", "widgets.树.management_trees",
+    "widgets.卡片.mark_preview_view",
+    "widgets.合成卡片.composite_local_picker", "widgets.合成卡片.composite_signature_widget",
+    "widgets.树.composite_tree_widget",
+    "widgets.树.resource_tree_widget", "widgets.通用.settings_dialog",
+    "widgets.卡片.step_card", "widgets.树.step_list_tree_widget",
+    "widgets.卡片.step_list_view", "widgets.树.step_tree_widget",
+    "widgets.通用.ui_common", "widgets.树.variable_tree_widget",
 ]
 # 注：tools.image_marker 的 __main__ 是**交互式全屏标注 demo**（QEventLoop 阻塞
 # 等待人工点击），无断言、无法无人值守运行——不纳入本清单，人工验证。
@@ -77,7 +77,7 @@ def _run(args, timeout: int) -> int:
 
 def main() -> int:
     # venv 等独立部署：先指路 Qt 插件（子进程继承环境变量，避免 Qt 冒烟挂起）
-    from widgets.ui_common import ensure_qt_plugin_path
+    from widgets.通用.ui_common import ensure_qt_plugin_path
     ensure_qt_plugin_path()
 
     failed = 0

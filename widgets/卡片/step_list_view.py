@@ -3,7 +3,7 @@
 步骤列表视图（GUI 控件）
 ======================
 
-:class:`StepListView` 是「步骤列表」（:class:`model.step_list.StepList`）的
+:class:`StepListView` 是「步骤列表」（:class:`model.步骤.step_list.StepList`）的
 可视化视图（QGraphicsView）：横向排布 :class:`StepCard` 卡片
 （QGraphicsProxyWidget），滚轮横向滚动，悬停卡片平滑放大（1.06 倍），
 右键菜单支持 添加（头部/尾部/前方/后方，经 :class:`TemplateChooserDialog`
@@ -38,15 +38,15 @@ from PyQt5.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from model.step_list import StepList
-from model.step_manager import StepManager
-from model.composite_card import CompositeCard
-from model.placeholder_step import PlaceholderStep
-from widgets.step_card import StepCard, card_size_for_screen
-from widgets.ui_common import make_icon
+from model.步骤.step_list import StepList
+from model.步骤.step_manager import StepManager
+from model.合成卡片.composite_card import CompositeCard
+from model.合成卡片.placeholder_step import PlaceholderStep
+from widgets.卡片.step_card import StepCard, card_size_for_screen
+from widgets.通用.ui_common import make_icon
 
 if TYPE_CHECKING:
-    from model.composite_card_store import CompositeCardStore
+    from model.合成卡片.composite_card_store import CompositeCardStore
 
 __all__ = ["StepClipboard", "StepListView", "TemplateChooserDialog"]
 
@@ -825,15 +825,15 @@ if __name__ == "__main__":
     from PyQt5.QtGui import QWheelEvent
     from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox
 
-    from model.step import Step
-    from model.kscp_package import KscpPackage
-    from model.project_variable import ProjectVariable
-    from model.step_list import StepList
-    from model.step_list_store import StepListStore
-    from model.step_manager import StepManager
-    from model.variable_tree import VariableTree
-    from model.composite_card import CompositeCard
-    from model.composite_card_store import CompositeCardStore
+    from model.步骤.step import Step
+    from model.工程.kscp_package import KscpPackage
+    from model.变量.project_variable import ProjectVariable
+    from model.步骤.step_list import StepList
+    from model.步骤.step_list_store import StepListStore
+    from model.步骤.step_manager import StepManager
+    from model.变量.variable_tree import VariableTree
+    from model.合成卡片.composite_card import CompositeCard
+    from model.合成卡片.composite_card_store import CompositeCardStore
 
     app = QApplication.instance() or QApplication(sys.argv)
 

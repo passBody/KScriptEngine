@@ -3,13 +3,13 @@
 步骤列表管理树（GUI 控件）
 ========================
 
-:class:`StepListTreeWidget` 是「总步骤列表模型」（:class:`model.step_list_store.StepListStore`）
+:class:`StepListTreeWidget` 是「总步骤列表模型」（:class:`model.步骤.step_list_store.StepListStore`）
 的管理树：组 = 文件夹图标，叶子 = 步骤列表（只显示键值）。上下文菜单支持
 添加组 / 复制 / 剪切 / 粘贴 / 重命名 / 删除；点击列表发 :data:`list_selected`，
 任何变更后发 :data:`store_changed` 并调用 ``on_changed`` 回调（上层保存
 ``step_list.json``）。
 
-剪贴板（:class:`widgets.step_list_view.StepClipboard`）与步骤列表视图共享；
+剪贴板（:class:`widgets.卡片.step_list_view.StepClipboard`）与步骤列表视图共享；
 列表/组剪贴板 = ``(名, [(相对路径, 是否组, 格式串列表|None), ...])``，
 粘贴时经 :class:`StepManager` 解码重建（列表）或 ``add_group`` 递归重建（组）。
 
@@ -35,10 +35,10 @@ from PyQt5.QtWidgets import (
     QStyle, QTreeWidget, QTreeWidgetItem, QWidget,
 )
 
-from model.step_list import StepList
-from model.step_list_store import StepListStore
-from model.step_manager import StepManager
-from widgets.step_list_view import StepClipboard
+from model.步骤.step_list import StepList
+from model.步骤.step_list_store import StepListStore
+from model.步骤.step_manager import StepManager
+from widgets.卡片.step_list_view import StepClipboard
 
 __all__ = ["StepListTreeWidget"]
 
@@ -918,14 +918,14 @@ if __name__ == "__main__":
 
     from PyQt5.QtWidgets import QApplication, QInputDialog, QMessageBox
 
-    from model.step import Step
-    from model.kscp_package import KscpPackage
-    from model.project_variable import ProjectVariable
-    from model.step_list import StepList
-    from model.step_list_store import StepListStore
-    from model.step_manager import StepManager
-    from model.variable_tree import VariableTree
-    from widgets.step_list_view import StepClipboard
+    from model.步骤.step import Step
+    from model.工程.kscp_package import KscpPackage
+    from model.变量.project_variable import ProjectVariable
+    from model.步骤.step_list import StepList
+    from model.步骤.step_list_store import StepListStore
+    from model.步骤.step_manager import StepManager
+    from model.变量.variable_tree import VariableTree
+    from widgets.卡片.step_list_view import StepClipboard
 
     app = QApplication.instance() or QApplication(sys.argv)
 
@@ -1653,7 +1653,7 @@ class DemoStep(Step):
     sl_x.add(mgr.create_step("示例"))              # 来自上文已 load 的 mgr
     store_t.get("x2").add(sl_x[0])
     tw_t = StepListTreeWidget(store_t, mgr_t, StepClipboard(), lambda: None)
-    from model.placeholder_step import PlaceholderStep
+    from model.合成卡片.placeholder_step import PlaceholderStep
     assert tw_t._move_paths(["x2"], "x1", QAbstractItemView.OnItem) is True
     # x2 移到 x1 之后（OnItem = 目标之后）；步骤保留为占位卡（原串不丢）
     assert [p for p, _g in store_t.walk()] == ["x1", "x2", "x3"], \

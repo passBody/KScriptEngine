@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""model 子包：数据结构。"""
-from .point_timeline import PointTimeline
-from .kscp_package import KscpPackage
-from .project_variable import ProjectVariable, VariableType
-from .variable_tree import VariableTree
+"""model 子包：数据结构（重构 2026-09-02 起按功能分子包：步骤/执行/变量/工程/合成卡片）。"""
+from .执行.point_timeline import PointTimeline
+from .工程.kscp_package import KscpPackage
+from .变量.project_variable import ProjectVariable, VariableType
+from .变量.variable_tree import VariableTree
 from .log_model import LogEntry, LogLevel, LogModel
-from .step_io import StepIOWidget
-from .step import Step, StepStatus
+from .步骤.step_io import StepIOWidget
+from .步骤.step import Step, StepStatus
 
 __all__ = [
     "PointTimeline",

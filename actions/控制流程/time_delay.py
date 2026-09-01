@@ -21,9 +21,9 @@
 import time
 from dataclasses import dataclass
 
-from model.step import Step, StepStatus
+from model.步骤.step import Step, StepStatus
 from model.log_model import LogModel
-from model.run_interrupt import interruptible_sleep
+from model.执行.run_interrupt import interruptible_sleep
 
 __all__ = ["TimeDelay"]
 
@@ -67,9 +67,9 @@ if __name__ == "__main__":
 
     from PyQt5.QtWidgets import QApplication
 
-    from model.kscp_package import KscpPackage
+    from model.工程.kscp_package import KscpPackage
     from model.log_model import LogModel
-    from model.variable_tree import VariableTree
+    from model.变量.variable_tree import VariableTree
 
     app = QApplication.instance() or QApplication(sys.argv)
 
