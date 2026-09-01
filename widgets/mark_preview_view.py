@@ -43,8 +43,7 @@ _BORDER_COLOR = QColor(0, 175, 255)        # rect 描边
 _BORDER_WIDTH = 2
 _NUM_COLOR = QColor(255, 255, 255)         # dots 序号颜色（白）
 
-_PREVIEW_MAX_H = 88    # 缩略图最大高度（1k 显示器卡片空间有限，防按钮被挤出重叠）
-_PREVIEW_MIN_H = 60
+_PREVIEW_MAX_H = 88    # 缩略图最大高度（1k 显示器卡片空间有限）
 
 
 def _match_var_ref(text: str) -> Optional[str]:
@@ -101,10 +100,17 @@ class ClickPreviewLabel(QLabel):
         super().__init__(parent)
         self._raw: Optional[QPixmap] = None
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumHeight(_PREVIEW_MIN_H)
+        # 高度策略（两次踩坑的收敛结论）：
+        # * **不能设 minimum**：布局按更小的分配值排布后续控件（按钮），标签却
+        #   被 minimum 钳制回原值 → 按钮与标签错位重叠（用户报告「按钮压住
+        #   缩略图下半部分」）。
+        # * **不能用 Ignored**：Ignored 让布局完全忽略 sizeHint（贡献 0）→
+        #   标签被分配 0 高，预览不可见。
+        # * 正确 = Expanding + min 0 + max 88：sizeHint（见 sizeHint 覆盖，
+        #   与 pixmap 解耦）参与分配、剩余空间吸收、空间不足时压缩——
+        #   重叠与 0 高在几何上都不可能。
         self.setMaximumHeight(_PREVIEW_MAX_H)
-        # 高度可压缩（Ignored）：卡片纵向空间不足时缩略图让步收缩
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.setStyleSheet("background:#f4f7fc; border:1px solid #d5dbe3;")
         self.setToolTip("点击弹出窗口查看")
 
@@ -112,6 +118,15 @@ class ClickPreviewLabel(QLabel):
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt 命名)
+        """高度与 pixmap 解耦（固定为最大预览高）。
+
+        QLabel 默认 sizeHint = pixmap 尺寸——若随 pixmap 变化，setPixmap →
+        sizeHint 变 → 布局再分配 → resizeEvent 再缩放，负反馈环会把标签
+        收敛到 0 高。固定高度后布局按需分配、pixmap 只随分配结果缩放。
+        """
+        return QSize(super().sizeHint().width(), _PREVIEW_MAX_H)
 
     def set_raw(self, pix: QPixmap) -> None:
         """存原图并按当前尺寸缩放显示。"""
@@ -213,7 +228,7 @@ class MarkPreviewView(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)                      # 预览与按钮间留足间距（防贴压）
         lay.addWidget(hint)
-        lay.addWidget(self.preview_label)
+        lay.addWidget(self.preview_label)      # Expanding 策略负责吸收剩余空间
         lay.addWidget(self.btn_mark)
 
         self._weak_cb = None            # io 监听弱引用（见 _attach_listener）
@@ -385,5 +400,65 @@ if __name__ == "__main__":
                                                           view.preview_label.width())
     assert _pm.height() <= view.preview_label.height() + 1
     assert view.btn_mark.y() >= view.preview_label.y() + view.preview_label.height()
+
+    # ---- 真实卡片几何（经 StepListView/QGraphicsProxyWidget）：按钮不得压住缩略图 ----
+    from model.step import Step
+    from model.step_list import StepList
+    from model.step_manager import StepManager
+    from widgets.step_list_view import StepClipboard, StepListView
+
+    _pkg2 = KscpPackage.create_empty()
+    _pkg2.write_file("actions/示例.py", '''# -*- coding: utf-8 -*-
+from dataclasses import dataclass
+from actions.base import Step
+from model.step import optional
+
+@dataclass
+class _In:
+    x: "number" = 0
+    y: "number" = 0
+    素材: "image" = optional("")
+
+@dataclass
+class _Out:
+    pass
+
+class DemoStep(Step):
+    name = "示例"
+    description = "几何探针"
+    input_class = _In
+    output_class = _Out
+
+    def info_widget(self, parent=None):
+        from widgets.mark_preview_view import MarkPreviewView
+        return MarkPreviewView(
+            io=self.io, image_slot=2, mode="dot",
+            read_points=lambda: [(1, 1)],
+            write_points=lambda pts: None, parent=parent)
+
+    def run(self) -> int:
+        return 1
+'''.encode("utf-8"))
+    _tree2 = VariableTree.create_empty()
+    _mgr2 = StepManager(_pkg2, _tree2)
+    _mgr2.load()
+    _s2 = _mgr2.create_step("示例")
+    _sl2 = StepList.create_empty()
+    _sl2.add(_s2)
+    _view2 = StepListView(_mgr2, StepClipboard())
+    _view2.set_list(_sl2, _mgr2)
+    _view2.resize(760, 400)
+    _view2.show()
+    app.processEvents()
+    _card2 = _view2.cards[0]
+    _labels = [l for l in _card2.findChildren(QLabel)
+               if l.toolTip() == "点击弹出窗口查看"]
+    _buttons = [b for b in _card2.findChildren(QPushButton)
+                if b.text() == "设置点位"]
+    assert len(_labels) == 1 and len(_buttons) == 1
+    _lb, _bt = _labels[0], _buttons[0]
+    assert _bt.y() >= _lb.y() + _lb.height(), \
+        (_bt.y(), _lb.y(), _lb.height())          # 修复前：按钮压住缩略图
+    assert _lb.height() > 0, _lb.height()         # 修复前（Ignored）：0 高不可见
 
     print("MarkPreviewView smoke OK")
