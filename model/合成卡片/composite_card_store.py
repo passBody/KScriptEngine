@@ -360,7 +360,7 @@ if __name__ == "__main__":
     # 模板字节（有效模板；中文/引号内容一律用 .encode("utf-8")，禁用中文 bytes 字面量）
     GOOD = '''# -*- coding: utf-8 -*-
 from dataclasses import dataclass
-from actions.base import Step
+from model.步骤.step import Step
 
 @dataclass
 class _DemoInput:

@@ -410,7 +410,7 @@ if __name__ == "__main__":
     _pkg2 = KscpPackage.create_empty()
     _pkg2.write_file("actions/示例.py", '''# -*- coding: utf-8 -*-
 from dataclasses import dataclass
-from actions.base import Step
+from model.步骤.step import Step
 from model.步骤.step import optional
 
 @dataclass

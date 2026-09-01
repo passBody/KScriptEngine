@@ -1220,7 +1220,7 @@ if __name__ == "__main__":
     # ---- add_template_to_current：模板树「加入当前列表」闭环 ----
     _GOOD = '''# -*- coding: utf-8 -*-
 from dataclasses import dataclass
-from actions.base import Step
+from model.步骤.step import Step
 
 @dataclass
 class _DemoInput:

@@ -810,7 +810,7 @@ if __name__ == "__main__":
 
     GOOD = '''# -*- coding: utf-8 -*-
 from dataclasses import dataclass
-from actions.base import Step
+from model.步骤.step import Step
 
 @dataclass
 class _DemoInput:

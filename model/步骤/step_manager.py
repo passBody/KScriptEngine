@@ -382,7 +382,7 @@ if __name__ == "__main__":
     # 模板字节（有效模板；中文/引号内容一律用 .encode("utf-8")，禁用中文 bytes 字面量）
     GOOD = '''# -*- coding: utf-8 -*-
 from dataclasses import dataclass
-from actions.base import Step
+from model.步骤.step import Step
 
 @dataclass
 class _DemoInput:
@@ -404,7 +404,7 @@ class DemoStep(Step):
 '''
 
     BAD_ANNO = '''from dataclasses import dataclass
-from actions.base import Step
+from model.步骤.step import Step
 
 @dataclass
 class _BadInput:
@@ -426,7 +426,7 @@ class BadStep(Step):
     pkg.write_file("actions/控制流程/延时.py", GOOD.encode("utf-8"))   # 跨目录同名，允许
     pkg.write_file("actions/坏语法.py", b"def broken(:\n")
     pkg.write_file("actions/坏注解.py", BAD_ANNO.encode("utf-8"))
-    NO_DATACLASS = '''from actions.base import Step
+    NO_DATACLASS = '''from model.步骤.step import Step
 
 class NoDcStep(Step):
     name = "缺容器"

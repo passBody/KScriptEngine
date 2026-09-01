@@ -559,7 +559,7 @@ if __name__ == "__main__":
 
     S2 = '''# -*- coding: utf-8 -*-
 from dataclasses import dataclass
-from actions.base import Step
+from model.步骤.step import Step
 
 @dataclass
 class _In:
@@ -583,7 +583,7 @@ class DemoStep(Step):
 
     S1 = '''# -*- coding: utf-8 -*-
 from dataclasses import dataclass
-from actions.base import Step
+from model.步骤.step import Step
 
 @dataclass
 class _In:
