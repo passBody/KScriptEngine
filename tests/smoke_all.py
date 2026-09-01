@@ -30,7 +30,7 @@ MODULES = [
     "model.project_variable", "model.run_interrupt", "model.settings",
     "model.step", "model.step_io",
     "model.step_list", "model.step_list_store", "model.step_manager",
-    "model.step_runner", "model.variable_tree",
+    "model.step_page_store", "model.step_runner", "model.variable_tree",
     "model.composite_card", "model.composite_card_store",
     "model.composite_definition", "model.composite_local_tree",
     "model.composite_signature", "model.placeholder_step",

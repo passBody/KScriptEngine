@@ -139,8 +139,6 @@ class StepRunner:
             if not prog:
                 LogModel.instance().info("无可执行的步骤")
                 return                          # 空程序：状态保持 READY
-            if self._stop_mode == "immediate":
-                set_stop_event(self._stop_event)   # 登记：步骤内可中断睡眠轮询此事件
             self._set_state(StepRunnerState.RUNNING)
         threading.Thread(target=self._run, args=(prog,), daemon=True).start()
 
@@ -153,6 +151,10 @@ class StepRunner:
 
     # ---- 执行循环（工作线程） ----
     def _run(self, prog: List[Callable[[], int]]) -> None:
+        # 登记须在本工作线程内（run_interrupt 为线程本地：登记者=睡觉者，
+        # 并发执行器互不覆盖/误停）；先于第一步 do，可观察行为与原先一致
+        if self._stop_mode == "immediate":
+            set_stop_event(self._stop_event)
         try:
             pc = 0
             steps_done = 0
@@ -398,6 +400,58 @@ if __name__ == "__main__":
     _wait_ready(runner, timeout=3.0)
     assert time.monotonic() - t0 >= 0.9, "after_step 应等当前步骤完成"
     assert _SlowInterruptStep.count == 1
+
+    # ---- 并发 immediate：线程本地登记 → 停一个不误停另一个、start 不交叉复位 ----
+    class _ConcSlowStep(Step):
+        """并发慢步骤：实例级计数（两个 runner 各跑各的实例）。"""
+        name = "并发慢步骤"
+        description = ""
+        input_class = _In
+        output_class = _Out
+
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.count = 0
+
+        def run(self) -> int:
+            self.count += 1
+            from model.run_interrupt import interruptible_sleep
+            if interruptible_sleep(1.0):
+                self.count += 100     # 标记：等待被打断
+            return 1
+
+    def _mk_conc():
+        store = StepListStore.create_empty()
+        sl = StepList.create_empty()
+        s = _ConcSlowStep.create_default(None, None)  # type: ignore
+        s.io._input_values = ["0"]
+        sl.add(s)
+        store.add_list("L", sl)
+        return store, s
+
+    store1, s1 = _mk_conc()
+    store2, s2 = _mk_conc()
+    r1 = StepRunner(store1, stop_mode="immediate")
+    r2 = StepRunner(store2, stop_mode="immediate")
+    r1.start()
+    time.sleep(0.05)
+    assert s1.status is StepStatus.RUNNING
+    r2.start()
+    time.sleep(0.05)
+    assert s1.status is StepStatus.RUNNING, s1.status   # r2 start 不交叉复位页1
+    t0 = time.monotonic()
+    r2.request_stop()
+    _wait_ready(r2, timeout=3.0)
+    assert time.monotonic() - t0 < 0.6, "immediate 应打断 r2 的 1s 等待"
+    assert s2.count == 101, s2.count                  # r2 被打断
+    assert s1.count == 1, s1.count                    # r1 不受影响（仍在等待）
+    assert s1.status is StepStatus.RUNNING
+    t0 = time.monotonic()
+    r1.request_stop()
+    _wait_ready(r1, timeout=3.0)
+    assert time.monotonic() - t0 < 0.6
+    assert s1.count == 101, s1.count
+    assert s1.status is StepStatus.FINISHED and s2.status is StepStatus.FINISHED
 
     # ---- 执行进度：每步执行前通知 (第几步, 总数) ----
     store = make_store([1, 1, 1], ["a", "b", "c"])
