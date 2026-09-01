@@ -9,10 +9,10 @@
 
 ## 设计文档（docs/superpowers/，设计过程存档）
 
-- **specs/**（14 份）：各子系统的设计规格（目标/接口表/校验错误表/测试清单）。
-  日期前缀命名，最新为 `2026-09-01-composite-card-params-design.md`（合成卡片参数）。
-- **plans/**（9 份）：与 spec 对应的实施计划（含代码块与 Global Constraints）。
-  最新为 `2026-09-01-composite-card-params.md`。
+- **specs/**（15 份）：各子系统的设计规格（目标/接口表/校验错误表/测试清单）。
+  日期前缀命名，最新为 `2026-09-02-execution-pages-design.md`（多执行列表页 + 每页独立热键）。
+- **plans/**（10 份）：与 spec 对应的实施计划（含代码块与 Global Constraints）。
+  最新为 `2026-09-02-execution-pages.md`。
 
 > 这些是设计过程的**历史存档**：内容代表设计时点，不随代码更新；
 > 当前状态以 `工程分析.md` 为准。
