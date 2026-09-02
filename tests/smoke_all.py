@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))   # 便于 import 项目包（如 widgets.通用.ui_common）
 
 MODULES = [
+    "actions", "actions.输入.鼠标.基础操作.偏移",
     "actions.控制流程.time_delay", "actions.控制流程.输出日志",
     "actions.变量控制.变量设置.设置number", "actions.变量控制.变量设置.设置string",
     "actions.变量控制.类型转换.字符串转数字", "actions.变量控制.类型转换.数字转字符串",

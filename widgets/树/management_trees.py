@@ -468,6 +468,13 @@ class StepListManagementTree(ManagementTree):
             self._save_timer.timeout.connect(self._save_store)
         self._save_timer.start()
 
+    def flush_save(self) -> None:
+        """立即落盘（保存/退出前调用）：若防抖定时器在跑，停掉并同步写一次，
+        防止防抖窗口内的最新编辑被旧序列化覆盖写盘（Ctrl+S/关窗丢数据修复）。"""
+        if self._save_timer is not None and self._save_timer.isActive():
+            self._save_timer.stop()
+            self._save_store()
+
     def preview_widget(self) -> QWidget:
         if self._host is None:
             self._host = StepListHost(
@@ -711,6 +718,13 @@ class CompositeManagementTree(ManagementTree):
             self._save_timer.setInterval(500)
             self._save_timer.timeout.connect(self._save_store)
         self._save_timer.start()
+
+    def flush_save(self) -> None:
+        """立即落盘（保存/退出前调用）：防抖定时器在跑 → 停掉并同步写一次
+        （同 StepListManagementTree.flush_save，防旧序列化覆盖最新编辑）。"""
+        if self._save_timer is not None and self._save_timer.isActive():
+            self._save_timer.stop()
+            self._save_store()
 
     def preview_widget(self) -> QWidget:
         """容器：上「编辑签名…」按钮、下 StepListHost（体编辑复用）。

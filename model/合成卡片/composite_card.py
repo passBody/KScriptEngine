@@ -264,10 +264,19 @@ class CompositeCard(Step):
             CompositeCard._depth_local.depth = depth - 1
 
     def _run_body(self, prog, body) -> int:
-        """mini pc+偏移循环（照搬 v1 语义；供 run 复用）。"""
+        """mini pc+偏移循环（照搬 v1 语义；供 run 复用）。
+
+        停止条件除类级冒烟事件外，另查线程本地登记的执行器停止事件——
+        「立即停止」时随外层执行器一起中断，不再排空剩余子步骤
+        （类级事件无人 set，仅本模块 __main__ 冒烟使用）。
+        """
+        from model.执行.run_interrupt import is_stop_requested
+
         pc = 0
         steps_done = 0
-        while pc < len(prog) and not CompositeCard._stop_event.is_set():
+        while pc < len(prog) \
+                and not CompositeCard._stop_event.is_set() \
+                and not is_stop_requested():
             steps_done += 1
             if steps_done > _MAX_SUB_STEPS:
                 LogModel.instance().error(
@@ -519,6 +528,28 @@ if __name__ == "__main__":
     assert cstop.do() == 1
     assert _ProbeStep.calls == []                           # 已停止，未执行体内步骤
     stop.clear()
+
+    # ---- 立即停止接线：线程本地登记事件置位 → body 循环提前退出（执行器路径） ----
+    from model.执行.run_interrupt import clear_stop_event as _cls_stop, \
+        set_stop_event as _sse_stop
+    _ev3 = _th.Event()
+    _sse_stop(_ev3)
+    try:
+        _ProbeStep.calls = []
+        _ProbeStep.offsets = [1, 1, 1, 1, 1]
+        bodyIm = StepList.create_empty()
+        for i in range(5):
+            s = _ProbeStep.create_default(tree, pkg)
+            s.io._input_values = ["0"]
+            s.tag = "I%d" % i
+            bodyIm.add(s)
+        _ev3.set()
+        cim = CompositeCard("组/停", tree, pkg)
+        assert cim.do() == 1
+        assert _ProbeStep.calls == []       # 停止已请求 → 体内步骤一步都不跑
+    finally:
+        _cls_stop(_ev3)
+
     CompositeCard.set_stop_event(_th.Event())             # 复位默认事件
 
     # ---- repoint_refs：重命名后改指引用条目（修「步骤中命名不随重命名变化」）----

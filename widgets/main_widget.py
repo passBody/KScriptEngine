@@ -316,11 +316,45 @@ class MainWindow(QMainWindow):
         a_restore = menu.addAction("显示主窗口")
         a_restore.triggered.connect(self._restore_from_tray)
         a_quit = menu.addAction("退出")
-        a_quit.triggered.connect(
-            lambda: QApplication.instance().quit() if QApplication.instance() else None)
+        a_quit.triggered.connect(self._quit_from_tray)
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
+
+    def _cleanup_on_close(self) -> None:
+        """退出前善后：flush 防抖编辑、保存有路径的工程、停止执行中的
+        runner 并短暂等待（防模拟按键卡在目标窗口）。"""
+        try:
+            self._flush_managers()
+        except Exception:
+            pass
+        if self._package is not None and self._kscp_path:
+            try:
+                self._package.save(self._kscp_path)
+            except OSError as e:
+                LogModel.instance().error("退出时保存失败：%s" % e)
+        for runner in self._runners.values():
+            if runner.state is not StepRunnerState.READY:
+                runner.request_stop()
+        # 短暂等待执行线程完成 release（按住型按键步骤），超时不再等
+        import time as _t
+        _deadline = _t.monotonic() + 1.5
+        while _t.monotonic() < _deadline:
+            if all(r.state is StepRunnerState.READY
+                   for r in self._runners.values()):
+                break
+            QApplication.processEvents()
+            _t.sleep(0.02)
+        self._stop_page_listeners()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        self._cleanup_on_close()
+        event.accept()
+
+    def _quit_from_tray(self) -> None:
+        """托盘「退出」：善后清理后退出（直接 quit 会卡键/丢未保存编辑）。"""
+        self._cleanup_on_close()
+        QApplication.instance().quit()
 
     def _hide_to_tray(self) -> None:
         """隐藏主窗口到托盘（托盘图标常驻；不弹通知气泡——用户反馈打扰）。"""
@@ -413,8 +447,10 @@ class MainWindow(QMainWindow):
         runner.add_progress_listener(
             lambda i, n, p=page: self._exec_bridge.progress.emit((p, i, n)))
         self._attach_step_hooks(page)   # 执行前挂该页卡片状态监听
-        runner.start()
-        LogModel.instance().info("执行列表「%s」开始执行" % page)
+        if runner.start():
+            LogModel.instance().info("执行列表「%s」开始执行" % page)
+        else:
+            self._set_exec_status("页「%s」无可执行的步骤" % page)
 
     def _exec_has_errors(self, page: Optional[str] = None) -> bool:
         """待执行页（默认当前页）按执行范围是否含错误/占位卡片。
@@ -618,10 +654,17 @@ class MainWindow(QMainWindow):
         self._update_exec_button()
 
     def _on_page_removed(self, page: str) -> None:
-        """删除页：停其监听器、摘钩、清理字典（防悬空热键回调）。"""
+        """删除页：停其监听器、摘钩、清理字典（防悬空热键回调）。
+
+        运行中的 runner 先请求停止再清理——防御性：当前 UI 路径下删除按钮
+        已被只读锁定，但本函数是执行器字典的唯一回收点，保留停止通道。
+        """
         lst = self._hotkey_listeners.pop(page, None)
         if lst is not None:
             lst.stop()
+        runner = self._runners.get(page)
+        if runner is not None and runner.state is not StepRunnerState.READY:
+            runner.request_stop()
         self._detach_step_hooks(page)
         for d in (self._runners, self._runner_gens):
             d.pop(page, None)
@@ -703,18 +746,24 @@ class MainWindow(QMainWindow):
             self._rebuild_runner(self._current_page)
 
     def _on_settings_clicked(self) -> None:
-        """打开设置弹窗（各页热键表格 + 停止方式）；保存 → .kscp/executor.json。"""
+        """打开设置弹窗（最小化热键 + 各页热键表格 + 停止方式）；保存 → .kscp/executor.json。
+
+        弹窗打开期间暂停全部热键监听——否则在热键编辑框里按下「恰好是某页
+        当前热键」的键来绑定时，会真实触发该页执行/停止；取消则恢复。
+        """
         if self._package is None:
             return
         sl_mgr = self._managers[0]
         assert isinstance(sl_mgr, StepListManagementTree)
+        self._stop_page_listeners()
         dlg = SettingsDialog(
             sl_mgr.page_store.page_names(), self._page_hotkeys(),
             self._current_stop_mode(), self._minimize_hotkey(), self)
-        if dlg.exec_() != QDialog.Accepted:
-            return
-        self._apply_settings(
-            dlg.hotkeys(), dlg.stop_mode(), dlg.minimize_hotkey())
+        if dlg.exec_() == QDialog.Accepted:
+            self._apply_settings(
+                dlg.hotkeys(), dlg.stop_mode(), dlg.minimize_hotkey())
+        else:
+            self._start_page_listeners()   # 取消 → 恢复原监听
 
     def _page_hotkeys(self) -> Dict[str, str]:
         """当前各页热键映射（页名 → 规范化热键规格或空串）。
@@ -808,6 +857,7 @@ class MainWindow(QMainWindow):
         if self._package is not None:
             first = next(iter(pages_map), None)
             legacy = pages_map.get(first, "") if first else ""
+            self._flush_managers()   # 防抖窗口内的最新编辑先落内存，再写 executor.json
             self._package.write_file(
                 "executor.json",
                 json.dumps({"hotkey": legacy or "`", "stop_mode": mode,
@@ -960,9 +1010,23 @@ class MainWindow(QMainWindow):
             return
         self._save_to(path)
 
+    def _flush_managers(self) -> None:
+        """保存/退出前：把两棵管理树的防抖编辑立即落进内存包
+        （防 500ms 窗口内的最新编辑被旧序列化覆盖写盘）。"""
+        for m in self._managers[:2]:
+            if isinstance(m, (StepListManagementTree, CompositeManagementTree)):
+                m.flush_save()
+
     def _save_to(self, path: str) -> None:
-        """保存到指定路径：写盘 + 当前工程路径/标题更新（保存与另存为共用）。"""
-        self._package.save(path)
+        """保存到指定路径：flush 防抖 + 写盘 + 当前工程路径/标题更新（保存与另存为共用）。"""
+        assert self._package is not None
+        self._flush_managers()
+        try:
+            self._package.save(path)
+        except OSError as e:
+            QMessageBox.warning(self, "保存", "工程文件保存失败：%s" % e)
+            LogModel.instance().error("保存到 %s 失败：%s" % (path, e))
+            return
         self._kscp_path = path
         self.setWindowTitle("KScript — %s" % path)
         sb = self.statusBar()
@@ -1063,6 +1127,11 @@ class MainWindow(QMainWindow):
 
     # ---- 打开工程 ----
     def _open_package(self, package: KscpPackage, path: Optional[str]) -> None:
+        # 清理上一工程的执行器残留（旧 store/package 引用滞留，页名不同时不释放）
+        self._runners.clear()
+        self._runner_gens.clear()
+        self._step_hooks.clear()
+        self._step_paths.clear()
         self._package = package
         self._kscp_path = path
         tree = self._load_shared_tree(package)
@@ -1176,11 +1245,24 @@ class MainWindow(QMainWindow):
 # ================================================================
 # 入口
 # ================================================================
+def _warn_not_admin() -> None:
+    """未以管理员运行时提示：模拟输入可能无法到达以管理员运行的目标窗口。"""
+    if os.name == "nt":
+        try:
+            import ctypes
+            if not ctypes.windll.shell32.IsUserAnAdmin():
+                LogModel.instance().warning(
+                    "未以管理员身份运行：模拟输入可能无法到达以管理员权限运行的目标窗口")
+        except (AttributeError, OSError):
+            pass
+
+
 def main(path: Optional[str] = None, check: bool = False) -> int:
     ensure_qt_plugin_path()   # venv 等独立部署：Qt 插件目录显式指路（须先于 QApplication）
     app = QApplication.instance() or QApplication(sys.argv)
     app.setWindowIcon(QIcon(_ICON_PATH))          # 程序图标 → 所有窗口/弹窗继承
     app.setAttribute(Qt.AA_DisableWindowContextHelpButton, True)  # 弹窗右上角无「?」
+    _warn_not_admin()
     win = MainWindow(path)
     win.show()
     if check:
@@ -1580,6 +1662,7 @@ class DemoStep(Step):
 
             def start(self):
                 self.calls.append("start")
+                return True                 # 与实际 StepRunner.start 返回语义一致
 
             def request_stop(self):
                 self.calls.append("stop")

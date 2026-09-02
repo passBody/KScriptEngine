@@ -106,13 +106,14 @@ class StepRunner:
                 pass
 
     # ---- 控制 ----
-    def start(self) -> None:
+    def start(self) -> bool:
         """复位全部步骤并启动执行线程；仅 READY 可调用，否则 :class:`RuntimeError`。
 
-        守卫 + 复位 + 收集 + 置 RUNNING 整体在锁内（消除 TOCTOU：并发
-        request_stop / 重复 start 不可能在守卫与置 RUNNING 之间插入）；
-        RLock 可重入，_set_state 内部取锁安全，通知回调仍在锁外执行。
-        线程启动放在锁外（避免子线程在锁上等待）。
+        返回 True = 已启动执行线程；False = 空程序（无 enabled 步骤）或单列表
+        不存在，状态保持 READY（调用方据此决定提示）。守卫 + 复位 + 收集 +
+        置 RUNNING 整体在锁内（消除 TOCTOU：并发 request_stop / 重复 start
+        不可能在守卫与置 RUNNING 之间插入）；RLock 可重入，_set_state 内部
+        取锁安全，通知回调仍在锁外执行。线程启动放在锁外（避免子线程在锁上等待）。
         """
         with self._lock:
             if self._state is not StepRunnerState.READY:
@@ -126,7 +127,7 @@ class StepRunner:
                 except FileNotFoundError:
                     LogModel.instance().error(
                         "单列表执行：列表不存在: %s" % self._only_path)
-                    return
+                    return False
                 reset_paths = [self._only_path]
             else:
                 prog = self._store.all_do_methods()
@@ -138,9 +139,10 @@ class StepRunner:
             self._progress = (0, 0)
             if not prog:
                 LogModel.instance().info("无可执行的步骤")
-                return                          # 空程序：状态保持 READY
+                return False                     # 空程序：状态保持 READY
             self._set_state(StepRunnerState.RUNNING)
         threading.Thread(target=self._run, args=(prog,), daemon=True).start()
+        return True
 
     def request_stop(self) -> None:
         """协作式停止：当前步骤完成后退出；非运行态静默忽略。"""

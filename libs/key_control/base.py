@@ -91,7 +91,8 @@ class InputControl:
         for k in keys:
             self.keyboard_control.press(k)
         if duration:
-            time.sleep(duration)
+            # 可中断等待：立即停止时 ~20ms 内 release，避免按住卡键
+            _interruptible_sleep(duration)
         for k in keys:
             self.keyboard_control.release(k)
 
@@ -107,7 +108,8 @@ class InputControl:
         self.mouse_control.position = (x, y)
         self.mouse_control.press(mouse.Button.left)
         if duration:
-            time.sleep(duration)
+            # 可中断等待：立即停止时 ~20ms 内 release
+            _interruptible_sleep(duration)
         self.mouse_control.release(mouse.Button.left)
         if restore_position:
             self.mouse_control.position = old_position

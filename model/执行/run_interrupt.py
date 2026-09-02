@@ -15,7 +15,8 @@
 import threading
 import time
 
-__all__ = ["clear_stop_event", "interruptible_sleep", "set_stop_event"]
+__all__ = ["clear_stop_event", "interruptible_sleep", "is_stop_requested",
+           "set_stop_event"]
 
 _local = threading.local()   # 每线程一个停止事件（并发执行器隔离）
 
@@ -30,6 +31,16 @@ def clear_stop_event(event: threading.Event) -> None:
     """注销停止事件（执行器工作线程收尾时调用；仅当仍是本人登记时清）。"""
     if getattr(_local, "stop_event", None) is event:
         del _local.stop_event
+
+
+def is_stop_requested() -> bool:
+    """当前线程登记的停止事件是否已置位（未登记 → False）。
+
+    供执行循环（如合成卡片 body 的 PC+偏移循环）在每步前检查——
+    「立即停止」模式下立即退出循环，不再排空剩余子步骤。
+    """
+    ev = getattr(_local, "stop_event", None)
+    return ev is not None and ev.is_set()
 
 
 def interruptible_sleep(seconds: float, poll: float = 0.02) -> bool:
@@ -84,6 +95,18 @@ if __name__ == "__main__":
 
     # 注销后不再受该事件影响
     assert interruptible_sleep(0.02) is False
+
+    # is_stop_requested：未登记 False；登记未置位 False；置位 True
+    assert is_stop_requested() is False
+    _ev2 = threading.Event()
+    set_stop_event(_ev2)
+    try:
+        assert is_stop_requested() is False
+        _ev2.set()
+        assert is_stop_requested() is True
+    finally:
+        clear_stop_event(_ev2)
+    assert is_stop_requested() is False
 
     # ---- 线程隔离：并发执行器互不覆盖登记、互不误停 ----
     _ev_a = threading.Event()
