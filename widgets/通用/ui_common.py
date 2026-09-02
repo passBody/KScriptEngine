@@ -119,6 +119,11 @@ def make_icon(kind: str) -> QIcon:
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#888888"))
         p.drawEllipse(QPoint(16, 16), 3.5, 3.5)
+    elif kind == "minimize":
+        # 窗口底部横杠（最小化语义）
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#5b7085"))
+        p.drawRoundedRect(7, 25, 18, 4, 2, 2)
     else:
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#888888"))

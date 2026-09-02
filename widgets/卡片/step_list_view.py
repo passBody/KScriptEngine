@@ -34,7 +34,7 @@ from PyQt5.QtGui import QColor, QFont, QFontMetrics, QKeySequence, QPainter
 from PyQt5.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QGraphicsItem,
     QGraphicsProxyWidget, QGraphicsScene, QGraphicsSimpleTextItem,
-    QGraphicsView, QMenu, QMessageBox, QShortcut, QStyle, QToolTip,
+    QGraphicsView, QLineEdit, QMenu, QMessageBox, QShortcut, QStyle, QToolTip,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -148,12 +148,19 @@ class TemplateChooserDialog(QDialog):
                  exclude_ref: Optional[str] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("选择步骤模板")
-        self.resize(360, 420)
+        self.resize(500, 560)              # 加宽（模板多时不显拥挤）
+        self.setMinimumWidth(440)
         self._path: Optional[str] = None
         self._mgr = mgr
         self._composite_paths = list(composite_paths) if composite_paths else []
         self._exclude_ref = exclude_ref
         lay = QVBoxLayout(self)
+        # 搜索框：按关键字过滤模板树（大小写不敏感子串；条目自身或子孙匹配即显示）
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("搜索模板…")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._apply_filter)
+        lay.addWidget(self._search)
         self._tw = QTreeWidget()
         self._tw.setHeaderHidden(True)
         self._tw.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -168,6 +175,29 @@ class TemplateChooserDialog(QDialog):
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
         self._build_tree()
+        self._tw.expandAll()               # 默认全部展开（模板多时免层层点开）
+
+    def _apply_filter(self, text: str) -> None:
+        """按关键字过滤：条目自身或其子孙命中即显示；空关键字 → 全部显示。"""
+        q = text.strip().lower()
+        root = self._tw.invisibleRootItem()
+        if root is None:
+            return
+        for i in range(root.childCount()):
+            self._filter_item(root.child(i), q)
+
+    def _filter_item(self, item: QTreeWidgetItem, q: str) -> bool:
+        """递归过滤单个条目：返回本子树是否有可见项。"""
+        if q:
+            hit = any(self._filter_item(item.child(i), q)
+                      for i in range(item.childCount())) \
+                or q in item.text(0).lower()
+        else:
+            for i in range(item.childCount()):
+                self._filter_item(item.child(i), q)
+            hit = True
+        item.setHidden(not hit)
+        return hit
 
     def selected_path(self) -> Optional[str]:
         """返回选中的模板路径或合成卡片引用标记；未选（或选的是组）→ None。"""
@@ -1124,6 +1154,21 @@ class DemoStep(Step):
     dlg._tw.setCurrentItem(delay)
     dlg.accept()
     assert dlg.result() == 0
+
+    # ---- 搜索 + 默认展开 + 加宽（用户需求） ----
+    assert dlg.width() >= 440, dlg.width()                  # 加宽
+    assert dlg._search is not None
+    assert dlg._tw.topLevelItem(0).isExpanded()             # 默认全部展开
+    # 搜索「延时」→ 控制流程保留（子叶命中）、示例隐藏；「不存在」→ 全隐藏；清空 → 复原
+    dlg._search.setText("延时")
+    assert dlg._tw.topLevelItem(0).isHidden() is False
+    assert dlg._tw.topLevelItem(1).isHidden() is True
+    dlg._search.setText("不存在")
+    assert all(dlg._tw.topLevelItem(i).isHidden()
+               for i in range(dlg._tw.topLevelItemCount()))
+    dlg._search.setText("")
+    assert all(not dlg._tw.topLevelItem(i).isHidden()
+               for i in range(dlg._tw.topLevelItemCount()))
 
     # ---- 合成卡片区：选择器列出合成卡片；exclude_ref 排除自身；_add_step 实例化 ----
     cstore = CompositeCardStore.create_empty()

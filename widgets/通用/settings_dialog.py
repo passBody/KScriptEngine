@@ -104,17 +104,35 @@ class HotkeyEdit(QLineEdit):
 
 
 class SettingsDialog(QDialog):
-    """设置弹窗：各执行列表页热键表格 + 停止方式；右下角「保存/取消」按钮。"""
+    """设置弹窗：最小化热键 + 各执行列表页热键表格 + 停止方式；
+    右下角「保存/取消」按钮。最小化热键全局生效（最小化/还原窗口）。"""
 
     def __init__(self, pages: List[str], hotkeys: Dict[str, str],
                  stop_mode: str = "after_step",
+                 minimize_hotkey: str = "",
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.resize(420, 250 + max(0, len(pages) - 1) * 36)
+        self.resize(420, 290 + max(0, len(pages) - 1) * 36)
         self._edits: Dict[str, HotkeyEdit] = {}
 
         lay = QVBoxLayout(self)
+        # 最小化热键（全局窗口控制，不随待命开关）
+        mrow = QHBoxLayout()
+        mlbl = QLabel("最小化热键")
+        mlbl.setStyleSheet("font-weight:bold;")
+        mrow.addWidget(mlbl)
+        mrow.addStretch()
+        self._min_edit = HotkeyEdit(minimize_hotkey, self)
+        self._min_edit.setToolTip(
+            "点击后按下按键绑定：程序最小化/还原（全局生效，与执行热键无关）；"
+            "退格清空 = 不绑定")
+        mrow.addWidget(self._min_edit)
+        m_clear = QPushButton("清除")
+        m_clear.setFixedWidth(48)
+        m_clear.clicked.connect(lambda _=False: self._min_edit.set_hotkey(""))
+        mrow.addWidget(m_clear)
+        lay.addLayout(mrow)
         # 表头 + 每页一行：页名 + 热键编辑框 + 清除按钮
         head = QHBoxLayout()
         h1 = QLabel("执行列表")
@@ -172,10 +190,17 @@ class SettingsDialog(QDialog):
         """当前选中的停止方式：immediate / after_step。"""
         return "immediate" if self._stop_immediate.isChecked() else "after_step"
 
+    def minimize_hotkey(self) -> str:
+        """最小化/还原热键（规范化规格或空串）。"""
+        return self._min_edit.hotkey()
+
     def _validate(self) -> Optional[str]:
-        """页间热键唯一校验（按规范化形式比较——大小写/别名/修饰键顺序
-        不敏感天然覆盖）；冲突 → 错误文案，否则 None。"""
+        """热键唯一校验（按规范化形式比较——大小写/别名/修饰键顺序
+        不敏感天然覆盖；最小化热键与各页热键统一查重）；冲突 → 错误文案。"""
         seen: Dict[str, str] = {}
+        mh = self._min_edit.hotkey()
+        if mh:
+            seen[normalize_hotkey(mh) or mh] = "最小化"
         for page, edit in self._edits.items():
             hk = edit.hotkey()
             if not hk:
@@ -207,10 +232,16 @@ if __name__ == "__main__":
 
     # 表格：每页一行（页名 + 热键 + 清除）；读回映射（初始值经规范化）
     dlg = SettingsDialog(["执行列表1", "执行列表2"],
-                         {"执行列表1": "f", "执行列表2": ""})
+                         {"执行列表1": "f", "执行列表2": ""},
+                         minimize_hotkey="F2")
     assert dlg._edits["执行列表1"].text() == "F"
     assert dlg._edits["执行列表2"].text() == ""
     assert dlg.hotkeys() == {"执行列表1": "F", "执行列表2": ""}
+    # 最小化热键：独立编辑框 + 读回 + 清除
+    assert dlg._min_edit.text() == "F2"
+    assert dlg.minimize_hotkey() == "F2"
+    dlg._min_edit.set_hotkey("")
+    assert dlg.minimize_hotkey() == ""
     # 按钮中文（用户反馈：Save/Cancel 改中文）
     _bb = dlg.findChild(QDialogButtonBox)
     assert _bb is not None
@@ -249,7 +280,8 @@ if __name__ == "__main__":
     assert not dlg2._stop_immediate.isChecked()
     assert dlg2.stop_mode() == "after_step"
 
-    # 查重：规范化相等（F1 vs f1 / Ctrl+Alt+I vs ctrl+alt+i 均冲突）
+    # 查重：规范化相等（F1 vs f1 / Ctrl+Alt+I vs ctrl+alt+i 均冲突；
+    # 最小化热键与页热键统一查重）
     dlg2._edits["执行列表1"].set_hotkey("F1")
     assert dlg2._validate() is None
     dlg3 = SettingsDialog(["页1", "页2"], {"页1": "F1", "页2": "f1"})
@@ -261,5 +293,9 @@ if __name__ == "__main__":
     assert err is not None and "已绑定" in err, err
     dlg3._edits["页2"].set_hotkey("G")
     assert dlg3._validate() is None
+    dlg3._min_edit.set_hotkey("F5")
+    dlg3._edits["页1"].set_hotkey("f5")
+    err = dlg3._validate()
+    assert err is not None and "最小化" in err, err   # 页热键撞最小化热键
 
     print("SettingsDialog smoke OK")

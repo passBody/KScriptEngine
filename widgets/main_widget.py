@@ -75,6 +75,7 @@ class _ExecBridge(QObject):
     log_changed = pyqtSignal()            # LogModel 变更（worker 线程记日志）→ GUI 线程刷计数
     step_status = pyqtSignal(object)      # (page, step)：步骤状态变更 → 卡片颜色/树高亮
     progress = pyqtSignal(object)         # (page, 第几步, 总数)：执行进度 → 状态栏
+    minimize_toggle = pyqtSignal()        # 最小化热键（全局窗口控制，不随待命开关）
 
 
 # 模拟注入点：冒烟测试替换以避开真实热键/线程（与 picker 包装同思路）
@@ -136,6 +137,8 @@ class MainWindow(QMainWindow):
         self._hotkey_listeners: Dict[str, HotkeyListener] = {}   # 页名 → 常驻热键监听器
         self._exec_btn: Optional[QToolButton] = None       # 活动栏底部「执行」按钮
         self._settings_btn: Optional[QToolButton] = None   # 活动栏底部「设置」按钮
+        self._min_btn: Optional[QToolButton] = None        # 活动栏底部「最小化」按钮
+        self._minimize_listener: Optional[HotkeyListener] = None   # 最小化热键（全局常驻）
         self._exec_status: Optional[QLabel] = None
         self._exec_bridge = _ExecBridge()
         self._exec_bridge.runner_state.connect(self._on_runner_state)
@@ -143,6 +146,7 @@ class MainWindow(QMainWindow):
         self._exec_bridge.log_changed.connect(self._update_status_counts)
         self._exec_bridge.step_status.connect(self._on_step_status)
         self._exec_bridge.progress.connect(self._on_progress)
+        self._exec_bridge.minimize_toggle.connect(self._on_minimize_toggle)
         self._exec_locked = False
         self._exec_scope = "all"     # 执行范围（仅作用于当前页）：all=全部列表 / current=仅当前列表
         self._sl_error_count = 0     # 当前步骤列表视图的错误/占位卡片数（>0 → 禁止执行）
@@ -285,14 +289,49 @@ class MainWindow(QMainWindow):
                     hk, lambda p=page: self._exec_bridge.hotkey_toggle.emit(p),
                     _lone_mod_deferred(hk, all_hks))
                 self._hotkey_listeners[page].start()
+        # 最小化热键：全局窗口控制（不随待命开关），常驻监听
+        mh = self._minimize_hotkey()
+        if mh:
+            self._minimize_listener = _make_hotkey_listener(
+                mh, self._exec_bridge.minimize_toggle.emit)
+            self._minimize_listener.start()
         LogModel.instance().info(
-            "执行列表热键监听已启动：%s"
-            % ("、".join(sorted(self._hotkey_listeners)) or "（无）"))
+            "执行列表热键监听已启动：%s" % ("、".join(sorted(self._hotkey_listeners)) or "（无）"))
 
     def _stop_page_listeners(self) -> None:
         for lst in self._hotkey_listeners.values():
             lst.stop()
         self._hotkey_listeners.clear()
+        if self._minimize_listener is not None:
+            self._minimize_listener.stop()
+            self._minimize_listener = None
+
+    # ---- 最小化（按钮 + 全局热键） ----
+    def _on_minimize_clicked(self) -> None:
+        """活动栏最小化按钮：点击进入最小化状态。"""
+        self.showMinimized()
+
+    def _on_minimize_toggle(self) -> None:
+        """最小化热键（GUI 线程，经桥 queued）：最小化 ↔ 还原并置顶。"""
+        if self.isMinimized():
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+        else:
+            self.showMinimized()
+
+    def _minimize_hotkey(self) -> str:
+        """最小化热键（executor.json minimize_hotkey）；缺失/非法 → ""（不绑定）。"""
+        if self._package is not None and self._package.exists("executor.json"):
+            try:
+                data = json.loads(
+                    self._package.read_file("executor.json").decode("utf-8"))
+                if isinstance(data, dict):
+                    norm = normalize_hotkey(data.get("minimize_hotkey"))
+                    return norm or ""
+            except (ValueError, UnicodeDecodeError):
+                pass
+        return ""
 
     # ---- 执行器接线 ----
     def _on_exec_clicked(self) -> None:
@@ -644,10 +683,11 @@ class MainWindow(QMainWindow):
         assert isinstance(sl_mgr, StepListManagementTree)
         dlg = SettingsDialog(
             sl_mgr.page_store.page_names(), self._page_hotkeys(),
-            self._current_stop_mode(), self)
+            self._current_stop_mode(), self._minimize_hotkey(), self)
         if dlg.exec_() != QDialog.Accepted:
             return
-        self._apply_settings(dlg.hotkeys(), dlg.stop_mode())
+        self._apply_settings(
+            dlg.hotkeys(), dlg.stop_mode(), dlg.minimize_hotkey())
 
     def _page_hotkeys(self) -> Dict[str, str]:
         """当前各页热键映射（页名 → 规范化热键规格或空串）。
@@ -721,14 +761,17 @@ class MainWindow(QMainWindow):
             return "立即停止"
         return "当前步骤结束后停止"
 
-    def _apply_settings(self, hotkeys: Dict[str, str], stop_mode: str) -> None:
-        """保存各页热键 + 停止方式到工程包 executor.json（有路径立即落盘 .kscp）。
+    def _apply_settings(self, hotkeys: Dict[str, str], stop_mode: str,
+                        minimize_hotkey: str = "") -> None:
+        """保存各页热键 + 最小化热键 + 停止方式到工程包 executor.json
+        （有路径立即落盘 .kscp）。
 
         不写 setting.json（executor.json 为唯一来源）。保存后按新映射重建
-        全部页常驻监听（空热键页不建监听）；各页 READY 执行器按新停止方式
-        重建（立即生效；执行中下次待命生效）。
+        全部页常驻监听（空热键页不建监听）与最小化热键监听；各页 READY
+        执行器按新停止方式重建（立即生效；执行中下次待命生效）。
         """
         mode = "immediate" if stop_mode == "immediate" else "after_step"
+        min_hk = normalize_hotkey(minimize_hotkey) or ""
         pages_map: Dict[str, str] = {}
         if self._managers:
             sl_mgr = self._managers[0]
@@ -741,7 +784,8 @@ class MainWindow(QMainWindow):
             self._package.write_file(
                 "executor.json",
                 json.dumps({"hotkey": legacy or "`", "stop_mode": mode,
-                            "pages": pages_map},
+                            "pages": pages_map,
+                            "minimize_hotkey": min_hk},
                            ensure_ascii=False).encode("utf-8"))
             if self._kscp_path:
                 try:
@@ -931,6 +975,8 @@ class MainWindow(QMainWindow):
         self._update_exec_button()
         self._settings_btn = self._switcher.add_bottom_button(
             "设置", make_icon("settings"), self._on_settings_clicked)
+        self._min_btn = self._switcher.add_bottom_button(
+            "最小化", make_icon("minimize"), self._on_minimize_clicked)
 
         # 树栏（标题随当前管理树变化）
         self._tree_stack = QStackedWidget()
@@ -1419,13 +1465,18 @@ class DemoStep(Step):
         assert len(_spy_counts) == 1, _spy_counts      # 日志变更经桥发出
         # 未开包无执行入口——开包后按钮可用
         assert win_exec._exec_btn is not None and win_exec._exec_btn.isEnabled()
-        # 活动栏底部按钮：执行 + 设置存在
+        # 活动栏底部按钮：执行 + 设置 + 最小化存在
         assert win_exec._settings_btn is not None
-        assert len(win_exec._switcher._bottom_buttons) == 2
+        assert len(win_exec._switcher._bottom_buttons) == 3
         # 图标放大：48×48 按钮 + 36×36 图标（用户反馈图标太小）
-        for _b in (win_exec._exec_btn, win_exec._settings_btn):
+        for _b in (win_exec._exec_btn, win_exec._settings_btn, win_exec._min_btn):
             assert _b.size() == QSize(48, 48), _b.size()
             assert _b.iconSize() == QSize(36, 36), _b.iconSize()
+        # 最小化按钮：点击 → 进入最小化状态（再还原，不影响后续用例）
+        win_exec._min_btn.click()
+        assert win_exec.isMinimized()
+        win_exec.showNormal()
+        assert not win_exec.isMinimized()
         # 点击执行按钮 → **全部页**进入待命（按钮绿），不直接执行步骤
         win_exec._exec_btn.click()
         assert win_exec._armed is True
@@ -1718,14 +1769,24 @@ class DemoStep(Step):
     _make_hotkey_listener = lambda h, cb, defer=False: _StubListener(h, cb, defer)
     try:
         # _apply_settings：只写工程包 executor.json（不碰 setting.json——executor.json 唯一来源）
-        win_exec._apply_settings({"执行列表1": "g"}, "immediate")
+        win_exec._apply_settings({"执行列表1": "g"}, "immediate", "F2")
         assert win_exec._package.exists("executor.json")
         data = json.loads(win_exec._package.read_file("executor.json").decode("utf-8"))
         assert data == {"hotkey": "g", "stop_mode": "immediate",
-                        "pages": {"执行列表1": "g"}}, data
+                        "pages": {"执行列表1": "g"},
+                        "minimize_hotkey": "F2"}, data
         # _page_hotkeys 读回：v2 pages 映射；保存后监听已按新热键重建
         assert win_exec._page_hotkeys() == {"执行列表1": "G"}
         assert win_exec._hotkey_listeners["执行列表1"].hotkey == "G"
+        # 最小化热键：读回 + 常驻监听（不随待命开关）+ 桥切换窗口状态
+        assert win_exec._minimize_hotkey() == "F2"
+        assert win_exec._minimize_listener is not None
+        assert isinstance(win_exec._minimize_listener, _StubListener)
+        assert win_exec._minimize_listener.hotkey == "F2"
+        win_exec._exec_bridge.minimize_toggle.emit()      # 模拟最小化热键按下
+        assert win_exec.isMinimized()
+        win_exec._exec_bridge.minimize_toggle.emit()      # 再按 → 还原
+        assert not win_exec.isMinimized()
         # _current_stop_mode：立即停止 → 停止方式提示文案随之变化
         # （STOPPING 状态栏文案按 runner 实际状态刷新，已在多页假 runner 段验证）
         assert win_exec._current_stop_mode() == "immediate"
@@ -1734,6 +1795,7 @@ class DemoStep(Step):
         try:
             assert win_exec._page_hotkeys() == {"执行列表1": "`"}   # 缺失 → 第一页默认热键
             assert win_exec._current_stop_mode() == "after_step"
+            assert win_exec._minimize_hotkey() == ""   # 缺失 → 无最小化热键
         finally:
             win_exec._package.write_file(
                 "executor.json", b'{"hotkey": "g"}')
