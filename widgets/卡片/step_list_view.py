@@ -128,6 +128,9 @@ class StepClipboard:
     def __init__(self) -> None:
         self.steps: Optional[List[str]] = None          # 步骤格式串
         self.items: Optional[tuple] = None              # (名, 三元组列表)；列表/组剪贴板
+        self.cut: bool = False                          # 剪切态（粘贴时移除源、不弹确认）
+        self.cut_steps: List = []                      # 被剪切的源 Step（移动用）
+        self.cut_source = None                          # 源 StepList（跨列表移动用）
 
 
 class TemplateChooserDialog(QDialog):
@@ -254,6 +257,18 @@ class StepListView(QGraphicsView):
         self._del_shortcut = QShortcut(QKeySequence.Delete, self)
         self._del_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self._del_shortcut.activated.connect(self._delete_selected)
+        # 复制/剪切/粘贴快捷键（Ctrl+C/X/V）。WidgetWithChildrenShortcut：焦点在
+        # 卡片文本控件时由其处理文本复制（Qt 快捷键派发让位给场景焦点文本控件），
+        # 焦点在视图/卡片非文本区时才触发步骤操作；无选中 → 空操作（不激活情况）。
+        self._copy_sc = QShortcut(QKeySequence.Copy, self)
+        self._copy_sc.setContext(Qt.WidgetWithChildrenShortcut)
+        self._copy_sc.activated.connect(self._on_copy_shortcut)
+        self._cut_sc = QShortcut(QKeySequence.Cut, self)
+        self._cut_sc.setContext(Qt.WidgetWithChildrenShortcut)
+        self._cut_sc.activated.connect(self._on_cut_shortcut)
+        self._paste_sc = QShortcut(QKeySequence.Paste, self)
+        self._paste_sc.setContext(Qt.WidgetWithChildrenShortcut)
+        self._paste_sc.activated.connect(self._on_paste_shortcut)
         self._read_only = False            # 执行期只读：禁编辑/右键/Del，保留悬停缩放
         self.setScene(self._scene)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
@@ -352,6 +367,16 @@ class StepListView(QGraphicsView):
         self.setMinimumHeight(round(scene_h) + self._viewport_overhead())
         self._fit_scene_width()
         self.errors_changed.emit(self._count_errors())
+        self._apply_cut_mask()
+
+    def _apply_cut_mask(self) -> None:
+        """按剪贴板 cut_steps 给对应卡上遮罩（proxy 半透明）；其余复位。
+
+        遮罩随 refresh 重建后按 step 身份重新应用（卡对象变了也能定位）。
+        """
+        cut_ids = {id(s) for s in (self._clipboard.cut_steps or [])}
+        for i, card in enumerate(self._cards):
+            self._proxies[i].setOpacity(0.35 if id(card.step) in cut_ids else 1.0)
 
     def refresh_validity(self) -> None:
         """仅重检各卡片颜色与错误标签（io 校验可能随变量树变化），不重建。"""
@@ -529,6 +554,36 @@ class StepListView(QGraphicsView):
         sb.setValue(sb.value() - delta)
         event.accept()
 
+    def event(self, event) -> bool:  # noqa: N802 (Qt 命名)
+        """Del 在选中卡片时优先作步骤删除（接受 ShortcutOverride）。
+
+        背景：同窗口若有 ``WindowShortcut`` Del（如步骤列表树），视图自己的
+        ``WidgetWithChildrenShortcut`` Del 在快捷键仲裁中会被抢占 → 点卡片按 Del 不删卡
+        （用户报告）。修法：视图作为焦点控件最先收到 ``ShortcutOverride``，此处对 Del
+        ``accept()`` → Qt 把 Del 作普通 ``KeyPress`` 投递给视图 → :meth:`keyPressEvent`
+        删卡，绕开同窗口 WindowShortcut Del 的抢占。仅 Del + 选中卡 + 非只读时接受，
+        其余键照常（Ctrl+C/X/V 等不受影响）。
+        """
+        if (event.type() == QEvent.ShortcutOverride
+                and self._step_list is not None and self._selected is not None
+                and not self._read_only
+                and event.key() == Qt.Key_Delete
+                and int(event.modifiers()) == int(Qt.NoModifier)):
+            event.accept()
+            return True
+        return super().event(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        """选中卡时 Del 删除步骤（event() 已把 Del 转为 KeyPress 投递到此）。"""
+        if (self._step_list is not None and self._selected is not None
+                and not self._read_only
+                and event.key() == Qt.Key_Delete
+                and int(event.modifiers()) == int(Qt.NoModifier)):
+            self._delete_selected()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def eventFilter(self, obj, event) -> bool:
         """卡片事件过滤：滚轮转发 / 悬停缩放 / 点击选中。"""
         if event.type() == QEvent.Wheel:
@@ -639,6 +694,9 @@ class StepListView(QGraphicsView):
         """
         self._read_only = ro
         self._del_shortcut.setEnabled(not ro)
+        self._copy_sc.setEnabled(not ro)
+        self._cut_sc.setEnabled(not ro)
+        self._paste_sc.setEnabled(not ro)
         for card in self._cards:
             card.set_read_only(ro)
 
@@ -666,6 +724,29 @@ class StepListView(QGraphicsView):
         self.refresh()
         self.edited.emit()
 
+    def _on_copy_shortcut(self) -> None:
+        """Ctrl+C：复制选中卡（含多选）。无选中 → 空操作（不激活情况）。"""
+        if self._read_only:
+            return
+        self._copy_selected()
+
+    def _on_cut_shortcut(self) -> None:
+        """Ctrl+X：剪切选中卡（遮罩，不删除/不弹确认）；多选全剪。"""
+        if self._read_only or self._step_list is None or self._selected is None:
+            return
+        self._cut_mark(self._selected_cards())
+
+    def _on_paste_shortcut(self) -> None:
+        """Ctrl+V：粘贴到选中卡之后；无选中 → 尾部粘贴。"""
+        if (self._read_only or not self._clipboard.steps
+                or self._step_list is None):
+            return
+        if self._selected is not None and self._selected in self._cards:
+            index = self._cards.index(self._selected) + 1
+        else:
+            index = len(self._step_list)
+        self._paste(index)
+
     # ---- 右键菜单 ----
     def _on_context_menu(self, pos) -> None:
         if self._read_only:
@@ -680,6 +761,7 @@ class StepListView(QGraphicsView):
         a_tail = menu.addAction("尾部添加…")
         menu.addSeparator()
         a_paste = menu.addAction("粘贴")
+        a_paste.setShortcut(QKeySequence.Paste)
         a_paste.setEnabled(bool(self._clipboard.steps))
         action = menu.exec_(self.viewport().mapToGlobal(pos))
         if action is a_head:
@@ -714,11 +796,15 @@ class StepListView(QGraphicsView):
         a_after = menu.addAction("添加到此步骤后方…")
         menu.addSeparator()
         a_copy = menu.addAction("复制")
+        a_copy.setShortcut(QKeySequence.Copy)
         a_cut = menu.addAction("剪切")
+        a_cut.setShortcut(QKeySequence.Cut)
         a_paste = menu.addAction("粘贴")
+        a_paste.setShortcut(QKeySequence.Paste)
         menu.addSeparator()
         a_del = menu.addAction(
             "删除选中（%d 个）" % len(self._multi) if multi else "删除")
+        a_del.setShortcut(QKeySequence.Delete)
         a_paste.setEnabled(bool(self._clipboard.steps))
         if multi:                        # 禁用项在设置默认可用性之后覆盖
             for a in (a_before, a_after, a_cut, a_paste):
@@ -734,8 +820,7 @@ class StepListView(QGraphicsView):
         elif action is a_copy:
             self._copy_selected()
         elif action is a_cut:
-            self._copy(idx)
-            self._delete_step(idx)
+            self._cut_mark([card])
         elif action is a_paste:
             self._paste(idx + 1)
         elif action is a_del:
@@ -786,21 +871,59 @@ class StepListView(QGraphicsView):
         self._clipboard.steps = [sl[index].to_format_string()]
 
     def _copy_selected(self) -> None:
-        """复制全部选中卡（多选按卡片显示序）→ 剪贴板（可多次粘贴/跨列表粘贴）。"""
+        """复制全部选中卡（多选按卡片显示序）→ 剪贴板（可多次粘贴/跨列表粘贴）。
+
+        复制取消剪切态（清除遮罩）——复制与剪切互斥。
+        """
         cards = self._selected_cards()
         if not cards:
             return
         self._clipboard.steps = [c.step.to_format_string() for c in cards]
+        self._clipboard.cut = False
+        self._clipboard.cut_steps = []
+        self._clipboard.cut_source = None
+        self._apply_cut_mask()
+
+    def _cut_mark(self, cards) -> None:
+        """剪切 = 复制 + 遮罩（不删除、不弹确认）；粘贴时移除并插入（移动）。
+
+        多选按卡片显示序；卡片留存（遮罩态）直至粘贴。遮罩 = proxy 半透明。
+        """
+        if self._read_only or self._step_list is None or not cards:
+            return
+        self._clipboard.steps = [c.step.to_format_string() for c in cards]
+        self._clipboard.cut = True
+        self._clipboard.cut_steps = [c.step for c in cards]
+        self._clipboard.cut_source = self._step_list
+        self._apply_cut_mask()
 
     def _paste(self, index: int) -> None:
         if not self._clipboard.steps or self._step_list is None:
             return
+        if self._clipboard.cut:
+            # 剪切粘贴 = 移动：从源列表移除被剪切步骤（不弹确认），再插入目标
+            cut_steps = list(self._clipboard.cut_steps or [])
+            src = self._clipboard.cut_source
+            if src is not None:
+                src_steps = src.steps
+                removed = sorted(i for i, st in enumerate(src_steps)
+                                 if any(st is s for s in cut_steps))
+                for i in reversed(removed):
+                    src.remove(i)
+                if src is self._step_list:    # 同列表：目标 index 随移除前移
+                    adj = sum(1 for ri in removed if ri < index)
+                    index = max(0, index - adj)
         try:
             self._step_list.insert_format_strings(
                 index, self._clipboard.steps, self._mgr)
         except ValueError as e:
             QMessageBox.warning(self, "粘贴", "无法粘贴：%s" % e)
             return
+        if self._clipboard.cut:
+            self._clipboard.cut = False
+            self._clipboard.cut_steps = []
+            self._clipboard.cut_source = None
+            self._clipboard.steps = None     # 剪切一次性（标准 cut 语义）
         self.refresh()
         self.edited.emit()
 
@@ -1484,10 +1607,12 @@ class DemoStep(Step):
 
     class _MenuRec3(_W.QMenu):
         last = None
+        shortcuts = None
 
         def exec_(self, *args):
-            _MenuRec3.last = [(a.text(), a.isEnabled()) for a in self.actions()
-                              if not a.isSeparator()]
+            acts = [a for a in self.actions() if not a.isSeparator()]
+            _MenuRec3.last = [(a.text(), a.isEnabled()) for a in acts]
+            _MenuRec3.shortcuts = {a.text(): a.shortcut().toString() for a in acts}
             return None
 
     _orig_qmenu3 = QMenu
@@ -1507,6 +1632,10 @@ class DemoStep(Step):
         texts = dict(_MenuRec3.last)
         assert all(texts[t] for t in (
             "添加到此步骤前方…", "添加到此步骤后方…", "复制", "剪切", "粘贴", "删除")), texts
+        # 快捷键提示（右键菜单显示 Ctrl+C/X/V、Del）
+        _sc = _MenuRec3.shortcuts
+        assert _sc["复制"] == "Ctrl+C" and _sc["剪切"] == "Ctrl+X"
+        assert _sc["粘贴"] == "Ctrl+V" and _sc["删除"] == "Del"
     finally:
         globals()["QMenu"] = _orig_qmenu3
 
@@ -1528,5 +1657,95 @@ class DemoStep(Step):
     assert len(sl2) == 2
     assert sl2[0].to_format_string() == clipboard.steps[0]
     assert sl2[1].to_format_string() == clipboard.steps[1]
+
+    # ---- 优化：复制/剪切/粘贴快捷键（Ctrl+C/X/V；不激活=无选中→空操作） ----
+    assert view._copy_sc is not None and view._cut_sc is not None \
+        and view._paste_sc is not None, "应有复制/剪切/粘贴快捷键"
+    assert view._copy_sc.context() == Qt.WidgetWithChildrenShortcut
+    # 无选中 → 复制快捷键空操作
+    view._selected = None; view._multi = []
+    clipboard.steps = []
+    view._copy_sc.activated.emit()
+    assert clipboard.steps == [], "无选中时复制快捷键应空操作"
+    # 选中首卡 → Ctrl+C 复制
+    view._select(view._cards[0])
+    view._copy_sc.activated.emit()
+    assert clipboard.steps == [view._cards[0].step.to_format_string()], "Ctrl+C 应复制选中卡"
+    # Ctrl+V 粘贴到选中卡之后
+    _n_before = len(sl2)
+    view._paste_sc.activated.emit()
+    assert len(sl2) == _n_before + 1, "Ctrl+V 应粘贴一张"
+    # Ctrl+X 剪切 = 遮罩（不删除/不弹确认）；Ctrl+V 粘贴 = 移动（不弹确认）
+    import widgets.卡片.step_list_view as _slv
+    _orig_q = _slv.QMessageBox.question
+    _spy = []
+    _slv.QMessageBox.question = lambda *a, **k: (_spy.append(1), _slv.QMessageBox.Yes)[1]
+    try:
+        view._select(view._cards[0])
+        _cut_step = view._cards[0].step
+        _n_cut = len(sl2)
+        _spy.clear()
+        view._cut_sc.activated.emit()                    # Ctrl+X → 遮罩
+        assert clipboard.steps == [_cut_step.to_format_string()]
+        assert clipboard.cut is True, "Ctrl+X 应置剪切态"
+        assert len(sl2) == _n_cut, "剪切只遮罩不删除"
+        assert len(_spy) == 0, "剪切不弹确认"
+        assert view._proxies[0].opacity() < 1.0, "剪切卡应遮罩"
+        _spy.clear()
+        view._paste_sc.activated.emit()                   # Ctrl+V → 移动
+        assert len(sl2) == _n_cut, "粘贴=移动，总数不变"
+        assert len(_spy) == 0, "剪切粘贴不弹确认"
+        assert clipboard.cut is False, "剪切一次性"
+    finally:
+        _slv.QMessageBox.question = _orig_q
+
+    # ---- 修复：同窗口存在 WindowShortcut Del（如步骤列表树）时，点卡片按 Del 仍删卡 ----
+    # 复现：步骤列表树挂 Del（默认 WindowShortcut），与视图同窗口；视图自己的
+    # WidgetWithChildren Del 在该场景下被抢占 → 按 Del 不删卡（用户报告）。
+    # 修：视图 event() 接受 Del 的 ShortcutOverride（视图作为焦点控件先收到）→ 转为
+    # KeyPress → keyPressEvent 删卡，绕开同窗口 WindowShortcut Del 的抢占。
+    from PyQt5.QtTest import QTest as _QTest
+    from PyQt5.QtWidgets import (QApplication as _QApp3, QMainWindow as _QMW,
+                                  QWidget as _QW, QShortcut as _QShort,
+                                  QVBoxLayout as _VBL)
+    from PyQt5.QtGui import QKeySequence as _QKS2
+    _orig_q3 = _slv.QMessageBox.question
+    _spy3 = []
+    _slv.QMessageBox.question = lambda *a, **k: (_spy3.append(1), _slv.QMessageBox.Yes)[1]
+    try:
+        _sl3 = StepList.create_empty()
+        for _ in range(3):
+            _s3 = mgr.create_step("示例")
+            _s3.io.change_value("input", 0, "5")
+            _s3.io.change_value("output", 0, "n1")
+            _sl3.add(_s3)
+        _view3 = StepListView(mgr, StepClipboard())
+        _view3.set_list(_sl3, mgr)
+        # 同窗口挂一个 WindowShortcut Del 的兄弟（模拟步骤列表树）——抢占视图 Del
+        _mw3 = _QMW()
+        _cen3 = _QW(); _mw3.setCentralWidget(_cen3)
+        _lay3 = _VBL(_cen3); _lay3.setContentsMargins(0, 0, 0, 0)
+        _lay3.addWidget(_view3)
+        _sib3 = _QW(_cen3)                # 兄弟占位（模拟树）
+        _comp3 = []
+        _QShort(_QKS2.Delete, _sib3, lambda: _comp3.append(1))   # 默认 WindowShortcut
+        _mw3.show(); _mw3.activateWindow()
+        _QApp3.instance().processEvents()
+        # 真实点击卡片0（顶部条）——既选中又让视图获 Qt 焦点（用户实际流程）
+        _vp3 = _view3.viewport()
+        _vppt = _view3.mapFromScene(_view3._proxies[0].scenePos())
+        _QTest.mouseClick(_vp3, Qt.LeftButton, Qt.NoModifier,
+                          QPoint(int(_vppt.x()) + 8, int(_vppt.y()) + 8))
+        _QApp3.instance().processEvents()
+        assert _view3._selected is _view3._cards[0], "点击应选中卡片0"
+        _spy3.clear()
+        _QTest.keyClick(_view3, Qt.Key_Delete)   # 真实键盘路径：发给视图（焦点控件）
+        _QApp3.instance().processEvents()
+        assert len(_spy3) == 1, "同窗口有 WindowShortcut Del 时，Del 应删卡（不被抢占）"
+        assert len(_sl3) == 2, "Del 应删除选中卡"
+        assert _comp3 == [], "兄弟的 Del 不应触发"
+        _mw3.close()
+    finally:
+        _slv.QMessageBox.question = _orig_q3
 
     print("StepListView smoke OK")

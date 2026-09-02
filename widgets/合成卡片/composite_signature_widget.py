@@ -71,7 +71,7 @@ class _Section(QWidget):
         vh = self._tw.verticalHeader()
         if vh is not None:
             vh.setVisible(False)
-            vh.setDefaultSectionSize(32)     # 行高加大（用户反馈操作空间狭挤）
+            vh.setDefaultSectionSize(40)     # 行高加大（用户反馈操作空间狭挤）
         h = self._tw.horizontalHeader()
         if h is not None:
             h.setSectionResizeMode(QHeaderView.Stretch)
@@ -83,9 +83,12 @@ class _Section(QWidget):
             else:
                 self._tw.setColumnWidth(0, 180)
                 self._tw.setColumnWidth(1, 140)
-        self._tw.setMinimumHeight(200)       # 每段表足够高，避免滚动条过挤
+        self._tw.setMinimumHeight(240)       # 每段表足够高，避免滚动条过挤
         # 名列编辑居中：委托把编辑期 QLineEdit 设居中（显示态经 setTextAlignment）
         self._tw.setItemDelegateForColumn(0, _CenteredTextDelegate(self._tw))
+        if with_default:
+            # 局部段「默认值」列编辑居中（显示态经 setTextAlignment）
+            self._tw.setItemDelegateForColumn(2, _CenteredTextDelegate(self._tw))
         self._types = ProjectVariable.supported_types()
         lay.addWidget(self._tw)
         # QTableWidgetItem 不是 QObject、无 textChanged；用 cellChanged 统一捕获文本变更。
@@ -116,7 +119,9 @@ class _Section(QWidget):
                 combo.setCurrentText(vtype)
             self._tw.setCellWidget(r, 1, combo)
             if self._with_default:
-                self._tw.setItem(r, 2, QTableWidgetItem(default))
+                d_item = QTableWidgetItem(default)
+                d_item.setTextAlignment(Qt.AlignCenter)   # 默认值列显示居中（编辑经委托居中）
+                self._tw.setItem(r, 2, d_item)
             # 类型下拉变更单独连（cellWidget 变更不触发 cellChanged）
             combo.currentTextChanged.connect(self._notify)
         finally:
@@ -247,8 +252,11 @@ class CompositeSignatureDialog(QDialog):
     重命名（单元格编辑）、改类型/默认值；**右下角「确定」生效**——调用方读取
     :meth:`signature`（合法子集，非法行被 collect 丢弃）后落盘；取消则丢弃。
 
-    ``CompositeSignatureWidget`` 的实时 ``signature_changed`` 信号本弹窗不外连
-    （弹窗内编辑不直达宿主，仅确定时一次性提交）。
+    ``CompositeSignatureWidget`` 的实时 ``signature_changed`` 信号仅用于消除红字
+    提示（签名变合法即清除）；编辑不直达宿主，仅确定时一次性提交。**确定时**
+    :meth:`_validate` 校验签名（重名/非法字符/未注册类型 → 红字提示并阻止
+    accept），避免非法签名流入 :func:`build_validation_tree` 触发
+    ``FileExistsError``（修重名崩溃）。
     """
 
     def __init__(self, sig: CompositeSignature,
@@ -258,17 +266,71 @@ class CompositeSignatureDialog(QDialog):
         # 操作空间充裕（用户反馈：原自动尺寸狭挤、UI 显示不全）
         self.resize(640, 540)
         self.setMinimumSize(560, 480)
+        # 字体放大 + 控件圆角（用户反馈：原默认字体偏小、控件无圆角）。
+        # 注：dialog 一旦设 QSS，setFont 的字体不再向子控件传播（QSS 引擎接管、
+        # 非规则子控件回退应用默认字体），故字体须在 QSS 用显式选择器逐类型设
+        # font-size（QPushButton/QComboBox/QTableWidget/QLabel/QTabBar…）。
+        self.setStyleSheet(
+            "QDialog, QLabel, QTabBar, QTableWidget, QTableWidget::item,"
+            " QComboBox, QPushButton, QLineEdit { font-family: \"SimSun\"; font-size: 13pt; }"
+            "QPushButton { border: 1px solid #c4c4c4; border-radius: 6px;"
+            " padding: 4px 12px; background: #fafafa; }"
+            "QPushButton:hover { background: #eef2f7; border-color: #9bb8d6; }"
+            "QPushButton:pressed { background: #e1ecf4; }"
+            "QPushButton:disabled { color: #a0a0a0; background: #f5f5f5;"
+            " border-color: #d8d8d8; }"
+            "QComboBox { border: 1px solid #c4c4c4; border-radius: 6px;"
+            " padding: 2px 6px; background: #fafafa; }"
+            "QTabWidget::pane { border: 1px solid #d0d0d0; border-radius: 6px; }")
         self._sig_widget = CompositeSignatureWidget(self)
         self._sig_widget.set_signature(sig)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(8)
         lay.addWidget(self._sig_widget)
+        # 红字错误提示：确定时校验失败 → 显示；签名变合法 → 消除
+        self._error_label = QLabel(self)
+        self._error_label.setStyleSheet(
+            "QLabel { color: #c8564c; background: #fbeae7;"
+            " border: 1px solid #e3b3ac; border-radius: 4px;"
+            " padding: 4px 6px; }")
+        self._error_label.hide()
+        lay.addWidget(self._error_label)
         # 右下角确定/取消（QDialogButtonBox 默认右对齐）
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self.accept)
+        btns.accepted.connect(self._on_ok)
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
+        # 签名变合法（signature_changed 仅在合法时发）→ 消除红字
+        self._sig_widget.signature_changed.connect(self._clear_error)
+
+    def _validate(self) -> Optional[str]:
+        """当前签名是否合法：合法返回 None，非法返回错误信息。
+
+        ``current_signature`` 丢弃空名/空类型行；重名/非法字符/未注册类型 →
+        :meth:`CompositeSignature.validate` 抛 ValueError → 返回其信息。
+        """
+        sig = self._sig_widget.current_signature()
+        try:
+            sig.validate()
+        except ValueError as ex:
+            return str(ex)
+        return None
+
+    def _on_ok(self) -> None:
+        """确定：校验签名；非法 → 红字提示并阻止 accept，合法 → accept。"""
+        err = self._validate()
+        if err is not None:
+            self._error_label.setText(err)
+            self._error_label.show()
+            return
+        self._clear_error()
+        self.accept()
+
+    def _clear_error(self, *_a) -> None:
+        """消除红字：签名变合法（signature_changed）或成功 accept 时调用。"""
+        self._error_label.setText("")
+        self._error_label.hide()
 
     def signature(self) -> CompositeSignature:
         """确定后由调用方读取：当前（合法子集）签名。"""
@@ -356,5 +418,49 @@ if __name__ == "__main__":
     dlg._sig_widget._in._tw.setCurrentCell(1, 0)   # 删 a 行
     dlg._sig_widget._in._remove_selected()
     assert dlg.signature().input_names() == ["x"]
+
+    # ---- Fix：弹窗确定时校验签名，重名/非法 → 阻止 + 红字，修正后红字消除 ----
+    # 复现：输入段加同名参数 x → _validate 判非法 → _on_ok 阻止 accept + 红字
+    dlg2 = CompositeSignatureDialog(
+        CompositeSignature(inputs=[Param("x", "number")],
+                            outputs=[Param("y", "number")],
+                            locals=[LocalVar("t", "number", 0)]))
+    assert dlg2._validate() is None                  # 初始合法
+    dlg2._sig_widget._in._add_row("x", "number")    # 同名输入 x → 重名
+    err = dlg2._validate()
+    assert err is not None and "x" in err            # 判非法（含重名 x）
+    dlg2._on_ok()                                    # 阻止 accept + 设红字
+    assert dlg2.result() != QDialog.Accepted        # 未 accept（仍 Rejected）
+    assert dlg2._error_label.text() and "x" in dlg2._error_label.text()
+    # 修正：改名 x→a → signature_changed → 红字消除
+    dlg2._sig_widget._in._tw.item(1, 0).setText("a")
+    assert dlg2._error_label.text() == ""            # 红字已消除
+    dlg2._on_ok()                                    # 合法 → accept
+    assert dlg2.result() == QDialog.Accepted
+
+    # ---- Fix：局部段「默认值」列居中（名/类型已居中，默认值原居左） ----
+    w_loc = CompositeSignatureWidget()
+    w_loc.set_signature(CompositeSignature(locals=[LocalVar("t", "number", 0)]))
+    _d = w_loc._loc._tw.item(0, 2)
+    assert int(_d.textAlignment()) == int(Qt.AlignCenter), "局部默认值列应居中"
+    assert isinstance(w_loc._loc._tw.itemDelegateForColumn(2),
+                      _CenteredTextDelegate), "默认值列编辑应居中"
+
+    # ---- 优化：签名编辑弹窗字体放大 / 表格行高加高 / 控件圆角 ----
+    dlg3 = CompositeSignatureDialog(
+        CompositeSignature(inputs=[Param("x", "number")],
+                            outputs=[Param("y", "number")],
+                            locals=[LocalVar("t", "number", 0)]))
+    # 字体放大（默认 9pt → ≥11pt）
+    assert dlg3._sig_widget._in._tw.font().pointSize() >= 11, "签名弹窗字体应放大"
+    # 表格行高加高（原 32 → ≥38）+ 表格整体加高（原 200 → ≥220）
+    _vh3 = dlg3._sig_widget._in._tw.verticalHeader()
+    assert _vh3 is not None and _vh3.defaultSectionSize() >= 38, "表格行高应加高"
+    assert dlg3._sig_widget._in._tw.minimumHeight() >= 220, "表格整体应加高"
+    # 控件圆角（弹窗 QSS 含 QPushButton + border-radius）
+    _ss3 = dlg3.styleSheet()
+    assert "border-radius" in _ss3 and "QPushButton" in _ss3, "弹窗控件应加圆角"
+    # 字体改为宋体
+    assert "SimSun" in _ss3, "签名弹窗字体应为宋体"
 
     print("CompositeSignatureWidget smoke OK")

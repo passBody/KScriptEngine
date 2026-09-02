@@ -679,6 +679,7 @@ class CompositeManagementTree(ManagementTree):
             self._sl_tree.composite_selected.connect(self._on_selected)
             self._sl_tree.store_changed.connect(self._on_store_changed)
         assert self._sl_tree is not None
+        self._select_first_if_empty()
         return self._sl_tree
 
     def _on_edited(self) -> None:
@@ -720,6 +721,13 @@ class CompositeManagementTree(ManagementTree):
         """
         if self._container is None:
             self._sig_btn = QPushButton("编辑签名…")
+            self._sig_btn.setStyleSheet(
+                "QPushButton { border: 1px solid #c4c4c4; border-radius: 8px;"
+                " padding: 6px 16px; background: #fafafa; }"
+                "QPushButton:hover { background: #eef2f7; border-color: #9bb8d6; }"
+                "QPushButton:pressed { background: #e1ecf4; }"
+                "QPushButton:disabled { color: #a0a0a0; background: #f5f5f5;"
+                " border-color: #d8d8d8; }")
             self._sig_btn.clicked.connect(self._open_signature_dialog)
             self._host = StepListHost(
                 self._mgr, self._clipboard, self._on_edited, None,
@@ -729,10 +737,26 @@ class CompositeManagementTree(ManagementTree):
             lay = QVBoxLayout(self._container)
             lay.setContentsMargins(6, 4, 6, 0)
             lay.setSpacing(4)
-            lay.addWidget(self._sig_btn)
             lay.addWidget(self._host, 1)
+            lay.addWidget(self._sig_btn)
+        self._select_first_if_empty()
         assert self._container is not None
         return self._container
+
+    def _select_first_if_empty(self) -> None:
+        """树与宿主都建好且未选中任何卡片时，自动选第一张卡 → 右侧视图显示其内容。
+
+        用户反馈：首次进入合成卡片树右侧视图为空。树/宿主任一未建或已有选中 → 不动。
+        任一先建（tree_widget/preview_widget 调用序不定）→ 后建者完成配对时触发。
+        """
+        if self._sl_tree is None or self._host is None or self._current is not None:
+            return
+        first = self._sl_tree.first_card_path()
+        if first is None:
+            return
+        item = self._sl_tree.find_item(first)
+        if item is not None:
+            self._sl_tree.setCurrentItem(item)   # → composite_selected → _on_selected
 
     def _open_signature_dialog(self) -> None:
         """「编辑签名…」按钮 → 弹窗编辑当前卡片签名；确定 → 落盘 + 联动。"""
@@ -1284,10 +1308,13 @@ class DemoStep(Step):
     assert cmgr.name == "合成卡片" and not cmgr.icon().isNull()
     assert isinstance(cmgr.tree_widget(), CompositeTreeWidget)
     cmgr.preview_widget()                                  # 构建容器（按钮 + host）
+    assert "border-radius" in cmgr._sig_btn.styleSheet(), "签名编辑按钮应有圆角样式"
+    assert cmgr._container.layout().indexOf(cmgr._sig_btn) > \
+        cmgr._container.layout().indexOf(cmgr._host), "签名编辑按钮应在底部"
     assert isinstance(cmgr._host, StepListHost)
-    assert cmgr._host.currentIndex() == 0                  # 未选卡片 → 占位页
+    assert cmgr._host.currentIndex() == 1                  # 首次进入自动选第一张卡 → 编辑页
     assert cmgr.store is cstore
-    assert cmgr.current_path is None
+    assert cmgr.current_path == "登录"                     # 首次进入自动选第一张卡
     # 卡片选择联动：选中 → 宿主切到编辑页，显示该卡片体内 StepList
     ctw = cmgr.tree_widget()
     ctw.refresh()

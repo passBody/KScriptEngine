@@ -31,7 +31,7 @@ from typing import Dict, Optional, Set
 from PyQt5.QtCore import QObject, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
-    QApplication, QFileDialog, QHBoxLayout, QLabel, QListWidget,
+    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QMenu, QPushButton, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -89,10 +89,21 @@ class LogWidget(QWidget):
             tb.toggled.connect(self._on_filter)   # 连接在 setChecked 之后，避免初始触发
             bar.addWidget(tb)
             self._toggles[lv] = tb
+        # 分隔符：筛选按钮与清空/导出之间（用户反馈）
+        self._filter_sep = QFrame(self)
+        self._filter_sep.setFrameShape(QFrame.VLine)
+        self._filter_sep.setFrameShadow(QFrame.Sunken)
+        bar.addWidget(self._filter_sep)
+        _act_qss = ("QPushButton { border:1px solid #ccc; border-radius:4px;"
+                    " padding:1px 8px; background:transparent; }"
+                    "QPushButton:hover { border-color:#888; background:#f0f0f0; }"
+                    "QPushButton:pressed { background:#e0e0e0; }")
         self._btn_clear = QPushButton("清空")
+        self._btn_clear.setStyleSheet(_act_qss)
         self._btn_clear.clicked.connect(self._on_clear)
         bar.addWidget(self._btn_clear)
         self._btn_export = QPushButton("导出…")
+        self._btn_export.setStyleSheet(_act_qss)
         self._btn_export.clicked.connect(self._on_export)
         bar.addWidget(self._btn_export)
 
@@ -317,5 +328,12 @@ if __name__ == "__main__":
     m4.info("new2")
     app.processEvents()
     assert vb4.value() == vb4.maximum(), (vb4.value(), vb4.maximum())
+
+    # ---- 优化：筛选按钮后分隔符 + 清空/导出按钮样式与筛选一致 ----
+    from PyQt5.QtWidgets import QFrame as _QFrame
+    assert w._filter_sep is not None, "筛选按钮后应有分隔符"
+    assert w._filter_sep.frameShape() == _QFrame.VLine, "分隔符应为竖线"
+    assert "border-radius" in w._btn_clear.styleSheet(), "清空按钮应有圆角样式（与筛选一致）"
+    assert "border-radius" in w._btn_export.styleSheet(), "导出按钮应有圆角样式（与筛选一致）"
 
     print("LogWidget smoke OK")

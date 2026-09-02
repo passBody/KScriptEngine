@@ -131,6 +131,12 @@ class StepCard(QFrame):
         top.addWidget(self._tag_edit, 1)      # 签名（标签属性，可编辑）
 
         self._info = step.info_widget(self)
+        # 自定义视图左右 8px 边距（不贴卡片边缘，用户反馈）
+        self._info_box = QWidget(self)
+        _ib = QVBoxLayout(self._info_box)
+        _ib.setContentsMargins(8, 0, 8, 0)
+        _ib.setSpacing(0)
+        _ib.addWidget(self._info)
         self._io_widget = step.io.gen_widget(self)
         # 输入输出区可滚动：参数过多时在卡片内滚动查看，不撑破卡片/遮挡其它控件
         self._io_scroll = QScrollArea(self)
@@ -161,7 +167,7 @@ class StepCard(QFrame):
         lay.setContentsMargins(0, 0, 0, 8)
         lay.setSpacing(4)
         lay.addLayout(top)
-        lay.addWidget(self._info)
+        lay.addWidget(self._info_box)
         lay.addWidget(self._io_box, 1)         # 占剩余空间（stretch）
 
         # 颜色刷新钩子①：io 文本框编辑（QLineEdit 输入即重检；用户输入 → 通知内容已改）
@@ -476,5 +482,10 @@ if __name__ == "__main__":
     _tag_rule = _re.search(r"#cardTag \{[^}]*\}", _card_qss(), _re.S)
     assert _tag_rule is not None
     assert "SimSun" in _tag_rule.group(0) and "font-size: 14pt" in _tag_rule.group(0)
+
+    # ---- 优化：卡片自定义视图左右 8px 边距（不贴卡片边缘） ----
+    _ibm = card._info_box.layout().contentsMargins()
+    assert (_ibm.left(), _ibm.right()) == (8, 8), \
+        (_ibm.left(), _ibm.right())
 
     print("StepCard smoke OK")

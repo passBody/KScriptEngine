@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import QEvent, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QHBoxLayout,
@@ -49,6 +49,7 @@ class ZoomGraphicsView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
         self.setBackgroundBrush(QColor(_VIEW_BG))
         self._zoom = 1.0
+        self._last_size = QSize()   # 上次 widget 尺寸：区分窗口拉伸 vs 滚轮缩放致的滚动条变化
 
     def wheelEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         factor = 1.25 if event.angleDelta().y() > 0 else 1 / 1.25
@@ -65,13 +66,19 @@ class ZoomGraphicsView(QGraphicsView):
         self.resetTransform()
         if self.scene() is not None:
             self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
+        self._last_size = self.size()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         super().resizeEvent(event)
-        # 窗口拉伸 → 图片跟随适配缩放（用户反馈：拉伸时图片原封不动）；
-        # 复位缩放并保持纵横比（滚轮缩放后拉伸窗口回到适配态）
-        if self.scene() is not None:
-            self.fit_view()
+        if self.scene() is None:
+            return
+        # 仅 widget 自身尺寸变化（窗口拉伸）时重新适配。滚轮放大→图片超出视口→
+        # 滚动条出现也会触发 resizeEvent，但 widget 尺寸不变（== _last_size）→ 不重置，
+        # 否则放大被立即还原（表现为「只能缩小不能放大」）。窗口拉伸 → 尺寸变化 → 适配。
+        if self._last_size.isValid() and self.size() == self._last_size:
+            return
+        self._last_size = self.size()
+        self.fit_view()
 
 
 class ImageOverlay(QWidget):
@@ -203,5 +210,27 @@ if __name__ == "__main__":
     app.processEvents()
     assert ov.geometry() == host.rect()
     ov.close_overlay()
+
+    # ---- Fix：滚轮放大不被 resizeEvent→fit_view 重置（修「只能缩小不能放大」） ----
+    _zv = ZoomGraphicsView()
+    _zsc = QGraphicsScene()
+    _zpix = QPixmap(400, 400); _zpix.fill(QColor("#3a7bd5"))
+    _zsc.addItem(QGraphicsPixmapItem(_zpix))
+    _zv.setScene(_zsc)
+    _zv.resize(600, 400)
+    _zv.show()
+    app.processEvents()
+    _zv.fit_view()
+    app.processEvents()
+    _m0 = _zv.transform().m11()
+    _zv.scale(1.25, 1.25); _zv._zoom = 1.25      # 模拟滚轮向上（放大）
+    app.processEvents()                           # 让滚动条/resize 事件处理
+    assert _zv.transform().m11() > _m0 * 1.1, "滚轮放大应生效（不被 resizeEvent 重置）"
+    # 模拟滚轮向下（缩小）：从适配态重新开始（放大再缩小 = 净 1.0 测不出缩小）
+    _zv.fit_view(); app.processEvents()
+    _zv.scale(1 / 1.25, 1 / 1.25); _zv._zoom = 0.8
+    app.processEvents()
+    assert _zv.transform().m11() < _m0 * 0.95, "滚轮缩小应生效"
+    _zv.close()
 
     print("ImageOverlay smoke OK")
