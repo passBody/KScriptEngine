@@ -57,7 +57,8 @@ from widgets.树.management_trees import (
 from widgets.卡片.step_list_view import StepClipboard
 from widgets.通用.settings_dialog import SettingsDialog
 from widgets.通用.ui_common import (
-    LandingCard, TitledPanel, ensure_qt_plugin_path, make_icon, window_size,
+    ERROR_COLOR, LandingCard, TitledPanel, ensure_qt_plugin_path,
+    load_app_qss, make_icon, window_size,
 )
 
 __all__ = ["MainWindow", "main"]
@@ -749,7 +750,7 @@ class MainWindow(QMainWindow):
                 % self._sl_error_count)
         else:
             self._exec_btn.setToolTip(
-                "进入待命（范围：%s，右键切换）：点击后按钮变绿，**全部页**"
+                "进入待命（范围：%s，右键切换）：点击后按钮变绿，全部页"
                 "开始监听各自热键——按该页热键执行、再按停止（%s）。\n"
                 "热键勿与步骤按键冲突（模拟按键也会被监听）；"
                 "模拟输入到游戏窗口需管理员运行。"
@@ -1313,6 +1314,7 @@ def main(path: Optional[str] = None, check: bool = False) -> int:
     ensure_qt_plugin_path()   # venv 等独立部署：Qt 插件目录显式指路（须先于 QApplication）
     app = QApplication.instance() or QApplication(sys.argv)
     app.setWindowIcon(QIcon(_ICON_PATH))          # 程序图标 → 所有窗口/弹窗继承
+    app.setStyleSheet(load_app_qss())             # 应用级 QSS：滚动条等公共件（view/app.qss）
     app.setAttribute(Qt.AA_DisableWindowContextHelpButton, True)  # 弹窗右上角无「?」
     _warn_not_admin()
     win = MainWindow(path)
@@ -1450,7 +1452,7 @@ class DemoStep(Step):
     it_main = tw.find_item("主列表")
     assert it_main is not None
     assert it_main.font(0).bold()
-    assert it_main.foreground(0).color() == QColor(200, 50, 40)
+    assert it_main.foreground(0).color() == QColor(ERROR_COLOR)
     host._on_jump_error()
     assert host._toolbar_status.text() == "已定位错误卡片"
     assert host._view._selected is host._view.cards[0]

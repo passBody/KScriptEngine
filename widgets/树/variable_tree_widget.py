@@ -37,7 +37,7 @@ from model.变量.project_variable import ProjectVariable
 from model.变量.variable_tree import VariableTree
 from widgets.通用.image_overlay import ImageOverlay
 from widgets.树.resource_tree_widget import ResourceTreeWidget
-from widgets.通用.ui_common import ClickableLabel
+from widgets.通用.ui_common import ClickableLabel, ERROR_COLOR
 
 __all__ = ["VariableTreeWidget", "VariableEditPanel", "CreateVariableDialog"]
 
@@ -200,7 +200,7 @@ class VariableTreeWidget(QTreeWidget):
                 var = self._tree.get(child)
                 item.setText(0, "%s  [%s]" % (name, var.type))
                 if not var.valid:
-                    item.setForeground(0, QColor("#e15554"))
+                    item.setForeground(0, QColor(ERROR_COLOR))
                 item.setIcon(0, _make_var_icon(var.type))
             else:
                 item.setText(0, name)
@@ -511,7 +511,7 @@ class VariableEditPanel(QStackedWidget):
         self._editor_slot_lay.setContentsMargins(0, 0, 0, 0)
         self._status = QLabel("")               # 仅出错时显示（去除「可保存」提示）
         self._status.setWordWrap(True)
-        self._status.setStyleSheet("color:#e15554;")
+        self._status.setStyleSheet("color:%s;" % ERROR_COLOR)
         self._status.setVisible(False)
 
         btn_host = QWidget()
@@ -643,7 +643,7 @@ class VariableEditPanel(QStackedWidget):
         else:
             self._btn_save.setEnabled(False)
             self._status.setText(reason)
-            self._status.setStyleSheet("color:#e15554;")
+            self._status.setStyleSheet("color:%s;" % ERROR_COLOR)
             self._status.setVisible(True)
 
     def _update_undo_btn(self) -> None:
@@ -942,7 +942,7 @@ class CreateVariableDialog(QDialog):
             self._status.setStyleSheet("color:#27ae60;")
         else:
             self._status.setText(reason)
-            self._status.setStyleSheet("color:#e15554;")
+            self._status.setStyleSheet("color:%s;" % ERROR_COLOR)
 
     def make(self) -> Tuple[Optional[str], Optional[ProjectVariable]]:
         """exec 后返回 ``(path, var)``；取消或非法返回 ``(None, None)``。"""

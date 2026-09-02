@@ -19,7 +19,7 @@
         io=step.io, image_slot=3, mode="dot",
         read_points=lambda: _read_xy(step),      # -> List[(x,y)] 或 None
         write_points=lambda pts: _write_xy(step, pts),
-        hint_text="自定义视图中的预览图的画面是通过读输入GUI的参数来生成")
+        hint_text="预览图按当前输入参数实时生成；点击缩略图查看大图")
 """
 from typing import Callable, List, Optional, Tuple
 
@@ -204,7 +204,7 @@ class MarkPreviewView(QWidget):
     def __init__(self, io: StepIOWidget, image_slot: int, mode: str,
                  read_points: Callable[[], Optional[List[Tuple[int, int]]]],
                  write_points: Callable[[List[Tuple[int, int]]], None],
-                 hint_text: str = "自定义视图中的预览图的画面是通过读输入GUI的参数来生成",
+                 hint_text: str = "预览图按当前输入参数实时生成；点击缩略图查看大图",
                  mark_button: str = "设置点位",
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -359,6 +359,9 @@ if __name__ == "__main__":
         write_points=lambda pts: got_points.extend(pts))
     assert not view.preview_pixmap().isNull()
     assert view.preview_label.pixmap() is not None
+    # 默认提示（用户化文案）：不再用难懂的「通过读输入GUI的参数来生成」
+    _hints = [l.text() for l in view.findChildren(QLabel)]
+    assert any("点击缩略图查看大图" in t for t in _hints), _hints
     # 弹窗：无父 + 背景浅色（exec 桩替换）
     _dlgs = []
     from PyQt5.QtWidgets import QDialog

@@ -1,0 +1,40 @@
+/* KScript 应用级全局样式（view/app.qss）
+   滚动条等难以按组件局部设置的公共件；由 widgets/通用/ui_common.py 的
+   load_app_qss() 读取，main() 经 QApplication.setStyleSheet 应用。
+   组件自身 stylesheet 优先于本表，互不冲突。 */
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical {
+    background: rgba(150, 160, 175, 0.45);
+    border-radius: 4px;
+    min-height: 24px;
+}
+QScrollBar::handle:vertical:hover {
+    background: rgba(120, 132, 150, 0.65);
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+    margin: 2px;
+}
+QScrollBar::handle:horizontal {
+    background: rgba(150, 160, 175, 0.45);
+    border-radius: 4px;
+    min-width: 24px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: rgba(120, 132, 150, 0.65);
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: transparent;
+}

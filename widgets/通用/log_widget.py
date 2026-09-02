@@ -36,6 +36,7 @@ from PyQt5.QtWidgets import (
 )
 
 from model.log_model import LogEntry, LogLevel, LogModel
+from widgets.通用.ui_common import CRITICAL_COLOR, ERROR_COLOR
 
 __all__ = ["LogWidget"]
 
@@ -43,8 +44,8 @@ _LEVEL_HEX = {
     LogLevel.DEBUG: "#888888",
     LogLevel.INFO: "#333333",
     LogLevel.WARNING: "#e67e22",
-    LogLevel.ERROR: "#e15554",
-    LogLevel.CRITICAL: "#b03a2e",
+    LogLevel.ERROR: ERROR_COLOR,
+    LogLevel.CRITICAL: CRITICAL_COLOR,
 }
 
 

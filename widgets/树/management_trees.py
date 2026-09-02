@@ -41,7 +41,7 @@ from widgets.树.composite_tree_widget import CompositeTreeWidget
 from widgets.合成卡片.composite_signature_widget import CompositeSignatureDialog
 from widgets.合成卡片.composite_local_picker import make_composite_local_picker
 from widgets.卡片.step_list_view import StepClipboard, StepListView
-from widgets.通用.ui_common import make_icon, placeholder
+from widgets.通用.ui_common import ERROR_COLOR, make_icon, placeholder
 
 __all__ = [
     "ManagementTree", "PlaceholderManagementTree", "ResourceManagementTree",
@@ -479,7 +479,8 @@ class StepListManagementTree(ManagementTree):
         if self._host is None:
             self._host = StepListHost(
                 self._mgr, self._clipboard, self._on_edited, None,
-                composite_store=self._cstore)
+                composite_store=self._cstore,
+                empty_hint="右键添加步骤到该合成卡片")
             # 视图错误数变化 → 重标左侧树错误条目（树可能尚未构建，判空）
             self._host.errors_changed.connect(self._refresh_tree_marks)
         assert self._host is not None
@@ -745,7 +746,8 @@ class CompositeManagementTree(ManagementTree):
             self._sig_btn.clicked.connect(self._open_signature_dialog)
             self._host = StepListHost(
                 self._mgr, self._clipboard, self._on_edited, None,
-                composite_store=self._cstore)
+                composite_store=self._cstore,
+                empty_hint="右键添加步骤到该合成卡片")
             self._host.errors_changed.connect(self._refresh_tree_marks)
             self._container = QWidget()
             lay = QVBoxLayout(self._container)
@@ -989,13 +991,15 @@ class StepListHost(QStackedWidget):
     def __init__(self, mgr: StepManager, clipboard: StepClipboard,
                  on_edited: Callable[[], None],
                  parent: Optional[QWidget] = None,
-                 composite_store: Optional[CompositeCardStore] = None) -> None:
+                 composite_store: Optional[CompositeCardStore] = None,
+                 empty_hint: Optional[str] = None) -> None:
         super().__init__(parent)
         self._placeholder = QLabel("从左侧选择一个步骤列表")
         self._placeholder.setAlignment(Qt.AlignCenter)
         self._placeholder.setStyleSheet("color:#999; font-size:15px;")
         self.addWidget(self._placeholder)          # 0
-        self._view = StepListView(mgr, clipboard, None, composite_store)
+        self._view = StepListView(mgr, clipboard, None, composite_store,
+                                  empty_hint=empty_hint)
         self._view.edited.connect(on_edited)
         self._view.errors_changed.connect(self._on_errors_changed)
         self._view.errors_changed.connect(self.errors_changed)
@@ -1046,7 +1050,7 @@ class StepListHost(QStackedWidget):
         row2 = QHBoxLayout()
         row2.setSpacing(6)
         self._error_count = QLabel("错误卡片: 0")
-        self._error_count.setStyleSheet("color:#c8564c;")
+        self._error_count.setStyleSheet("color:%s;" % ERROR_COLOR)
         row2.addWidget(self._error_count)
         btn_errors = QPushButton("跳转错误")
         btn_errors.clicked.connect(self._on_jump_error)
@@ -1336,6 +1340,7 @@ class DemoStep(Step):
     assert cmgr.current_path == "登录"
     assert cmgr._host.currentIndex() == 1
     assert cmgr._host._view._step_list is body
+    assert cmgr._host._view._empty_hint == "右键添加步骤到该合成卡片"
     # 落盘防抖：编辑 → 500ms 单发定时器 → 写 composites.json
     cmgr._on_edited()
     assert cmgr._save_timer is not None and cmgr._save_timer.isActive()

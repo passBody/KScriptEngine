@@ -44,6 +44,7 @@ from model.合成卡片.composite_card_store import CompositeCardStore
 from model.合成卡片.composite_local_tree import build_validation_tree
 from model.步骤.step_manager import StepManager
 from widgets.卡片.step_list_view import StepClipboard
+from widgets.通用.ui_common import ERROR_COLOR
 
 __all__ = ["CompositeTreeWidget"]
 
@@ -178,7 +179,7 @@ class CompositeTreeWidget(QTreeWidget):
                 f = it.font(0)
                 f.setBold(err)
                 it.setFont(0, f)
-                it.setForeground(0, QColor(200, 50, 40) if err else default_fg)
+                it.setForeground(0, QColor(ERROR_COLOR) if err else default_fg)
         finally:
             self.blockSignals(False)
 
@@ -975,7 +976,7 @@ class DemoStep(Step):
     store_e.add_list("组A/坏卡", bad)
     tw_e = CompositeTreeWidget(store_e, mgr, StepClipboard(), lambda: None)
     from PyQt5.QtGui import QColor as _QColor
-    _RED = _QColor(200, 50, 40)
+    _RED = _QColor(ERROR_COLOR)
     it_bad = tw_e.find_item("组A/坏卡")
     it_grp = tw_e.find_item("组A")
     assert it_bad is not None and it_grp is not None

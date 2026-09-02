@@ -39,6 +39,7 @@ from model.步骤.step_list import StepList
 from model.步骤.step_list_store import StepListStore
 from model.步骤.step_manager import StepManager
 from widgets.卡片.step_list_view import StepClipboard
+from widgets.通用.ui_common import ERROR_COLOR
 
 __all__ = ["StepListTreeWidget"]
 
@@ -174,7 +175,7 @@ class StepListTreeWidget(QTreeWidget):
                 f.setBold(err or running)
                 it.setFont(0, f)
                 if err:
-                    fg = QColor(200, 50, 40)          # 错误红（优先于执行蓝）
+                    fg = QColor(ERROR_COLOR)          # 错误红（优先于执行蓝）
                 elif running:
                     fg = QColor(27, 122, 214)          # 执行中蓝（哪个列表在执行）
                 else:
@@ -1457,7 +1458,7 @@ class DemoStep(Step):
     it_b = tw_b.find_item("混合B")
     assert it_b.checkState(0) == Qt.PartiallyChecked
     it_b.setFont(0, it_b.font(0))                      # 模拟 refresh_error_marks
-    it_b.setForeground(0, QColor(200, 50, 40))
+    it_b.setForeground(0, QColor(ERROR_COLOR))
     assert [s.enabled for s in sl_b.steps] == [True, False], \
         "程序性刷新不得停用全部步骤"
     assert it_b.checkState(0) == Qt.PartiallyChecked
@@ -1682,7 +1683,7 @@ class DemoStep(Step):
     store_e.add_list("好列表", good_l)
     tw_e = StepListTreeWidget(store_e, mgr, StepClipboard(), lambda: None)
     from PyQt5.QtGui import QColor as _QColor
-    _RED = _QColor(200, 50, 40)
+    _RED = _QColor(ERROR_COLOR)
     it_bad = tw_e.find_item("组A/坏列表")
     it_grp = tw_e.find_item("组A")
     it_sub = tw_e.find_item("组A/好组")

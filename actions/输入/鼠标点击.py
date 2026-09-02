@@ -197,7 +197,7 @@ if __name__ == "__main__":
     from PyQt5.QtWidgets import QLabel, QPushButton
     labels = view.findChildren(QLabel)
     btns = view.findChildren(QPushButton)
-    assert any("预览图的画面是通过读输入GUI的参数来生成" in l.text() for l in labels)
+    assert any("点击缩略图查看大图" in l.text() for l in labels)
     assert any(b.text() == "设置点位" for b in btns)
     assert not any(b.text() == "预览" for b in btns)   # 按钮已由缩略图取代
     btn = [b for b in btns if b.text() == "设置点位"][0]

@@ -19,8 +19,27 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
 
-__all__ = ["ClickableLabel", "LandingCard", "TitledPanel",
-           "ensure_qt_plugin_path", "make_icon", "placeholder", "window_size"]
+__all__ = ["ClickableLabel", "CRITICAL_COLOR", "ERROR_COLOR", "LandingCard",
+           "TitledPanel", "ensure_qt_plugin_path", "load_app_qss", "make_icon",
+           "placeholder", "window_size"]
+
+# ---- 语义色（全工程唯一来源：错误红/严重暗红勿再散落硬编码） ----
+ERROR_COLOR = "#e15554"      # 错误红：io 非法 / 运行错误 / 日志 ERROR
+CRITICAL_COLOR = "#b03a2e"   # 严重暗红：日志 CRITICAL（较 ERROR 深一级）
+
+
+def load_app_qss() -> str:
+    """应用级 QSS（view/app.qss）：滚动条等难以按组件局部设置的公共样式。
+
+    找不到文件 → 返回空串（不设样式，程序照常运行）。
+    """
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "view", "app.qss")
+    if not os.path.isfile(path):
+        return ""
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
 
 
 class ClickableLabel(QLabel):
@@ -251,5 +270,11 @@ if __name__ == "__main__":
     ph = placeholder("待实现")
     lbl = ph.findChild(QLabel)
     assert lbl is not None and lbl.text() == "待实现"
+
+    # 语义色常量（错误红全工程唯一来源，勿散落硬编码）
+    assert ERROR_COLOR == "#e15554" and CRITICAL_COLOR == "#b03a2e"
+    # 应用级 QSS：view/app.qss 存在且含滚动条样式
+    qss = load_app_qss()
+    assert "QScrollBar" in qss, qss
 
     print("ui_common smoke OK")

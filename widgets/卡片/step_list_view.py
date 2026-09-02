@@ -43,7 +43,7 @@ from model.步骤.step_manager import StepManager
 from model.合成卡片.composite_card import CompositeCard
 from model.合成卡片.placeholder_step import PlaceholderStep
 from widgets.卡片.step_card import StepCard, card_size_for_screen
-from widgets.通用.ui_common import make_icon
+from widgets.通用.ui_common import ERROR_COLOR, make_icon
 
 if TYPE_CHECKING:
     from model.合成卡片.composite_card_store import CompositeCardStore
@@ -260,10 +260,12 @@ class StepListView(QGraphicsView):
 
     def __init__(self, mgr: StepManager, clipboard: StepClipboard,
                  parent: Optional[QWidget] = None,
-                 composite_store: "Optional[CompositeCardStore]" = None) -> None:
+                 composite_store: "Optional[CompositeCardStore]" = None,
+                 empty_hint: Optional[str] = None) -> None:
         super().__init__(parent)
         self._mgr = mgr
         self._clipboard = clipboard
+        self._empty_hint = empty_hint   # 空列表提示自定义（合成卡片体等语境；None → 默认文案）
         self._composite_store = composite_store   # 选择器列出合成卡片用（None → 仅模板）
         self._exclude_ref: Optional[str] = None   # 编辑合成卡片时排除自身（防递归）
         self._step_list: Optional[StepList] = None
@@ -350,7 +352,7 @@ class StepListView(QGraphicsView):
         sl = self._step_list
         if sl is None or len(sl) == 0:
             self._hint = self._scene.addSimpleText(
-                "右键添加步骤（或在左侧管理树选择列表）")
+                self._empty_hint or "右键添加步骤（或在左侧管理树选择列表）")
             if self._hint is not None:
                 self._hint.setFont(QFont("SimSun", 22))   # 22 号宋体
                 self._center_hint()
@@ -446,7 +448,7 @@ class StepListView(QGraphicsView):
         if label is None:
             label = _ErrorLabelItem(text, full)
             label.setFont(QFont("SimSun", 12))
-            label.setBrush(QColor(200, 50, 40))   # 错误红
+            label.setBrush(QColor(ERROR_COLOR))   # 错误红（ui_common 统一语义色）
             self._scene.addItem(label)
             self._error_labels[card] = label
         else:
@@ -1047,6 +1049,15 @@ class DemoStep(Step):
     # 空列表 → 提示项存在、无卡片
     view.set_list(sl2, mgr)
     assert view._cards == [] and view._hint is not None
+
+    # 自定义空态文案（合成卡片体等语境）：构造期 empty_hint 覆盖默认提示
+    hint_view = StepListView(mgr, StepClipboard(),
+                             empty_hint="右键添加步骤到该合成卡片")
+    hint_view.set_list(sl2, mgr)
+    assert hint_view._hint is not None
+    assert hint_view._hint.text() == "右键添加步骤到该合成卡片"
+    hint_view.set_list(sl, mgr)
+    assert hint_view._hint is None      # 有卡片 → 提示消失
 
     # 绑定列表 → 卡片数 = 步骤数
     view.set_list(sl, mgr)

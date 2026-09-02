@@ -81,6 +81,12 @@ class HotkeyEdit(QLineEdit):
         self.setText("…")                     # 提示等待按键
         super().mousePressEvent(event)
 
+    def focusOutEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        """失焦还原显示：点击后未按键直接点别处 → 「…」还原为已绑定值。"""
+        if self.text() == "…":
+            self.setText(self._hotkey)
+        super().focusOutEvent(event)
+
     def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         if event.key() == Qt.Key_Escape:
             self.setText(self._hotkey)           # 取消还原
@@ -262,10 +268,15 @@ if __name__ == "__main__":
     assert _spec_from_event(Qt.Key_Shift, Qt.ShiftModifier) == "Shift"
     # 退格清空（真实 keyPressEvent 路径）
     from PyQt5.QtCore import QEvent
-    from PyQt5.QtGui import QKeyEvent
+    from PyQt5.QtGui import QFocusEvent, QKeyEvent
     _edit = dlg._edits["执行列表1"]
     _edit.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Backspace, Qt.NoModifier))
     assert _edit.text() == "" and _edit.hotkey() == ""
+    # 失焦还原：点击（显示「…」）后未按键直接点别处 → 还原已绑定值
+    _edit._apply_key("H")
+    _edit.setText("…")
+    _edit.focusOutEvent(QFocusEvent(QEvent.FocusOut))
+    assert _edit.text() == "H" and _edit.hotkey() == "H"
     # 清除按钮同义
     dlg._edits["执行列表1"].set_hotkey("")
     assert dlg.hotkeys() == {"执行列表1": "", "执行列表2": ""}

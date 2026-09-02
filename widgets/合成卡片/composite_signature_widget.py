@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
 
 from model.合成卡片.composite_signature import CompositeSignature, LocalVar, Param
 from model.变量.project_variable import ProjectVariable
+from widgets.通用.ui_common import ERROR_COLOR
 
 __all__ = ["CompositeSignatureDialog", "CompositeSignatureWidget"]
 
@@ -291,9 +292,9 @@ class CompositeSignatureDialog(QDialog):
         # 红字错误提示：确定时校验失败 → 显示；签名变合法 → 消除
         self._error_label = QLabel(self)
         self._error_label.setStyleSheet(
-            "QLabel { color: #c8564c; background: #fbeae7;"
+            "QLabel { color: %s; background: #fbeae7;"
             " border: 1px solid #e3b3ac; border-radius: 4px;"
-            " padding: 4px 6px; }")
+            " padding: 4px 6px; }" % ERROR_COLOR)
         self._error_label.hide()
         lay.addWidget(self._error_label)
         # 右下角确定/取消（QDialogButtonBox 默认右对齐）
