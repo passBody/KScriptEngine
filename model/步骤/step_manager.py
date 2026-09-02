@@ -271,7 +271,8 @@ class StepManager:
     def copy_source_templates(self, source_dir: str) -> int:
         """把源码 ``actions/`` 下 .py 模板按相对目录全部加入工程；返回成功数。
 
-        跳过 ``base.py`` / ``__init__.py`` / ``__pycache__``。
+        跳过 ``base.py`` / ``__init__.py`` / ``__main__.py`` / ``__pycache__``
+        （包骨架与自检脚本，无步骤类——跳过而非回滚报错）。
 
         逐文件以 ``quiet=True`` 调 :meth:`add_template`：压制每个文件的
         ``load`` 摘要与「添加模板成功」info（N 个文件否则刷出 N×2 行）；
@@ -282,8 +283,9 @@ class StepManager:
         for root, dirs, files in os.walk(source_dir):
             dirs[:] = [d for d in dirs if d != "__pycache__"]
             for name in sorted(files):
-                if not name.endswith(".py") or name in ("base.py", "__init__.py"):
-                    continue
+                if not name.endswith(".py") \
+                        or name in ("base.py", "__init__.py", "__main__.py"):
+                    continue   # 包骨架/自检脚本（无步骤类）：跳过而非回滚报错
                 src = os.path.join(root, name)
                 rel_dir = os.path.relpath(root, source_dir)
                 rel_dir = "" if rel_dir == "." else rel_dir.replace("\\", "/")
@@ -531,14 +533,15 @@ class NoDcStep(Step):
             raise AssertionError("未知路径应抛 ValueError")
         except ValueError:
             pass
-        # copy_source_templates：跳过 base/__init__/__pycache__，保目录结构；
-        # 逐文件 quiet=True → 不刷「步骤模板加载完成 / 添加模板成功」，
+        # copy_source_templates：跳过 base/__init__/__main__/__pycache__，
+        # 保目录结构；逐文件 quiet=True → 不刷「步骤模板加载完成 / 添加模板成功」，
         # 但坏文件（无 Step 子类）的「添加模板失败」ERROR 仍记。
         src = os.path.join(td, "src_actions")
         os.makedirs(os.path.join(src, "子目录", "__pycache__"))
         for name, content in (
                 ("base.py", "pass\n"),
                 ("__init__.py", "pass\n"),
+                ("__main__.py", "pass\n"),   # 包自检脚本：与 __init__ 同类跳过
                 ("本地2.py", LOCAL.replace('name = "本地"', 'name = "本地2"')),
                 ("子目录/深层.py", LOCAL.replace('name = "本地"', 'name = "深层"')),
                 ("子目录/__pycache__/缓存.py", LOCAL),
@@ -555,6 +558,7 @@ class NoDcStep(Step):
         assert not any("添加模板成功" in m for m in msgs), msgs       # quiet 压制逐文件成功
         assert any("添加模板失败" in m and "坏文件.py" in m
                    for m in msgs), msgs                              # 失败 ERROR 仍记
+        assert not any("__main__.py" in m for m in msgs), msgs       # 骨架跳过不报错
 
     # ---- 移动 / 分组操作 / 模板类访问（步骤管理树支持） ----
     # move_template：顶层 → 子目录成功
