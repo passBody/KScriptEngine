@@ -12,6 +12,9 @@ from model.步骤.step import Step, StepStatus
 __all__ = ["Step", "StepStatus"]
 
 for _info in pkgutil.walk_packages(__path__, __name__ + "."):
+    if _info.name.endswith(".__main__"):
+        continue    # 包自检脚本（python -m actions）：无 __all__、不参与注册；
+                    # 跳过还避免 runpy 执行它时告警「found in sys.modules」
     _mod = importlib.import_module(_info.name)
     for _name in getattr(_mod, "__all__", []):
         if _name in __all__:

@@ -83,7 +83,7 @@ ZIP 归档，内含：
 全量回归一条命令：
 
 ```bash
-python tests/smoke_all.py   # 53 模块冒烟 + 2 个自检（工程加载 + sample.kscp 模板一致性），失败非零退出
+python tests/smoke_all.py   # 55 模块冒烟 + 2 个自检（工程加载 + sample.kscp 模板一致性），失败非零退出
 ```
 
 ## 文档

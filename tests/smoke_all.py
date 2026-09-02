@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))   # 便于 import 项目包（如 widgets.通用.ui_common）
 
 MODULES = [
-    "actions", "actions.输入.鼠标.基础操作.偏移",
+    "actions", "actions.输入.鼠标.基础操作.相对偏移",
+    "actions.输入.鼠标.基础操作.获取位置", "actions.输入.鼠标.基础操作.设置位置",
     "actions.控制流程.time_delay", "actions.控制流程.输出日志",
     "actions.变量控制.变量设置.设置number", "actions.变量控制.变量设置.设置string",
     "actions.变量控制.类型转换.字符串转数字", "actions.变量控制.类型转换.数字转字符串",
@@ -54,11 +55,11 @@ CHECKS = [
 
 
 def _check_sample_templates() -> int:
-    """sample.kscp 内打包的 actions 模板须与源码逐字节一致。
+    """sample.kscp 内打包的 actions 模板须与源码逐字节一致（双向比对）。
 
     防「修了源码模板、忘了重打包 sample.kscp」（曾出现：偏移.py 旧 bug 版、
-    鼠标点击旧提示文案残留在示例工程内）。包骨架（__init__/__main__）不打包、
-    不在比对列；源码中存在而包内没有的 .py 同样报（防漏打包模板）。
+    鼠标点击旧提示文案残留在示例工程内）；也防重命名/删除模板后包内残留旧
+    文件。包骨架（__init__/__main__）不打包、不在比对列。
     """
     import os
     import zipfile
@@ -71,9 +72,12 @@ def _check_sample_templates() -> int:
         for n in names:
             if not n.startswith("actions/") or not n.endswith(".py"):
                 continue
+            if os.path.basename(n) in ("__init__.py", "__main__.py"):
+                continue                      # 包骨架（__init__ 等）不在比对列
             src = ROOT / n
             if not src.is_file():
-                continue                      # 包骨架（__init__ 等）不在比对列
+                diffs.append("包内有而源码无（残留）: " + n)   # 重命名/删除后的旧模板残留
+                continue
             with zipfile.ZipFile(pkg) as z:
                 with open(src, "rb") as f:
                     if f.read() != z.read(n):

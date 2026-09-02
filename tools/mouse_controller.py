@@ -232,7 +232,7 @@ class MouseController:
         :param button: "left" / "right" / "middle"
         """
         if x is not None and y is not None:
-            self.move_to(x, y)
+            self.set_position(x, y)
             time.sleep(0.02)
         
         if button == "left":
