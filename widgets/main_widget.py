@@ -126,6 +126,7 @@ class MainWindow(QMainWindow):
         self._kscp_path: Optional[str] = None
         self._managers: List[ManagementTree] = []
         self.setWindowTitle("KScript")
+        self.setWindowIcon(QIcon(_ICON_PATH))   # 窗口级图标（标题栏 + 任务栏 + 弹窗继承）
         self.resize(600, 350)            # landing 保持原尺寸；打开工程时放大为屏幕 2/3
         self._project_sized = False
         self._log_widget: Optional[LogWidget] = None
@@ -1310,11 +1311,28 @@ def _warn_not_admin() -> None:
             pass
 
 
+def _apply_windows_app_id() -> None:
+    """Windows 任务栏图标与窗口图标统一：显式设置进程 AppUserModelID。
+
+    以 ``python main.py`` 启动时，任务栏按钮默认显示宿主 python.exe 的图标
+    而非窗口图标；显式 AppUserModelID 后任务栏改用窗口图标（与标题栏一致）。
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "KScript.App")
+    except (AttributeError, OSError):
+        pass
+
+
 def main(path: Optional[str] = None, check: bool = False) -> int:
     ensure_qt_plugin_path()   # venv 等独立部署：Qt 插件目录显式指路（须先于 QApplication）
     app = QApplication.instance() or QApplication(sys.argv)
     app.setWindowIcon(QIcon(_ICON_PATH))          # 程序图标 → 所有窗口/弹窗继承
     app.setStyleSheet(load_app_qss())             # 应用级 QSS：滚动条等公共件（view/app.qss）
+    _apply_windows_app_id()   # 任务栏显示窗口图标（默认显示 python.exe 图标）
     app.setAttribute(Qt.AA_DisableWindowContextHelpButton, True)  # 弹窗右上角无「?」
     _warn_not_admin()
     win = MainWindow(path)
@@ -1554,6 +1572,21 @@ class DemoStep(Step):
     # 程序图标：icon/kscript.ico 存在且可加载（应用到所有窗口/弹窗）
     assert os.path.exists(_ICON_PATH)
     assert not QIcon(_ICON_PATH).isNull()
+    # 窗口级图标 = 程序图标（标题栏/任务栏/弹窗继承；MainWindow 直接构造也生效）
+    assert not win.windowIcon().isNull()
+    assert win.windowIcon().pixmap(32, 32).toImage() \
+        == QIcon(_ICON_PATH).pixmap(32, 32).toImage()
+    # 任务栏图标统一：显式 AppUserModelID（python.exe 启动时任务栏不再显示 python 图标）
+    _apply_windows_app_id()
+    if os.name == "nt":
+        import ctypes as _ct
+        _ppid = _ct.POINTER(_ct.c_wchar)()
+        _hr = _ct.windll.shell32.GetCurrentProcessExplicitAppUserModelID(
+            _ct.byref(_ppid))          # 出参指针（PWSTR*），非调用方缓冲区
+        _name = _ct.wstring_at(_ppid) if _ppid else ""
+        assert _hr == 0 and _name == "KScript.App", (_hr, _name)
+        if _ppid:
+            _ct.windll.ole32.CoTaskMemFree(_ppid)
     # 弹窗右上角无「?」按钮：全局属性存在（main() 中启用）
     assert hasattr(Qt, "AA_DisableWindowContextHelpButton")
 
