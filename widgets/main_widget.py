@@ -152,6 +152,8 @@ class MainWindow(QMainWindow):
         self._sl_error_count = 0     # 当前步骤列表视图的错误/占位卡片数（>0 → 禁止执行）
         self._current_page = ""      # 当前执行列表页（sl_mgr 页信号驱动）
         self._armed = False   # 全部页待命开关（执行按钮切换；未待命所有页热键忽略）
+        self._cards_dirty = False              # 卡片重检脏标记（下一帧合并刷新）
+        self._cards_refresh_pending = False
         self._step_hooks: Dict[str, List[Tuple[object, Callable]]] = {}   # 页名 → 步骤状态监听
         self._step_paths: Dict[str, Dict[object, str]] = {}   # 页名 → step→列表路径（树高亮）
 
@@ -264,12 +266,12 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._exec_status)
 
     def _update_status_counts(self) -> None:
+        """状态栏错误/警告计数：读 LogModel 增量计数器（O(1)），
+        不再每次全量遍历 entries（修日志风暴时 O(n²) 重扫）。"""
         assert self._status_counts is not None
         m = LogModel.instance()
-        err = sum(1 for e in m.entries
-                  if e.level in (LogLevel.ERROR, LogLevel.CRITICAL))
-        warn = sum(1 for e in m.entries if e.level == LogLevel.WARNING)
-        self._status_counts.setText("错误: %d  警告: %d" % (err, warn))
+        self._status_counts.setText(
+            "错误: %d  警告: %d" % (m.error_count, m.warning_count))
 
     # ---- 页热键监听（常驻：工程打开即生效） ----
     def _start_page_listeners(self) -> None:
@@ -434,6 +436,7 @@ class MainWindow(QMainWindow):
                 "禁止执行：页「%s」含错误/占位卡片，请先修正或删除后再执行" % page)
             self._set_exec_status("禁止执行：页「%s」含错误/占位卡片" % page)
             return
+        self._warn_hotkey_conflicts(page)   # 模拟按键 vs 热键的静态冲突提示
         only = None
         if self._exec_scope == "current" and page == self._current_page:
             only = sl_mgr.current_path   # 「仅执行当前列表」只作用于当前页
@@ -482,6 +485,39 @@ class MainWindow(QMainWindow):
                 if isinstance(s, PlaceholderStep) or not s.io.is_valid:
                     return True
         return False
+
+    def _warn_hotkey_conflicts(self, page: str) -> None:
+        """执行前静态扫描：页内步骤的按键类输入常量与**任何页**热键相同 →
+        warning（模拟按键会被常驻监听器捕获：误启他页 / 自停本页）。
+        引用变量（``{{x}}``）运行时才能知道值，跳过；文档/tooltip 提示兜底。
+        """
+        if not self._managers:
+            return
+        sl_mgr = self._managers[0]
+        if not isinstance(sl_mgr, StepListManagementTree):
+            return
+        hotkeys = [v for v in self._page_hotkeys().values() if v]
+        if not hotkeys or page not in sl_mgr.page_store.page_names():
+            return
+        hk_norms = {normalize_hotkey(h): h for h in hotkeys if normalize_hotkey(h)}
+        hits = set()
+        store = sl_mgr.page_store.get_page(page)
+        for path, is_group in store.walk():
+            if is_group:
+                continue
+            for step in store.get(path).steps:
+                if not step.enabled:
+                    continue
+                for v in step.io._input_values:
+                    if not isinstance(v, str) or v.startswith("{{"):
+                        continue
+                    norm = normalize_hotkey(v)
+                    if norm in hk_norms:
+                        hits.add((norm, hk_norms[norm], step.name))
+        for norm, hk, sname in sorted(hits):
+            LogModel.instance().warning(
+                "热键冲突：步骤「%s」将模拟按键「%s」，与热键「%s」相同——"
+                "执行时可能误触发该热键" % (sname, norm, hk))
 
     def _on_runner_state(self, payload) -> None:
         """执行器状态变化（GUI 线程）：状态栏 + 编辑锁定（活跃重算）+ 挂钩清理。"""
@@ -567,7 +603,9 @@ class MainWindow(QMainWindow):
                 t.set_running_path(None)
 
     def _on_step_status(self, payload) -> None:
-        """步骤状态变化（GUI 线程，经桥 queued）：该页卡片重检颜色 + 树高亮执行中列表。"""
+        """步骤状态变化（GUI 线程，经桥 queued）：脏标记 + 下一帧合并刷新
+        （执行事件风暴时每事件全量重检卡片 O(卡片数×槽数) 会压垮 GUI——
+        单帧内多个事件只刷一次）。"""
         page, step = payload
         if not self._managers:
             return
@@ -576,12 +614,26 @@ class MainWindow(QMainWindow):
             return
         if page != self._current_page:
             return                     # 后台页状态不刷宿主（宿主只显示当前页）
+        self._cards_dirty = True
+        if not self._cards_refresh_pending:
+            self._cards_refresh_pending = True
+            QTimer.singleShot(0, self._flush_card_refresh)
+
+    def _flush_card_refresh(self) -> None:
+        """下一帧统一重检：当前页卡片颜色 + 树高亮执行中列表。"""
+        self._cards_refresh_pending = False
+        if not self._cards_dirty or not self._managers:
+            return
+        self._cards_dirty = False
+        m0 = self._managers[0]
+        if not isinstance(m0, StepListManagementTree):
+            return
         m0.refresh_cards()
         t = m0.current_tree()
         if t is not None:
             # 找当前 RUNNING 的步骤 → 高亮其列表；无则清高亮
             running = None
-            for s, path in self._step_paths.get(page, {}).items():
+            for s, path in self._step_paths.get(self._current_page, {}).items():
                 if s.status is StepStatus.RUNNING:
                     running = path
                     break
@@ -1820,6 +1872,15 @@ class DemoStep(Step):
             assert _lone_mod_deferred("Ctrl", ["Ctrl", "Alt+I"]) is False
             assert _lone_mod_deferred("F1", ["F1", "Ctrl"]) is False
             assert _lone_mod_deferred("Ctrl", ["Ctrl", "Ctrl"]) is False
+            # 热键冲突静态扫描：步骤输入常量与热键相同 → warning（执行前提示）
+            # 注：须改 win_mp 店内的步骤（开包后是反序列化的另一实例）
+            LogModel.instance().clear()
+            _wstep = win_mp._managers[0].store.get("主列表").steps[0]
+            _wstep.io.change_value("input", 0, "F")    # 模拟按键类输入常量
+            win_mp._warn_hotkey_conflicts("执行列表1")
+            assert any("热键冲突" in e.message for e in LogModel.instance().entries)
+            _wstep.io.change_value("input", 0, "5")    # 还原（避免后续错误扫描拦截）
+            LogModel.instance().clear()
             # 未待命 → 热键忽略；**一次待命全部页生效**后各自触发
             win_mp._exec_bridge.hotkey_toggle.emit("执行列表1")
             assert "执行列表1" not in win_mp._runners

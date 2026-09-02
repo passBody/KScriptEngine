@@ -63,6 +63,8 @@ class LogModel:
             raise RuntimeError("LogModel 是单例：请使用 LogModel.instance()")
         self._entries: List[LogEntry] = []
         self._listeners: List[Callable[[], None]] = []
+        self.error_count = 0      # 增量维护的错误/警告计数（状态栏 O(1) 读取）
+        self.warning_count = 0
 
     # ---- 单例 ----
     @classmethod
@@ -81,6 +83,10 @@ class LogModel:
     def log(self, level: LogLevel, message: str) -> None:
         """追加一条日志，时间戳取当前 epoch 秒。"""
         self._entries.append(LogEntry(time.time(), level, message))
+        if level is LogLevel.ERROR:
+            self.error_count += 1
+        elif level is LogLevel.WARNING:
+            self.warning_count += 1
         self._notify()
 
     def debug(self, message: str) -> None:
@@ -101,6 +107,8 @@ class LogModel:
     def clear(self) -> None:
         """清空当前日志。"""
         self._entries.clear()
+        self.error_count = 0
+        self.warning_count = 0
         self._notify()
 
     def export(self, fmt: str = "text") -> bytes:
