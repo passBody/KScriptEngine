@@ -323,11 +323,8 @@ class MainWindow(QMainWindow):
         self._tray.show()
 
     def _hide_to_tray(self) -> None:
-        """隐藏主窗口到托盘（托盘图标常驻）。"""
+        """隐藏主窗口到托盘（托盘图标常驻；不弹通知气泡——用户反馈打扰）。"""
         self.hide()
-        if self._tray.isSystemTrayAvailable():
-            self._tray.showMessage("KScript", "已最小化至托盘（点击图标或按热键恢复）",
-                                   QSystemTrayIcon.Information, 2000)
 
     def _restore_from_tray(self) -> None:
         """从托盘恢复主窗口并置顶。"""

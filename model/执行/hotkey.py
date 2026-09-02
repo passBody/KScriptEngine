@@ -67,7 +67,8 @@ _DISPLAY = {
 
 
 def _key_id(key) -> Optional[str]:
-    """pynput 按键对象 → 稳定标识：``char:x`` 或 ``key:name``；无法识别 → None。
+    """pynput 按键对象 → 稳定标识：``char:x`` / ``vk:N`` / ``key:name``；
+    无法识别 → None。
 
     Windows 上 pynput 区分左右修饰键（``ctrl_l``/``ctrl_r``、``alt_l``/…），
     此处归一化为 ``ctrl``/``alt``/``shift``/``cmd``——否则组合热键的按住
@@ -76,6 +77,12 @@ def _key_id(key) -> Optional[str]:
     ch = getattr(key, "char", None)
     if ch is not None:
         return "char:" + ch.lower()
+    vk = getattr(key, "vk", None)
+    if vk is not None:
+        # 修饰键按下时 ToUnicodeEx 常转不出字符（Ctrl+Alt+字母 → char=None），
+        # 退化为虚拟键码标识；解析侧会为字符目标同时登记 vk 标识（见
+        # HotkeyListener.__init__ 与 _char_vk）
+        return "vk:%d" % vk
     name = getattr(key, "name", None)
     if name is not None:
         if name.endswith(("_l", "_r")) and name[:-2] in ("ctrl", "alt",
@@ -83,6 +90,22 @@ def _key_id(key) -> Optional[str]:
             name = name[:-2]
         return "key:" + name
     return None
+
+
+def _char_vk(ch: str) -> Optional[int]:
+    """单字符的 Windows 虚拟键码，供 vk 兜底匹配（pynput 的
+    ``KeyCode.from_char`` 不填 vk，须按 Windows VK 表手算）。
+
+    字母/数字 = 大写 ASCII 码；常见符号 = OEM 键码。仅 Windows 需要该兜底
+    （其他平台 pynput 总给 char）。
+    """
+    u = ch.upper()
+    if len(u) == 1:
+        if "A" <= u <= "Z" or "0" <= u <= "9":
+            return ord(u)
+    return {" ": 0x20, "`": 0xC0, "-": 0xBD, "=": 0xBB,
+            "[": 0xDB, "]": 0xDD, "\\": 0xDC, ";": 0xBA,
+            "'": 0xDE, ",": 0xBC, ".": 0xBE, "/": 0xBF}.get(ch)
 
 
 def parse_hotkey(spec: str) -> Tuple[FrozenSet[str], str]:
@@ -154,6 +177,13 @@ class HotkeyListener:
         self._on_toggle = on_toggle
         self._defer = bool(defer_lone_modifier)
         self._mods, self._target = parse_hotkey(spec)
+        # 字符目标同时登记 vk 标识：修饰键按下时 pynput 可能只给 KeyCode(vk)
+        # 而 char=None（ToUnicodeEx 失败）→ 以 vk 兜底匹配（修组合键不生效）
+        self._target_ids = {self._target}
+        if self._target.startswith("char:"):
+            vk = _char_vk(self._target[5:])
+            if vk is not None:
+                self._target_ids.add("vk:%d" % vk)
         self._lone_modifier = not self._mods and self._target in {
             "key:ctrl", "key:alt", "key:shift", "key:cmd"}
         self._held = set()           # 当前按住的键（含修饰键）
@@ -203,8 +233,8 @@ class HotkeyListener:
             return
         if self._pending:
             self._interrupted = True   # pending 期间按了任何其他键 → 放弃
-        # 命名键/单字符/组合：按住集合严格相等 + 目标键相等 → 触发
-        if kid == self._target and self._held == self._mods:
+        # 命名键/单字符/组合：按住集合严格相等 + 目标键命中（char/vk 任一）→ 触发
+        if kid in self._target_ids and self._held == self._mods:
             self._on_toggle()
 
     def _on_release(self, key) -> None:
@@ -225,11 +255,12 @@ class HotkeyListener:
 # ================================================================
 if __name__ == "__main__":
     class _FakeKey:
-        """假按键对象：char（KeyCode）或 name（Key.xxx）。"""
+        """假按键对象：char（KeyCode）或 name（Key.xxx）或 vk（修饰键按下时的 KeyCode）。"""
 
-        def __init__(self, ch=None, name=None):
+        def __init__(self, ch=None, name=None, vk=None):
             self.char = ch
             self.name = name
+            self.vk = vk
 
     # ---- normalize / parse ----
     assert normalize_hotkey("F1") == "F1"
@@ -306,6 +337,20 @@ if __name__ == "__main__":
     assert tg == [1]
     l._on_release(_FakeKey(ch="F"))
     l._on_release(_FakeKey(name="shift_l"))
+    # Windows vk-only 按键（修饰键按下时 char=None）：以 vk 兜底命中
+    l, tg = _mk("Ctrl+Alt+I")
+    l._on_press(_FakeKey(name="ctrl_l"))
+    l._on_press(_FakeKey(name="alt_l"))
+    l._on_press(_FakeKey(vk=0x49))                      # 'I' 的虚拟键码、无 char
+    assert tg == [1]
+    l._on_release(_FakeKey(vk=0x49))
+    l._on_release(_FakeKey(name="alt_l"))
+    l._on_release(_FakeKey(name="ctrl_l"))
+    # 单字符热键 + vk-only 按键同样命中
+    l, tg = _mk("F")
+    l._on_press(_FakeKey(vk=0x46))                      # 'F' 的虚拟键码、无 char
+    assert tg == [1]
+    l._on_release(_FakeKey(vk=0x46))
 
     # ---- 单字符（旧格式）：按下触发；按着 Ctrl 按 f 不再触发（严格匹配） ----
     l, tg = _mk("f")
