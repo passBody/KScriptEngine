@@ -67,12 +67,20 @@ _DISPLAY = {
 
 
 def _key_id(key) -> Optional[str]:
-    """pynput 按键对象 → 稳定标识：``char:x`` 或 ``key:name``；无法识别 → None。"""
+    """pynput 按键对象 → 稳定标识：``char:x`` 或 ``key:name``；无法识别 → None。
+
+    Windows 上 pynput 区分左右修饰键（``ctrl_l``/``ctrl_r``、``alt_l``/…），
+    此处归一化为 ``ctrl``/``alt``/``shift``/``cmd``——否则组合热键的按住
+    集合永远对不上解析出的规格（修「组合按键不生效」）。
+    """
     ch = getattr(key, "char", None)
     if ch is not None:
         return "char:" + ch.lower()
     name = getattr(key, "name", None)
     if name is not None:
+        if name.endswith(("_l", "_r")) and name[:-2] in ("ctrl", "alt",
+                                                         "shift", "cmd"):
+            name = name[:-2]
         return "key:" + name
     return None
 
@@ -270,7 +278,7 @@ if __name__ == "__main__":
     l._on_press(_FakeKey(ch="j"))                       # 目标不符
     assert tg == [1]
     l._on_release(_FakeKey(ch="i"))
-    l._on_press(_FakeKey(ch="i"))                       # 释放后再按 → 再触发
+    l._on_press(_FakeKey(ch="i"))                       # 释放后再按（修饰仍按住）→ 再触发
     assert tg == [1, 1]
     # 按住集合多一个 shift → 不触发
     l._on_press(_FakeKey(name="shift"))
@@ -280,6 +288,24 @@ if __name__ == "__main__":
     l._on_release(_FakeKey(name="shift"))
     l._on_release(_FakeKey(name="alt"))
     l._on_release(_FakeKey(name="ctrl"))
+
+    # ---- Windows 左右修饰键变体（ctrl_l/alt_l/…）→ 归一化后同样命中 ----
+    l, tg = _mk("Ctrl+Alt+I")
+    l._on_press(_FakeKey(name="ctrl_l"))
+    l._on_press(_FakeKey(name="alt_l"))
+    l._on_press(_FakeKey(ch="i"))
+    assert tg == [1]
+    l._on_release(_FakeKey(ch="i"))
+    l._on_release(_FakeKey(name="alt_l"))
+    l._on_release(_FakeKey(name="ctrl_l"))
+    l._on_release(_FakeKey(name="ctrl_r"))              # 未按下过 → 释放无害
+    # Shift+字符：字符带大写 char（'F'）→ 小写归一后命中
+    l, tg = _mk("Shift+F")
+    l._on_press(_FakeKey(name="shift_l"))
+    l._on_press(_FakeKey(ch="F"))
+    assert tg == [1]
+    l._on_release(_FakeKey(ch="F"))
+    l._on_release(_FakeKey(name="shift_l"))
 
     # ---- 单字符（旧格式）：按下触发；按着 Ctrl 按 f 不再触发（严格匹配） ----
     l, tg = _mk("f")
@@ -292,11 +318,14 @@ if __name__ == "__main__":
     l._on_release(_FakeKey(name="ctrl"))
     assert tg == [1], tg
 
-    # ---- 单独修饰键：无冲突按下即触发；有冲突（defer）按下不触发 ----
+    # ---- 单独修饰键：无冲突按下即触发（含左 Ctrl 变体）；有冲突（defer）按下不触发 ----
     l, tg = _mk("Ctrl")
     l._on_press(_FakeKey(name="ctrl"))
     assert tg == [1], tg
     l._on_release(_FakeKey(name="ctrl"))
+    l._on_press(_FakeKey(name="ctrl_l"))
+    assert tg == [1, 1], tg
+    l._on_release(_FakeKey(name="ctrl_l"))
 
     l, tg = _mk("Ctrl", defer=True)
     assert l.defer_lone_modifier is True
