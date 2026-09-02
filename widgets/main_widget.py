@@ -34,7 +34,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from model.执行.hotkey import HotkeyListener
+from model.执行.hotkey import HotkeyListener, normalize_hotkey, parse_hotkey
 from model.工程.kscp_package import KscpPackage
 from model.log_model import LogLevel, LogModel
 from model.步骤.step import StepStatus
@@ -82,8 +82,33 @@ def _make_step_runner(store, only_path=None, stop_mode="after_step"):
     return StepRunner(store, only_path, stop_mode)
 
 
-def _make_hotkey_listener(hotkey, on_toggle):
-    return HotkeyListener(hotkey, on_toggle)
+def _make_hotkey_listener(hotkey, on_toggle, defer_lone_modifier=False):
+    return HotkeyListener(hotkey, on_toggle, defer_lone_modifier)
+
+
+def _lone_mod_deferred(hotkey: str, all_hotkeys: List[str]) -> bool:
+    """单独修饰键热键是否存在前缀冲突 → 是否延迟到释放判定（组合优先）。
+
+    仅当本热键是单独修饰键（Ctrl/Alt/Shift/Cmd），且**其他**热键中存在
+    含该修饰键的非修饰键热键（如 Ctrl+Alt+I）时返回 True。
+    """
+    try:
+        mods, target = parse_hotkey(hotkey)
+    except ValueError:
+        return False
+    if target not in {"key:ctrl", "key:alt", "key:shift", "key:cmd"}:
+        return False
+    for other in all_hotkeys:
+        if other == hotkey:
+            continue
+        try:
+            omods, otarget = parse_hotkey(other)
+        except ValueError:
+            continue
+        if otarget not in {"key:ctrl", "key:alt", "key:shift", "key:cmd"} \
+                and target in omods:
+            return True
+    return False
 
 
 # ================================================================
@@ -250,11 +275,15 @@ class MainWindow(QMainWindow):
         sl_mgr = self._managers[0]
         assert isinstance(sl_mgr, StepListManagementTree)
         hotkeys = self._page_hotkeys()
+        all_hks = [v for v in hotkeys.values() if v]
         for page in sl_mgr.page_store.page_names():
             hk = hotkeys.get(page, "")
             if hk:
+                # 单独修饰键（Ctrl）与含该修饰键的组合（Ctrl+Alt+I）并存 →
+                # 组合优先：修饰键热键延迟到释放判定
                 self._hotkey_listeners[page] = _make_hotkey_listener(
-                    hk, lambda p=page: self._exec_bridge.hotkey_toggle.emit(p))
+                    hk, lambda p=page: self._exec_bridge.hotkey_toggle.emit(p),
+                    _lone_mod_deferred(hk, all_hks))
                 self._hotkey_listeners[page].start()
         LogModel.instance().info(
             "执行列表热键监听已启动：%s"
@@ -506,10 +535,12 @@ class MainWindow(QMainWindow):
 
     def _on_page_added(self, page: str) -> None:
         """新增页：按 executor.json 映射为其建常驻监听（无热键则跳过）。"""
-        hk = self._page_hotkeys().get(page, "")
+        hotkeys = self._page_hotkeys()
+        hk = hotkeys.get(page, "")
         if hk:
             self._hotkey_listeners[page] = _make_hotkey_listener(
-                hk, lambda p=page: self._exec_bridge.hotkey_toggle.emit(p))
+                hk, lambda p=page: self._exec_bridge.hotkey_toggle.emit(p),
+                _lone_mod_deferred(hk, [v for v in hotkeys.values() if v]))
             self._hotkey_listeners[page].start()
         self._update_exec_button()
 
@@ -623,11 +654,13 @@ class MainWindow(QMainWindow):
         self._apply_settings(dlg.hotkeys(), dlg.stop_mode())
 
     def _page_hotkeys(self) -> Dict[str, str]:
-        """当前各页热键映射（页名 → 单字符或空串）。
+        """当前各页热键映射（页名 → 规范化热键规格或空串）。
 
         executor.json v2 读 ``pages``；旧格式（无 pages）→ 顶层 ``hotkey``
         归第一页、其余页空；文件缺失/损坏 → 第一页默认 `` ` ``（旧单页 UX），
-        其余页空。未知页忽略；非法值按空处理。
+        其余页空。未知页忽略；非法值（不可解析）按空处理。取值经
+        :func:`model.执行.hotkey.normalize_hotkey` 规范化（单字符/命名键/
+        组合/单独修饰键均支持）。
         """
         result: Dict[str, str] = {}
         if not self._managers:
@@ -652,11 +685,13 @@ class MainWindow(QMainWindow):
         if data is not None and isinstance(data.get("pages"), dict):
             for p in pages:
                 hk = data["pages"].get(p)
-                result[p] = hk if isinstance(hk, str) and len(hk) == 1 else ""
+                result[p] = normalize_hotkey(hk) \
+                    if isinstance(hk, str) and normalize_hotkey(hk) else ""
         else:
             # 旧格式（无 pages）：顶层 hotkey 归第一页，其余页空；非法/缺失 → 默认 "`"
-            legacy = data.get("hotkey") if data is not None else None
-            first = legacy if isinstance(legacy, str) and len(legacy) == 1 else "`"
+            legacy = normalize_hotkey(data.get("hotkey")) \
+                if data is not None else None
+            first = legacy or "`"
             for i, p in enumerate(pages):
                 result[p] = first if i == 0 else ""
         if data is None:
@@ -1355,8 +1390,9 @@ class DemoStep(Step):
     # ---- 执行器接线：按钮/状态栏/锁定/热键 toggle 逻辑（多页） ----
     # 冒烟不得真实全局监听：桩替换监听工厂（__main__ 模块命名空间内直接改全局）
     class _StubListener:
-        def __init__(self, hotkey, on_toggle):
+        def __init__(self, hotkey, on_toggle, defer_lone_modifier=False):
             self.hotkey, self.on_toggle = hotkey, on_toggle
+            self.defer = defer_lone_modifier
             self.started = False
 
         def start(self):
@@ -1366,7 +1402,7 @@ class DemoStep(Step):
             self.started = False
 
     _orig_mk_listener = _make_hotkey_listener
-    _make_hotkey_listener = lambda h, cb: _StubListener(h, cb)
+    _make_hotkey_listener = lambda h, cb, defer=False: _StubListener(h, cb, defer)
     try:
         win_exec = MainWindow()
         win_exec._open_package(KscpPackage.create_empty(), None)
@@ -1589,8 +1625,36 @@ class DemoStep(Step):
             win_mp._open_package(pkg_mp, None)
             app.processEvents()
             assert set(win_mp._hotkey_listeners) == {"执行列表1", "执行列表2"}
-            assert win_mp._hotkey_listeners["执行列表1"].hotkey == "f"
-            assert win_mp._hotkey_listeners["执行列表2"].hotkey == "g"
+            assert win_mp._hotkey_listeners["执行列表1"].hotkey == "F"
+            assert win_mp._hotkey_listeners["执行列表2"].hotkey == "G"
+
+            # ---- 组合/命名键/单独修饰键热键：规范化 + 前缀冲突延迟判定 ----
+            pkg_hk = KscpPackage.create_empty()
+            pkg_hk.write_file(
+                "executor.json",
+                json.dumps({"hotkey": "F1", "stop_mode": "after_step",
+                            "pages": {"执行列表1": "f1", "执行列表2": "ctrl+alt+i",
+                                      "执行列表3": "ctrl"}},
+                           ensure_ascii=False).encode("utf-8"))
+            slm_hk = StepListManagementTree(pkg_hk, VariableTree.create_empty())
+            slm_hk.page_store.add_page("执行列表2")
+            slm_hk.page_store.add_page("执行列表3")
+            slm_hk._save_store()
+            win_hk = MainWindow()
+            win_hk._open_package(pkg_hk, None)
+            app.processEvents()
+            assert win_hk._page_hotkeys() == {
+                "执行列表1": "F1", "执行列表2": "Ctrl+Alt+I", "执行列表3": "Ctrl"}
+            assert win_hk._hotkey_listeners["执行列表1"].hotkey == "F1"
+            assert win_hk._hotkey_listeners["执行列表1"].defer is False
+            assert win_hk._hotkey_listeners["执行列表2"].hotkey == "Ctrl+Alt+I"
+            # Ctrl 与 Ctrl+Alt+I 并存 → 前缀冲突 → Ctrl 延迟到释放判定（组合优先）
+            assert win_hk._hotkey_listeners["执行列表3"].defer is True
+            # _lone_mod_deferred 纯函数语义
+            assert _lone_mod_deferred("Ctrl", ["Ctrl", "Ctrl+Alt+I"]) is True
+            assert _lone_mod_deferred("Ctrl", ["Ctrl", "Alt+I"]) is False
+            assert _lone_mod_deferred("F1", ["F1", "Ctrl"]) is False
+            assert _lone_mod_deferred("Ctrl", ["Ctrl", "Ctrl"]) is False
             # 未待命 → 热键忽略；两页分别待命后各自触发
             win_mp._exec_bridge.hotkey_toggle.emit("执行列表1")
             assert "执行列表1" not in win_mp._runners
@@ -1646,7 +1710,7 @@ class DemoStep(Step):
     assert not win_exec._settings_btn.isCheckable()
     # 本段 _apply_settings 会重建监听 → 重新桩替换监听工厂（冒烟不得真实全局监听）
     _orig_mk_listener0 = _make_hotkey_listener
-    _make_hotkey_listener = lambda h, cb: _StubListener(h, cb)
+    _make_hotkey_listener = lambda h, cb, defer=False: _StubListener(h, cb, defer)
     try:
         # _apply_settings：只写工程包 executor.json（不碰 setting.json——executor.json 唯一来源）
         win_exec._apply_settings({"执行列表1": "g"}, "immediate")
@@ -1655,8 +1719,8 @@ class DemoStep(Step):
         assert data == {"hotkey": "g", "stop_mode": "immediate",
                         "pages": {"执行列表1": "g"}}, data
         # _page_hotkeys 读回：v2 pages 映射；保存后监听已按新热键重建
-        assert win_exec._page_hotkeys() == {"执行列表1": "g"}
-        assert win_exec._hotkey_listeners["执行列表1"].hotkey == "g"
+        assert win_exec._page_hotkeys() == {"执行列表1": "G"}
+        assert win_exec._hotkey_listeners["执行列表1"].hotkey == "G"
         # _current_stop_mode：立即停止 → 停止方式提示文案随之变化
         # （STOPPING 状态栏文案按 runner 实际状态刷新，已在多页假 runner 段验证）
         assert win_exec._current_stop_mode() == "immediate"
@@ -1669,7 +1733,7 @@ class DemoStep(Step):
             win_exec._package.write_file(
                 "executor.json", b'{"hotkey": "g"}')
         # 旧格式（无 pages）→ 顶层 hotkey 归第一页；无 stop_mode → 静默回退 after_step
-        assert win_exec._page_hotkeys() == {"执行列表1": "g"}
+        assert win_exec._page_hotkeys() == {"执行列表1": "G"}
         assert win_exec._current_stop_mode() == "after_step"
         win_exec._package.write_file(
             "executor.json",
