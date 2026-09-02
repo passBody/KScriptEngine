@@ -168,5 +168,20 @@ if __name__ == "__main__":
     assert isinstance(m2, MultiClick)
     assert m2.io.to_format_string() == m.io.to_format_string()
 
+    # ---- 中断 True 分支：等待中被立即停止 → 打断睡眠、不再点击剩余点 ----
+    # 用真实 interruptible_sleep + 线程本地登记事件（复现执行器「立即停止」路径）
     _mod.interruptible_sleep = _orig_sleep
+    import threading as _th
+    import model.执行.run_interrupt as _ri
+    called.clear()
+    _ev = _th.Event()
+    _ri.set_stop_event(_ev)
+    try:
+        _ev.set()                                   # 停止已请求 → 首点后的等待立即被打断
+        m.io.change_value("input", 0, "100,200;300,400")
+        m.io.change_value("input", 1, "5")
+        assert m.do() == 1
+        assert called == [(100.0, 200.0, None)], called   # 只点了第一点，剩余被跳过
+    finally:
+        _ri.clear_stop_event(_ev)
     print("MultiClick smoke OK")

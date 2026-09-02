@@ -90,3 +90,36 @@ class PointTimeline:
 
     def __repr__(self) -> str:
         return "PointTimeline(%r)" % (self.items(),)
+
+
+# ================================================================
+# 冒烟演示：直接 ``python -m model.执行.point_timeline`` 运行
+# ================================================================
+if __name__ == "__main__":
+    import time as _t
+
+    tl = PointTimeline()
+    assert not tl and len(tl) == 0
+    tl.add(1, 2)                       # 首点间隔恒 0
+    assert tl.points == [(1, 2)] and tl.waits == [0.0]
+    _t.sleep(0.01)
+    tl.add(3, 4)                       # 第二点间隔 ≥ 睡眠时长
+    assert tl.waits[1] >= 0.01
+    assert tl.items() == [((1, 2), tl.waits[0]), ((3, 4), tl.waits[1])]
+    assert [p for p, w in tl] == [(1, 2), (3, 4)]
+    assert tl[0] == ((1, 2), 0.0) and tl[1][0] == (3, 4)
+    # undo：移除末点 + 计时归零（下一个点间隔从撤销起算）
+    assert tl.undo() == (3, 4)
+    assert len(tl) == 1
+    _t.sleep(0.01)
+    tl.add(5, 6)
+    assert tl.waits[1] >= 0.01        # 从 undo 时刻起算（非从第二个点起算）
+    # undo 空 → None；clear 清空并重置计时
+    tl.clear()
+    assert not tl and tl.undo() is None
+    tl.add(7, 8)
+    assert repr(tl) == "PointTimeline([((7, 8), 0.0)])"
+    # 负索引与 bool
+    assert tl[-1] == ((7, 8), 0.0) and bool(tl)
+
+    print("PointTimeline smoke OK")

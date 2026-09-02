@@ -113,4 +113,25 @@ if __name__ == "__main__":
     t2.io.change_value("input", 0, "0.05")
     assert t2.do() == 1 and t2.status is StepStatus.FINISHED
 
+    # ---- 中断 True 分支：登记停止事件并置位 → 秒级延时被立即打断 ----
+    # 真实 interruptible_sleep + 线程本地事件（复现执行器「立即停止」路径）
+    import threading as _th
+    import model.执行.run_interrupt as _ri
+    _ev = _th.Event()
+    _ri.set_stop_event(_ev)
+    try:
+        _ev.set()
+        t.io.change_value("input", 0, "5")
+        _t0 = time.monotonic()
+        assert t.do() == 1
+        assert time.monotonic() - _t0 < 1.0      # 5s 延时远未睡满即被打断
+    finally:
+        _ri.clear_stop_event(_ev)
+    # 复位后恢复正常睡眠（0.05 睡满）
+    t.io.change_value("input", 0, "0.05")
+    _t0 = time.monotonic()
+    assert t.do() == 1
+    assert time.monotonic() - _t0 >= 0.05
+    assert t.status is StepStatus.FINISHED
+
     print("TimeDelay smoke OK")

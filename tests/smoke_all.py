@@ -28,7 +28,7 @@ MODULES = [
     "actions.输入.鼠标滚轮", "actions.输入.鼠标拖动", "actions.输入.多次点击",
     "libs.key_control.base",
     "model.执行.hotkey", "model.工程.kscp_package", "model.log_model", "model.工程.path_util",
-    "model.变量.project_variable", "model.执行.run_interrupt", "model.工程.settings",
+    "model.变量.project_variable", "model.执行.point_timeline", "model.执行.run_interrupt",
     "model.步骤.step", "model.步骤.step_io",
     "model.步骤.step_list", "model.步骤.step_list_store", "model.步骤.step_manager",
     "model.步骤.step_page_store", "model.执行.step_runner", "model.变量.variable_tree",
@@ -51,6 +51,48 @@ MODULES = [
 CHECKS = [
     ["main.py", "sample.kscp", "--check"],
 ]
+
+
+def _check_sample_templates() -> int:
+    """sample.kscp 内打包的 actions 模板须与源码逐字节一致。
+
+    防「修了源码模板、忘了重打包 sample.kscp」（曾出现：偏移.py 旧 bug 版、
+    鼠标点击旧提示文案残留在示例工程内）。包骨架（__init__/__main__）不打包、
+    不在比对列；源码中存在而包内没有的 .py 同样报（防漏打包模板）。
+    """
+    import os
+    import zipfile
+
+    pkg = ROOT / "sample.kscp"
+    try:
+        with zipfile.ZipFile(pkg) as z:
+            names = z.namelist()
+        diffs = []
+        for n in names:
+            if not n.startswith("actions/") or not n.endswith(".py"):
+                continue
+            src = ROOT / n
+            if not src.is_file():
+                continue                      # 包骨架（__init__ 等）不在比对列
+            with zipfile.ZipFile(pkg) as z:
+                with open(src, "rb") as f:
+                    if f.read() != z.read(n):
+                        diffs.append(n)
+        for dirpath, _dirs, files in os.walk(str(ROOT / "actions")):
+            for fn in files:
+                if not fn.endswith(".py") or fn.startswith("__"):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, fn),
+                                      str(ROOT / "actions"))
+                n = ("actions/" + rel).replace(os.sep, "/")
+                if n not in names:
+                    diffs.append("源码有而包内无: " + n)
+    except OSError as e:
+        _safe_print("FAIL: 无法读取 sample.kscp: %s" % e)
+        return 1
+    for n in diffs:
+        _safe_print("FAIL: sample.kscp 模板与源码不一致: %s" % n)
+    return 1 if diffs else 0
 
 
 def _safe_print(text: str) -> None:
@@ -86,10 +128,12 @@ def main() -> int:
         failed += 1 if _run(["-m", mod], 120) != 0 else 0
     for args in CHECKS:
         failed += 1 if _run(args, 120) != 0 else 0
+    failed += _check_sample_templates()      # sample.kscp 模板与源码一致性（本进程内比字节）
+    n_checks = len(CHECKS) + 1
     if failed:
         _safe_print("\n%d FAILED" % failed)
         return 1
-    _safe_print("ALL %d SMOKE + %d CHECKS OK" % (len(MODULES), len(CHECKS)))
+    _safe_print("ALL %d SMOKE + %d CHECKS OK" % (len(MODULES), n_checks))
     return 0
 
 
