@@ -9,16 +9,10 @@
 from dataclasses import dataclass
 from model.步骤.step import Step
 
-from libs.key_control import InputControl
 from model.log_model import LogModel
-from pynput import mouse
-
+from tools.mouse_controller import mouse_ctrl
 
 __all__ = ["MousePress"]
-
-def _new_control() -> InputControl:
-    """创建输入设备控制器（冒烟测试替换为桩，避免真实鼠标移动）。"""
-    return InputControl()
 
 @dataclass
 class MousePressInput:
@@ -47,9 +41,8 @@ class MousePress(Step):
             if mode not in [1,2,3]: mode = 0
         except:
             mode = 0
-        button = [mouse.Button.unknown, mouse.Button.left, mouse.Button.middle, mouse.Button.right][mode]
-        _new_control().mouse_control.press(button)  # 1:left | 2:middle | 3:right
         press_name = ['无效按键', '左键', '中键', '右键'][mode]
         _info = f'控制鼠标按下{press_name}'
         LogModel.instance().info(_info)
+        mouse_ctrl.press(['无效按键', 'left', 'middle', 'right'][mode])
         return 1

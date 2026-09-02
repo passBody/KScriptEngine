@@ -11,7 +11,7 @@ from model.步骤.step import Step
 
 from libs.key_control import InputControl
 from model.log_model import LogModel
-from pynput import mouse
+from tools.mouse_controller import mouse_ctrl
 
 
 __all__ = ["MouseRelease"]
@@ -47,9 +47,8 @@ class MouseRelease(Step):
             if mode not in [1,2,3]: mode = 0
         except:
             mode = 0
-        button = [mouse.Button.unknown, mouse.Button.left, mouse.Button.middle, mouse.Button.right][mode]
-        _new_control().mouse_control.release(button)  # 1:left | 2:middle | 3:right
         release_name = ['无效按键', '左键', '中键', '右键'][mode]
         _info = f'控制鼠标松开{release_name}'
         LogModel.instance().info(_info)
+        mouse_ctrl.release(['无效按键', 'left', 'middle', 'right'][mode])
         return 1
