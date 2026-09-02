@@ -30,8 +30,8 @@ from PyQt5.QtCore import QObject, Qt, QSize, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon
 from PyQt5.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel,
-    QMainWindow, QMenu, QMessageBox, QSplitter, QStackedWidget, QToolButton,
-    QWidget,
+    QMainWindow, QMenu, QMessageBox, QSplitter, QStackedWidget, QSystemTrayIcon,
+    QToolButton, QWidget,
 )
 
 from model.执行.hotkey import HotkeyListener, normalize_hotkey, parse_hotkey
@@ -163,6 +163,7 @@ class MainWindow(QMainWindow):
         self._tree_stack: Optional[QStackedWidget] = None
         self._preview_stack: Optional[QStackedWidget] = None
         self._tree_panel: Optional[TitledPanel] = None
+        self._build_tray()
 
         self._build_toolbar()
         self._setup_statusbar()
@@ -306,19 +307,48 @@ class MainWindow(QMainWindow):
             self._minimize_listener.stop()
             self._minimize_listener = None
 
-    # ---- 最小化（按钮 + 全局热键） ----
+    # ---- 最小化至托盘（按钮 + 托盘图标 + 全局热键） ----
+    def _build_tray(self) -> None:
+        """系统托盘图标：单击/双击恢复窗口；右键菜单「显示主窗口/退出」。"""
+        self._tray = QSystemTrayIcon(QIcon(_ICON_PATH), self)
+        self._tray.setToolTip("KScript")
+        menu = QMenu()
+        a_restore = menu.addAction("显示主窗口")
+        a_restore.triggered.connect(self._restore_from_tray)
+        a_quit = menu.addAction("退出")
+        a_quit.triggered.connect(
+            lambda: QApplication.instance().quit() if QApplication.instance() else None)
+        self._tray.setContextMenu(menu)
+        self._tray.activated.connect(self._on_tray_activated)
+        self._tray.show()
+
+    def _hide_to_tray(self) -> None:
+        """隐藏主窗口到托盘（托盘图标常驻）。"""
+        self.hide()
+        if self._tray.isSystemTrayAvailable():
+            self._tray.showMessage("KScript", "已最小化至托盘（点击图标或按热键恢复）",
+                                   QSystemTrayIcon.Information, 2000)
+
+    def _restore_from_tray(self) -> None:
+        """从托盘恢复主窗口并置顶。"""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_tray_activated(self, reason) -> None:
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self._restore_from_tray()
+
     def _on_minimize_clicked(self) -> None:
-        """活动栏最小化按钮：点击进入最小化状态。"""
-        self.showMinimized()
+        """活动栏最小化按钮：点击最小化至托盘。"""
+        self._hide_to_tray()
 
     def _on_minimize_toggle(self) -> None:
-        """最小化热键（GUI 线程，经桥 queued）：最小化 ↔ 还原并置顶。"""
-        if self.isMinimized():
-            self.showNormal()
-            self.raise_()
-            self.activateWindow()
+        """最小化热键（GUI 线程，经桥 queued）：最小化至托盘 ↔ 恢复并置顶。"""
+        if self.isVisible():
+            self._hide_to_tray()
         else:
-            self.showMinimized()
+            self._restore_from_tray()
 
     def _minimize_hotkey(self) -> str:
         """最小化热键（executor.json minimize_hotkey）；缺失/非法 → ""（不绑定）。"""
@@ -1472,11 +1502,19 @@ class DemoStep(Step):
         for _b in (win_exec._exec_btn, win_exec._settings_btn, win_exec._min_btn):
             assert _b.size() == QSize(48, 48), _b.size()
             assert _b.iconSize() == QSize(36, 36), _b.iconSize()
-        # 最小化按钮：点击 → 进入最小化状态（再还原，不影响后续用例）
+        # 最小化按钮：点击 → 隐藏到托盘（再恢复，不影响后续用例）
         win_exec._min_btn.click()
-        assert win_exec.isMinimized()
-        win_exec.showNormal()
-        assert not win_exec.isMinimized()
+        assert not win_exec.isVisible()
+        win_exec._restore_from_tray()
+        assert win_exec.isVisible()
+        # 托盘图标：常驻 + 右键菜单（显示主窗口/退出）+ 双击恢复
+        assert win_exec._tray is not None
+        assert [a.text() for a in win_exec._tray.contextMenu().actions()
+                if not a.isSeparator()] == ["显示主窗口", "退出"]
+        win_exec._hide_to_tray()
+        assert not win_exec.isVisible()
+        win_exec._on_tray_activated(QSystemTrayIcon.DoubleClick)
+        assert win_exec.isVisible()
         # 点击执行按钮 → **全部页**进入待命（按钮绿），不直接执行步骤
         win_exec._exec_btn.click()
         assert win_exec._armed is True
@@ -1784,9 +1822,9 @@ class DemoStep(Step):
         assert isinstance(win_exec._minimize_listener, _StubListener)
         assert win_exec._minimize_listener.hotkey == "F2"
         win_exec._exec_bridge.minimize_toggle.emit()      # 模拟最小化热键按下
-        assert win_exec.isMinimized()
+        assert not win_exec.isVisible()                   # 隐藏到托盘
         win_exec._exec_bridge.minimize_toggle.emit()      # 再按 → 还原
-        assert not win_exec.isMinimized()
+        assert win_exec.isVisible()
         # _current_stop_mode：立即停止 → 停止方式提示文案随之变化
         # （STOPPING 状态栏文案按 runner 实际状态刷新，已在多页假 runner 段验证）
         assert win_exec._current_stop_mode() == "immediate"
