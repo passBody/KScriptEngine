@@ -16,10 +16,6 @@ from tools.mouse_controller import mouse_ctrl
 
 __all__ = ["MouseRelease"]
 
-def _new_control() -> InputControl:
-    """创建输入设备控制器（冒烟测试替换为桩，避免真实鼠标移动）。"""
-    return InputControl()
-
 @dataclass
 class MouseReleaseInput:
     """输入：松开指定的鼠标键 -> 1:left | 2:middle | 3:right"""
