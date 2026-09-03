@@ -8,6 +8,7 @@ dependencies = [
     # PyQt5-Qt5 5.15.19 无 Windows wheel（uv 会解析到它导致装不上）；锁定 5.15.2
     "PyQt5-Qt5==5.15.2",
     "pynput>=1.7",
+    "pyperclip>=1.11.0",
 ]
 
 [project.optional-dependencies]
