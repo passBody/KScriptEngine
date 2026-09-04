@@ -84,3 +84,22 @@ StepCard[selected="true"] {
 
 #btnActive[active="true"]  { background: rgba(84, 165, 120, 0.92); }
 #btnActive[active="false"] { background: rgba(160, 166, 176, 0.9); }
+
+/* io 区变量选择按钮（输入/输出行的「…」与资源选择钮，objectName=ioPicker）：
+   白底 + 灰蓝边框，与 io 背景板（rgba(238,242,248)≈#eef2f8）拉开对比——
+   默认 QPushButton 背景近 #f0f0f0，与 io 板色几乎相同 → 按钮不可见。
+   hover/pressed 用应用主色蓝（#4a80d8 系）。经 StepCard 样式表级联到
+   QScrollArea 内的 io 子控件（滚动区自带样式表不阻断父级 QSS）。 */
+#ioPicker {
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid rgba(128, 148, 178, 0.7);
+    border-radius: 4px;
+    padding: 2px 6px;
+}
+#ioPicker:hover {
+    background: rgba(234, 241, 251, 0.98);
+    border-color: rgba(72, 128, 220, 0.85);
+}
+#ioPicker:pressed {
+    background: rgba(214, 228, 247, 0.98);
+}

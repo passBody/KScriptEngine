@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 from typing import Optional, Tuple
 
-from PyQt5.QtCore import QPoint, Qt, pyqtSignal
+from PyQt5.QtCore import QPoint, QRect, Qt, pyqtSignal
 from PyQt5.QtGui import (
     QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygon,
 )
@@ -87,7 +87,8 @@ def window_size() -> Tuple[int, int]:
 def make_icon(kind: str) -> QIcon:
     """按类别绘制简洁图标：resource=文件夹、variable={ }、step=列表、default=方块。
 
-    exec/settings 为活动栏底部功能按钮绘制，放大到 48px（用户反馈图标太小）。
+    exec/settings/refresh/minimize 为活动栏底部功能按钮绘制，放大到 48px 并统一
+    尺寸（用户反馈图标太小 + 底部四钮图标内容须一致）。
     """
     pm = QPixmap(32, 32)
     pm.fill(Qt.transparent)
@@ -143,13 +144,21 @@ def make_icon(kind: str) -> QIcon:
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#5b7085"))
         p.drawRoundedRect(7, 25, 18, 4, 2, 2)
+    elif kind == "refresh":
+        # 圆弧箭头（刷新语义）：蓝灰圆弧 + 箭头头，与 exec/settings 同为底部功能按钮
+        p.setPen(QPen(QColor("#2b5fa0"), 3, cap=Qt.RoundCap))
+        p.setBrush(Qt.NoBrush)
+        p.drawArc(QRect(6, 6, 20, 20), 30 * 16, 300 * 16)   # 300° 弧，缺口在右上
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#2b5fa0"))
+        p.drawPolygon(QPolygon([QPoint(22, 6), QPoint(28, 12), QPoint(16, 12)]))  # 箭头头
     else:
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#888888"))
         p.drawRoundedRect(5, 5, 22, 22, 4, 4)
     p.end()
-    if kind in ("exec", "settings"):
-        pm = pm.scaled(48, 48, transformMode=Qt.SmoothTransformation)  # 底部功能按钮图标放大
+    if kind in ("exec", "settings", "refresh", "minimize"):
+        pm = pm.scaled(48, 48, transformMode=Qt.SmoothTransformation)  # 底部功能按钮图标放大并统一尺寸
     return QIcon(pm)
 
 
@@ -239,9 +248,9 @@ if __name__ == "__main__":
 
     app = QApplication.instance() or QApplication(sys.argv)
 
-    # make_icon：各类别（含未知回退）生成非空图标；exec/settings 放大 48px
+    # make_icon：各类别（含未知回退）生成非空图标；exec/settings/refresh/minimize 放大 48px
     for kind in ("resource", "variable", "step", "composite", "template",
-                 "exec", "settings", "default", "未知"):
+                 "exec", "settings", "refresh", "minimize", "default", "未知"):
         assert not make_icon(kind).isNull(), kind
     assert make_icon("exec").availableSizes()
 

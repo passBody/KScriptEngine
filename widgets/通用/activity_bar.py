@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from PyQt5.QtCore import QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
@@ -60,11 +60,15 @@ class ActivityBar(QWidget):
         self._buttons.append(btn)
 
     def add_bottom_button(self, name: str, icon: QIcon, on_click,
-                          checkable: bool = False) -> QToolButton:
+                          checkable: bool = False,
+                          alignment: Optional[int] = None) -> QToolButton:
         """底部功能按钮（stretch 之下；``clear()`` 不清除——非管理树切换项）。
 
         ``checkable``：状态按钮（如执行待命态绿色高亮）；瞬时按钮（如设置）
         用 False——否则点击后 checked 样式残留（悬停/按压高亮不退）。
+        ``alignment``：QLayout 对齐位（如 ``Qt.AlignHCenter`` 居中放小于栏宽的
+        按钮；默认 ``None`` = 不指定对齐，按钮靠左）。48×48 按钮填满 48px
+        内容区，对齐无视觉效果；36×36 刷新按钮传 AlignHCenter 才居中。
         """
         btn = QToolButton(self)
         btn.setCheckable(checkable)
@@ -80,7 +84,11 @@ class ActivityBar(QWidget):
             "QToolButton:checked { background:#c8e6c9; }"
             "QToolButton:checked:hover { background:#b7dcba; }")
         btn.clicked.connect(on_click)
-        self._lay.addWidget(btn)                   # stretch 之后 = 栏位最底
+        # 默认无对齐（靠左）；传对齐位则居中/靠右等（PyQt5 addWidget 第三参不收 int 0）
+        if alignment is None:
+            self._lay.addWidget(btn)
+        else:
+            self._lay.addWidget(btn, 0, alignment)   # stretch 之后 = 栏位最底
         self._bottom_buttons.append(btn)
         return btn
 
@@ -134,5 +142,16 @@ if __name__ == "__main__":
     assert len(bar._buttons) == 0
     assert bar._bottom_buttons == [bb, exec_btn]
     bar.set_current_row(0)                # 越界 → 不崩
+
+    # 对齐：默认 0（靠左，36×36 在 48px 内容区贴左）；传 AlignHCenter → 居中
+    from PyQt5.QtCore import Qt as _Qt
+    _c = bar.add_bottom_button("居中", icon, lambda: None, alignment=_Qt.AlignHCenter)
+    _ci = bar._lay.itemAt(bar._lay.count() - 1)
+    assert _ci.widget() is _c
+    assert _ci.alignment() == _Qt.AlignHCenter
+    _d = bar.add_bottom_button("默认", icon, lambda: None)
+    _di = bar._lay.itemAt(bar._lay.count() - 1)
+    assert _di.widget() is _d
+    assert int(_di.alignment()) == 0     # 默认无对齐（Qt.Alignment(0) == 0 在 PyQt5 不成立，取 int 比）
 
     print("ActivityBar smoke OK")

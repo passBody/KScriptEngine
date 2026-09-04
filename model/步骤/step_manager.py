@@ -29,7 +29,7 @@ import importlib.util
 import os
 import sys
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from model.步骤.step import Step
 from model.工程.kscp_package import KscpPackage
@@ -268,7 +268,47 @@ class StepManager:
             return
         self._write_template(target, data, "粘贴模板")
 
-    def copy_source_templates(self, source_dir: str) -> int:
+    def _iter_source_templates(self, source_dir: str):
+        """遍历源 ``actions/`` 文件夹，yield ``(src, rel_dir, label)`` 候选。
+
+        跳过 ``base.py``/``__init__.py``/``__main__.py``/``__pycache__``
+        （包骨架与自检脚本，无步骤类）。遍历顺序与 :meth:`copy_source_templates`
+        一致：``os.walk`` + ``sorted(files)``。``label`` 为相对源目录的正斜杠显示名
+        （如 ``控制流程/延时.py``），供进度回调展示。
+        """
+        for root, dirs, files in os.walk(source_dir):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            for name in sorted(files):
+                if not name.endswith(".py") \
+                        or name in ("base.py", "__init__.py", "__main__.py"):
+                    continue
+                src = os.path.join(root, name)
+                rel_dir = os.path.relpath(root, source_dir)
+                rel_dir = "" if rel_dir == "." else rel_dir.replace("\\", "/")
+                label = (rel_dir + "/" + name) if rel_dir else name
+                yield src, rel_dir, label
+
+    def clear_templates(self) -> None:
+        """删除工程 ``actions/`` 下全部模板 .py（保留 ``__init__/__main__/base`` 包骨架）。
+
+        REPLACE 导入的前置：清空旧模板，使导入后工程模板 = 所选文件夹内容
+        （而非在旧模板基础上累加）。删后 ``load`` 重建空注册表。
+        """
+        for rel in list(self._package.files):
+            if not rel.startswith("actions/") or not rel.endswith(".py"):
+                continue
+            if os.path.basename(rel) in ("__init__.py", "__main__.py", "base.py"):
+                continue
+            try:
+                self._package.remove(rel)
+            except Exception:
+                pass
+        self.load(quiet=True)
+
+    def copy_source_templates(
+            self, source_dir: str,
+            progress_cb: Optional[Callable[[int, int, str], bool]] = None,
+            replace: bool = False) -> int:
         """把源码 ``actions/`` 下 .py 模板按相对目录全部加入工程；返回成功数。
 
         跳过 ``base.py`` / ``__init__.py`` / ``__main__.py`` / ``__pycache__``
@@ -278,19 +318,26 @@ class StepManager:
         ``load`` 摘要与「添加模板成功」info（N 个文件否则刷出 N×2 行）；
         失败/冲突仍记 ERROR，最终成功数由调用方
         （:meth:`widgets.main_widget.MainWindow._on_import`）打一行摘要。
+
+        ``progress_cb(done, total, label) -> bool``：每导入一个文件**前**调一次，
+        ``done`` 为 1 基序号（第几个）、``total`` 为候选总数、``label`` 为显示名；
+        返回 False 中止循环（已导入文件保留）。``None``（默认）= 无进度、不可取消，
+        行为与未加参数时完全一致。
+
+        ``replace=True``：先 :meth:`clear_templates` 清空旧模板，再拷入——导入后
+        工程模板 = 所选文件夹内容（而非累加）。默认 ``False``（累加，向后兼容）。
         """
+        if replace:
+            self.clear_templates()
+        candidates = list(self._iter_source_templates(source_dir))
+        total = len(candidates)
         added = 0
-        for root, dirs, files in os.walk(source_dir):
-            dirs[:] = [d for d in dirs if d != "__pycache__"]
-            for name in sorted(files):
-                if not name.endswith(".py") \
-                        or name in ("base.py", "__init__.py", "__main__.py"):
-                    continue   # 包骨架/自检脚本（无步骤类）：跳过而非回滚报错
-                src = os.path.join(root, name)
-                rel_dir = os.path.relpath(root, source_dir)
-                rel_dir = "" if rel_dir == "." else rel_dir.replace("\\", "/")
-                if self.add_template(src, rel_dir, quiet=True):
-                    added += 1
+        for i, (src, rel_dir, label) in enumerate(candidates):
+            if progress_cb is not None:
+                if not progress_cb(i + 1, total, label):
+                    break                      # 取消：已导入的保留，跳出
+            if self.add_template(src, rel_dir, quiet=True):
+                added += 1
         return added
 
     # ================================================================
@@ -560,6 +607,46 @@ class NoDcStep(Step):
                    for m in msgs), msgs                              # 失败 ERROR 仍记
         assert not any("__main__.py" in m for m in msgs), msgs       # 骨架跳过不报错
 
+        # ---- copy_source_templates + progress_cb（功能2）----
+        # progress_cb=None 行为不变已由上面 == 2 覆盖；下面测回调与取消
+        src2 = os.path.join(td, "src2")
+        os.makedirs(src2)
+        for nm, nm_lit in (("甲.py", "甲"), ("乙.py", "乙")):
+            with open(os.path.join(src2, nm), "w", encoding="utf-8") as fh:
+                fh.write(LOCAL.replace('name = "本地"', 'name = "%s"' % nm_lit))
+        seen = []
+
+        def cb(done, tot, label):
+            seen.append((done, tot, label))
+            return True
+
+        n = mgr.copy_source_templates(src2, progress_cb=cb)
+        assert n == 2
+        assert len(seen) == 2
+        assert [s[0] for s in seen] == [1, 2]            # done 1 基递增
+        assert all(s[1] == 2 for s in seen)              # total 稳定
+        assert {s[2] for s in seen} == {"甲.py", "乙.py"}    # 顺序不依赖排序
+        assert "甲" in mgr.template_paths() and "乙" in mgr.template_paths()
+        # 取消：done=1 继续（导入排序首者），done=2 中止（不导入第二个）
+        src3 = os.path.join(td, "src3")
+        os.makedirs(src3)
+        for nm, nm_lit in (("丙.py", "丙"), ("丁.py", "丁")):
+            with open(os.path.join(src3, nm), "w", encoding="utf-8") as fh:
+                fh.write(LOCAL.replace('name = "本地"', 'name = "%s"' % nm_lit))
+        seen2 = []
+
+        def cb_cancel(done, _tot, label):
+            seen2.append((done, label))
+            return done == 1                            # 仅第一个继续
+
+        n2 = mgr.copy_source_templates(src3, progress_cb=cb_cancel)
+        assert n2 == 1                                 # 只导入排序首者
+        assert [s[0] for s in seen2] == [1, 2]
+        first_label, second_label = seen2[0][1], seen2[1][1]
+        assert {first_label, second_label} == {"丙.py", "丁.py"}
+        assert first_label[:-3] in mgr.template_paths()       # 第一个被导入
+        assert second_label[:-3] not in mgr.template_paths()  # 第二个被取消
+
     # ---- 移动 / 分组操作 / 模板类访问（步骤管理树支持） ----
     # move_template：顶层 → 子目录成功
     mgr.move_template("本地", "子目录")
@@ -637,5 +724,32 @@ class NoDcStep(Step):
         raise AssertionError("未知路径应抛 ValueError")
     except ValueError:
         pass
+
+    # ---- clear_templates + copy_source_templates(replace=True)（REPLACE 语义）----
+    # 前面各步累积了多个模板（示例/控制流程/示例/缺容器/本地/甲/乙/丙…）
+    assert len(mgr.template_paths()) > 1
+    mgr.clear_templates()
+    assert mgr.template_paths() == []                    # 全清空
+    assert not any(f.startswith("actions/") and f.endswith(".py")
+                   for f in pkg.files)                  # 无模板 .py 残留
+    # replace=True：清空 + 拷入新模板；结束后注册表 = 仅新导入者（旧的全无）
+    with tempfile.TemporaryDirectory() as _tdr:
+        for _nm, _lit in (("戊.py", "戊"), ("己.py", "己")):
+            with open(os.path.join(_tdr, _nm), "w", encoding="utf-8") as _fh:
+                _fh.write(GOOD.replace('name = "示例"', 'name = "%s"' % _lit))
+        _seen_r = []
+
+        def _cb_r(_done, _tot, _label):
+            _seen_r.append((_done, _tot, _label))
+            return True
+
+        _n_r = mgr.copy_source_templates(_tdr, progress_cb=_cb_r, replace=True)
+        assert _n_r == 2
+        assert [s[0] for s in _seen_r] == [1, 2]
+        assert all(s[1] == 2 for s in _seen_r)
+        assert {s[2] for s in _seen_r} == {"戊.py", "己.py"}
+    assert set(mgr.template_paths()) == {"戊", "己"}       # 仅新导入；旧的全清
+    assert "示例" not in mgr.template_paths()
+    assert "本地" not in mgr.template_paths()
 
     print("StepManager smoke OK")

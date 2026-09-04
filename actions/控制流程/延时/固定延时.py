@@ -43,7 +43,7 @@ class TimeDelayOutput:
 class TimeDelay(Step):
     """延时步骤：用于延时（单位s）。"""
 
-    name = "延时"
+    name = "固定延时"
     description = "用于延时（单位s）"
     input_class = TimeDelayInput
     output_class = TimeDelayOutput

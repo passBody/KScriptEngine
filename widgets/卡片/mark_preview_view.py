@@ -30,6 +30,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
+from model.执行.point_timeline import PointTimeline
 from model.步骤.step_io import StepIOWidget
 
 __all__ = ["ClickPreviewLabel", "ImagePreviewDialog", "MarkPreviewView",
@@ -198,12 +199,12 @@ class MarkPreviewView(QWidget):
     * ``image_slot``：素材图片输入槽下标。
     * ``mode``：``'dot'`` / ``'rect'`` / ``'dots'``（决定 mark_image 模式与合成样式）。
     * ``read_points``：``() -> List[(x,y)] 或 None``——从输入槽读标注点（预览合成用）。
-    * ``write_points``：``(List[(x,y)]) -> None``——标注完成后把坐标写回输入槽。
+    * ``write_points``：``(Optional[PointTimeline]) -> None``——标注完成后把坐标写回输入槽。
     """
 
     def __init__(self, io: StepIOWidget, image_slot: int, mode: str,
                  read_points: Callable[[], Optional[List[Tuple[int, int]]]],
-                 write_points: Callable[[List[Tuple[int, int]]], None],
+                 write_points: Callable[[Optional[PointTimeline]], None],
                  hint_text: str = "预览图按当前输入参数实时生成；点击缩略图查看大图",
                  mark_button: str = "设置点位",
                  parent: Optional[QWidget] = None) -> None:
@@ -304,14 +305,13 @@ class MarkPreviewView(QWidget):
             return
         from tools.image_marker import mark_image
         try:
-            _, pos = mark_image(data, self._mode)   # 合成图弃用：预览自行合成
+            _, pos_info = mark_image(data, self._mode)   # 合成图弃用：预览自行合成
         except (ValueError, TypeError) as e:
             QMessageBox.warning(None, self.btn_mark.text(), "标注失败：%s" % e)
             return
-        if pos is None or not pos.points:
+        if pos_info is None or not pos_info.points:
             return                                   # 取消 / 尺寸超屏 → 数据不动
-        self._write_points([(int(round(x)), int(round(y)))
-                            for x, y in pos.points])
+        self._write_points(pos_info)
         self._refresh_preview()
 
 
@@ -356,7 +356,7 @@ if __name__ == "__main__":
     view = MarkPreviewView(
         io, image_slot=2, mode="dot",
         read_points=lambda: [(100, 100)],
-        write_points=lambda pts: got_points.extend(pts))
+        write_points=lambda pts: got_points.extend(pts.points))   # pts=PointTimeline（取 .points 列表）
     assert not view.preview_pixmap().isNull()
     assert view.preview_label.pixmap() is not None
     # 默认提示（用户化文案）：不再用难懂的「通过读输入GUI的参数来生成」

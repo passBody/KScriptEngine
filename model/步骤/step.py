@@ -457,6 +457,42 @@ if __name__ == "__main__":
                for x in LogModel.instance().entries)
     assert tree.get("n1").data == 10            # output 未执行，值保持
 
+    # 输出类型不一致且转换失败 → do() 置 ERROR 停步（不静默改变量类型）。
+    # string 槽产出 "abc" 绑 number 变量 n1 → 解析失败 → ValueError → 重抛停步。
+    @dataclass
+    class _NoIn:
+        pass
+
+    @dataclass
+    class _StrOut:
+        s: "string" = ""  # type: ignore
+
+    class _BadConvStep(Step):
+        name = "转换失败步骤"
+        description = ""
+        input_class = _NoIn
+        output_class = _StrOut
+
+        def run(self) -> int:
+            self.outputs.s = "abc"           # 非数字 → number 变量解析失败
+            return 1
+
+    bc = _BadConvStep.create_default(tree, pkg)
+    bc.io.change_value("output", 0, "n1")    # string 槽 → number 变量 n1
+    assert bc.io.is_valid                   # 输出校验只查变量名存在，不查类型
+    assert tree.get("n1").type == "number"
+    LogModel.instance().clear()
+    try:
+        bc.do()
+        raise AssertionError("输出转换失败应重抛（停步）")
+    except ValueError:
+        pass
+    assert bc.status is StepStatus.ERROR
+    assert any("转换失败步骤 执行错误" in x.message and "abc" in x.message
+               for x in LogModel.instance().entries)
+    assert tree.get("n1").type == "number"   # 类型未被改写（危险修复点）
+    assert tree.get("n1").data == 10          # 失败不写，值保持
+
     # run 手动置 ERROR → do() 后状态保持（不覆盖为 FINISHED）
     class _ManErrStep(_StubStep):
         name = "手动错误步骤"

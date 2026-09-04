@@ -30,8 +30,8 @@ from PyQt5.QtCore import QObject, Qt, QSize, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon
 from PyQt5.QtWidgets import (
     QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel,
-    QMainWindow, QMenu, QMessageBox, QSplitter, QStackedWidget, QSystemTrayIcon,
-    QToolButton, QWidget,
+    QMainWindow, QMenu, QMessageBox, QProgressDialog, QSplitter,
+    QStackedWidget, QSystemTrayIcon, QToolButton, QWidget,
 )
 
 from model.执行.hotkey import HotkeyListener, normalize_hotkey, parse_hotkey
@@ -140,6 +140,7 @@ class MainWindow(QMainWindow):
         self._exec_btn: Optional[QToolButton] = None       # 活动栏底部「执行」按钮
         self._settings_btn: Optional[QToolButton] = None   # 活动栏底部「设置」按钮
         self._min_btn: Optional[QToolButton] = None        # 活动栏底部「最小化」按钮
+        self._refresh_btn: Optional[QToolButton] = None   # 活动栏底部「刷新」按钮
         self._minimize_listener: Optional[HotkeyListener] = None   # 最小化热键（全局常驻）
         self._exec_status: Optional[QLabel] = None
         self._exec_bridge = _ExecBridge()
@@ -237,21 +238,66 @@ class MainWindow(QMainWindow):
     def _on_import(self) -> None:
         if self._package is None or self._step_mgr is None:
             return
+        if self._armed or self._any_runner_active():
+            QMessageBox.warning(self, "导入步骤模板", "执行模式中（待命或运行），请先关闭执行模式再导入")
+            return
         folder = QFileDialog.getExistingDirectory(
             self, "导入步骤模板 — 选择 actions 文件夹", "")
         if not folder:
             return
+        # replace 语义：导入将清空现有全部步骤模板、按所选文件夹重建（非累加）
+        if QMessageBox.question(self, "导入步骤模板",
+                "导入将替换工程内全部步骤模板为所选文件夹的内容\n"
+                "（现有模板会被清空，按新文件夹重建）。确定？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
         stree = self._step_mgr.tree_widget()
         assert isinstance(stree, StepTreeWidget)
-        n = stree.import_templates(folder)
+        prog = QProgressDialog("导入步骤模板…", "取消", 0, 1, self)
+        prog.setWindowModality(Qt.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.setValue(0)
+
+        def cb(done: int, tot: int, label: str) -> bool:
+            prog.setRange(0, max(tot, 1))
+            prog.setValue(done)
+            prog.setLabelText("当前: %s" % label)
+            QApplication.processEvents()
+            return not prog.wasCanceled()
+
+        n = stree.import_templates(folder, cb, replace=True)
+        prog.close()
+
         sb = self.statusBar()
         assert sb is not None
-        if n:
+        if prog.wasCanceled() and n > 0:
+            sb.showMessage("已取消，已导入 %d 个步骤模板" % n, 5000)
+            LogModel.instance().warning("导入步骤模板已取消: 已导入 %d 个" % n)
+        elif prog.wasCanceled():
+            sb.showMessage("已取消导入", 5000)
+            LogModel.instance().warning("导入步骤模板已取消")
+        elif n:
             sb.showMessage("已导入 %d 个步骤模板" % n, 5000)
             LogModel.instance().info("导入步骤模板完成: 成功 %d 个" % n)
         else:
             sb.showMessage("没有可导入的步骤模板", 5000)
             LogModel.instance().warning("导入步骤模板: 没有成功导入任何模板（详见日志）")
+
+        if n > 0:
+            self._on_refresh()          # 自动全量重载（=重进界面，步骤对象刷新）
+
+    def _on_refresh(self) -> None:
+        """活动栏「刷新」按钮：重跑 _open_package（=重进界面）。
+
+        重建 StepManager（含新导入模板）+ 全部管理树 + 从 step_list.json 重解码
+        步骤列表（步骤对象随之刷新）+ 重接信号 + 重启热键监听。内存包已写穿，
+        无内存数据丢失；窗口标题/尺寸不变。执行中由按钮禁用规避（见
+        _refresh_exec_status 末尾）。
+        """
+        if self._package is None:
+            return
+        LogModel.instance().info("刷新工程视图")
+        self._open_package(self._package, self._kscp_path)
 
     # ---- 状态栏（环境提示）----
     def _setup_statusbar(self) -> None:
@@ -489,8 +535,13 @@ class MainWindow(QMainWindow):
         return False
 
     def _warn_hotkey_conflicts(self, page: str) -> None:
-        """执行前静态扫描：页内步骤的按键类输入常量与**任何页**热键相同 →
-        warning（模拟按键会被常驻监听器捕获：误启他页 / 自停本页）。
+        """执行前静态扫描：**仅键盘按键类卡片**的「指定按键」输入常量与**任何页**
+        热键相同 → warning（模拟按键会被常驻监听器捕获：误启他页 / 自停本页）。
+
+        输入参数≠要按下的按键：延时毫秒、鼠标坐标/按键（number 槽的 1/2/3）、
+        示例 count 等**非键盘按键卡片**的输入不在检查列——曾误把延时「1」当
+        热键「1」冲突。判定依据 = 输入槽名「指定按键」且类型 ``string``（键盘
+        按下/松开/点击三卡片的按键槽均如此；鼠标同名字段是 number 槽，跳过）。
         引用变量（``{{x}}``）运行时才能知道值，跳过；文档/tooltip 提示兜底。
         """
         if not self._managers:
@@ -510,7 +561,16 @@ class MainWindow(QMainWindow):
             for step in store.get(path).steps:
                 if not step.enabled:
                     continue
-                for v in step.io._input_values:
+                names = step.io._input_names          # 参数名（键盘按键卡片含「指定按键」）
+                types = step.io.input_types
+                if not names:
+                    continue                          # 无签名（占位/基类）→ 不查
+                for i, v in enumerate(step.io._input_values):
+                    # 仅键盘按键类卡片的「指定按键」string 槽 = 真正会模拟按下的键
+                    if i >= len(names) or names[i] != "指定按键":
+                        continue
+                    if i >= len(types) or types[i] != "string":
+                        continue                      # 鼠标同名字段（number）跳过
                     if not isinstance(v, str) or v.startswith("{{"):
                         continue
                     norm = normalize_hotkey(v)
@@ -535,10 +595,14 @@ class MainWindow(QMainWindow):
             self._recompute_lock()
         self._refresh_exec_status()
 
+    def _any_runner_active(self) -> bool:
+        """是否有执行器处于 RUNNING/STOPPING（刷新/导入须避开，避免重载打断运行线程）。"""
+        return any(r.state is not StepRunnerState.READY
+                   for r in self._runners.values())
+
     def _recompute_lock(self) -> None:
         """按活跃执行器集合重算 UI 锁定（任一页非 READY → 锁定；不用加减计数防漏算）。"""
-        active = any(r.state is not StepRunnerState.READY
-                     for r in self._runners.values())
+        active = self._any_runner_active()
         self._set_exec_locked(active)
         self._update_exec_button()
 
@@ -566,6 +630,13 @@ class MainWindow(QMainWindow):
         if others:
             text += "｜另 %d 页执行中" % others
         self._set_exec_status(text)
+        if self._refresh_btn is not None:
+            self._refresh_btn.setEnabled(not self._any_runner_active())
+        if self._manage_btn is not None:
+            # 执行模式（待命/运行）中禁用导入入口：导入会重建模板/管理树，打断监听
+            self._manage_btn.setEnabled(
+                self._package is not None
+                and not armed and not self._any_runner_active())
 
     # ---- 执行期卡片状态刷新（spec §6 组件 6）：步骤状态 → 桥 → 重检卡片颜色 ----
     def _attach_step_hooks(self, page: str) -> None:
@@ -962,7 +1033,9 @@ class MainWindow(QMainWindow):
                 pw.setEnabled(enabled)
         if self._manage_btn is not None:
             # 管理按钮基础态 = 已开包才可用；解锁时不能把它错误启用（未开包场景）
-            self._manage_btn.setEnabled(enabled and self._package is not None)
+            # 执行模式（待命）中禁用导入入口：导入会重建模板/管理树，打断待命监听
+            self._manage_btn.setEnabled(
+                enabled and self._package is not None and not self._armed)
         if self._settings_btn is not None:
             self._settings_btn.setEnabled(enabled)
         for a in (getattr(self, "_a_new", None), getattr(self, "_a_open", None)):
@@ -1120,6 +1193,11 @@ class MainWindow(QMainWindow):
         self._update_exec_button()
         self._settings_btn = self._switcher.add_bottom_button(
             "设置", make_icon("settings"), self._on_settings_clicked)
+        # 刷新与执行/设置/最小化同尺寸（48×48 按钮 + 36×36 图标 + 48px 源图），
+        # 统一 hover 背景大小与图标内容大小（用户反馈：原 36×36 刷新钮 hover 背景
+        # 比其它小、图标也偏小）
+        self._refresh_btn = self._switcher.add_bottom_button(
+            "刷新", make_icon("refresh"), self._on_refresh)
         self._min_btn = self._switcher.add_bottom_button(
             "最小化", make_icon("minimize"), self._on_minimize_clicked)
 
@@ -1258,7 +1336,7 @@ class MainWindow(QMainWindow):
         self._refresh_exec_status()
         self._update_exec_button()
         if self._manage_btn is not None:
-            self._manage_btn.setEnabled(True)
+            self._manage_btn.setEnabled(not self._armed)   # 执行模式中禁用导入入口
         if self._project_widget is None:
             self._project_widget = self._build_project_view()
             self._central.addWidget(self._project_widget)
@@ -1376,6 +1454,29 @@ class DemoStep(Step):
 
     def run(self) -> int:
         self.outputs.total = self.inputs.count * 2
+        return 1
+'''
+    # 键盘按键类卡片模板：唯一输入「指定按键」是 string 槽 = 真正会模拟按下的键
+    # （热键冲突扫描据此识别键盘按键卡片；鼠标同名字段是 number 槽，不查）
+    KEY = '''# -*- coding: utf-8 -*-
+from dataclasses import dataclass
+from model.步骤.step import Step
+
+@dataclass
+class _KeyInput:
+    指定按键: "string" = ""
+
+@dataclass
+class _KeyOutput:
+    pass
+
+class KeyStep(Step):
+    name = "按键"
+    description = "测试按键模板"
+    input_class = _KeyInput
+    output_class = _KeyOutput
+
+    def run(self) -> int:
         return 1
 '''
     tmp = tempfile.mktemp(suffix=".kscp")
@@ -1661,11 +1762,13 @@ class DemoStep(Step):
         assert len(_spy_counts) == 1, _spy_counts      # 日志变更经桥发出
         # 未开包无执行入口——开包后按钮可用
         assert win_exec._exec_btn is not None and win_exec._exec_btn.isEnabled()
-        # 活动栏底部按钮：执行 + 设置 + 最小化存在
+        # 活动栏底部按钮：执行 + 设置 + 刷新 + 最小化存在
         assert win_exec._settings_btn is not None
-        assert len(win_exec._switcher._bottom_buttons) == 3
-        # 图标放大：48×48 按钮 + 36×36 图标（用户反馈图标太小）
-        for _b in (win_exec._exec_btn, win_exec._settings_btn, win_exec._min_btn):
+        assert win_exec._refresh_btn is not None
+        assert len(win_exec._switcher._bottom_buttons) == 4
+        # 图标放大并统一：48×48 按钮 + 36×36 图标 + 48px 源图（四钮大小/图标内容一致）
+        for _b in (win_exec._exec_btn, win_exec._settings_btn,
+                   win_exec._refresh_btn, win_exec._min_btn):
             assert _b.size() == QSize(48, 48), _b.size()
             assert _b.iconSize() == QSize(36, 36), _b.iconSize()
         # 最小化按钮：点击 → 隐藏到托盘（再恢复，不影响后续用例）
@@ -1856,6 +1959,7 @@ class DemoStep(Step):
             # ---- 并发多页：双页工程双监听器 + 独立 toggle + 锁定计数 + 页联动 ----
             pkg_mp = KscpPackage.create_empty()
             pkg_mp.write_file("actions/示例.py", GOOD.encode("utf-8"))
+            pkg_mp.write_file("actions/按键.py", KEY.encode("utf-8"))
             tree_mp = VariableTree.create_empty()
             tree_mp.add("n1", ProjectVariable.create("number", 100, pkg_mp))
             pkg_mp.write_file("variables.json", tree_mp.to_json_bytes())
@@ -1863,8 +1967,11 @@ class DemoStep(Step):
             _s_mp = slm_mp._mgr.create_step("示例")
             _s_mp.io.change_value("input", 0, "5")
             _s_mp.io.change_value("output", 0, "n1")
+            _k_mp = slm_mp._mgr.create_step("按键")
+            _k_mp.io.change_value("input", 0, "5")     # 指定按键占位（有效非冲突值）
             sl_mp1 = StepList.create_empty()
             sl_mp1.add(_s_mp)
+            sl_mp1.add(_k_mp)
             slm_mp.store.add_list("主列表", sl_mp1)
             slm_mp.page_store.add_page("执行列表2")
             slm_mp._save_store()
@@ -1907,14 +2014,25 @@ class DemoStep(Step):
             assert _lone_mod_deferred("Ctrl", ["Ctrl", "Alt+I"]) is False
             assert _lone_mod_deferred("F1", ["F1", "Ctrl"]) is False
             assert _lone_mod_deferred("Ctrl", ["Ctrl", "Ctrl"]) is False
-            # 热键冲突静态扫描：步骤输入常量与热键相同 → warning（执行前提示）
+            # 热键冲突静态扫描：**仅键盘按键类卡片**的「指定按键」输入与热键相同 → warning
+            # 输入参数≠要按下的按键：示例 count（number 槽）即使值同热键也不报警。
             # 注：须改 win_mp 店内的步骤（开包后是反序列化的另一实例）
             LogModel.instance().clear()
-            _wstep = win_mp._managers[0].store.get("主列表").steps[0]
-            _wstep.io.change_value("input", 0, "F")    # 模拟按键类输入常量
+            _steps = win_mp._managers[0].store.get("主列表").steps
+            _kstep = _steps[1]                      # 按键卡片（指定按键 string 槽）
+            _kstep.io.change_value("input", 0, "F")  # 指定按键="F" → 与热键 "F" 冲突
             win_mp._warn_hotkey_conflicts("执行列表1")
             assert any("热键冲突" in e.message for e in LogModel.instance().entries)
-            _wstep.io.change_value("input", 0, "5")    # 还原（避免后续错误扫描拦截）
+            # 非按键类输入（示例 count，number 槽）值同热键 → 不报警（回归：曾误报延时「1」）
+            # 先把按键卡片复原为非冲突值，隔离 count 的影响
+            _kstep.io.change_value("input", 0, "5")
+            _dstep = _steps[0]
+            _dstep.io.change_value("input", 0, "F")  # count="F"（number 槽），值同热键 "F"
+            LogModel.instance().clear()
+            win_mp._warn_hotkey_conflicts("执行列表1")
+            assert not any("热键冲突" in e.message for e in LogModel.instance().entries)
+            # 还原（count="F" 非法会触发后续错误扫描拦截；指定按键保持有效非冲突值）
+            _dstep.io.change_value("input", 0, "5")
             LogModel.instance().clear()
             # 未待命 → 热键忽略；**一次待命全部页生效**后各自触发
             win_mp._exec_bridge.hotkey_toggle.emit("执行列表1")
@@ -2144,5 +2262,89 @@ class DemoStep(Step):
     sl_mgr_e.current_tree().list_selected.emit("坏列表")
     assert not win_e._exec_btn.isEnabled()
     assert win_e._exec_has_errors() is True
+
+    # ---- 功能1：活动栏刷新按钮 ----
+    win2 = MainWindow(tmp)                            # 复用已存盘工程，干净窗口
+    win2.show()
+    assert win2._refresh_btn is not None
+    # 底部按钮顺序：执行 / 设置 / 刷新 / 最小化
+    assert win2._switcher._bottom_buttons == \
+        [win2._exec_btn, win2._settings_btn, win2._refresh_btn, win2._min_btn]
+    # 四钮同尺寸（48×48）：hover 背景大小一致 + 图标内容一致（用户反馈原刷新钮偏小）
+    for _b in win2._switcher._bottom_buttons:
+        assert _b.size() == QSize(48, 48), _b.size()
+        assert _b.iconSize() == QSize(36, 36), _b.iconSize()
+    # 点击刷新 → _open_package 重建（_managers[0] 与 _step_mgr 换新实例）
+    old_sl = win2._managers[0]
+    old_step_mgr = win2._step_mgr
+    win2._on_refresh()
+    assert win2._managers[0] is not old_sl
+    assert win2._step_mgr is not old_step_mgr
+    assert len(win2._managers) == 5                   # 重建后结构不变
+    # 执行中（runner RUNNING）→ 刷新按钮禁用；清空后恢复
+    import types as _types
+    win2._runners.clear()
+    assert win2._any_runner_active() is False
+    assert win2._refresh_btn.isEnabled()
+    win2._runners["别的页"] = _types.SimpleNamespace(state=StepRunnerState.RUNNING)
+    assert win2._any_runner_active() is True
+    win2._refresh_exec_status()
+    assert not win2._refresh_btn.isEnabled()
+    win2._runners.clear()
+    win2._refresh_exec_status()
+    assert win2._refresh_btn.isEnabled()
+
+    # ---- 功能3：执行模式（待命/运行）中禁止导入 ----
+    assert win2._manage_btn.isEnabled()            # 开包后、未待命 → 可用
+    win2._armed = True                              # 进入待命
+    win2._refresh_exec_status()
+    assert not win2._manage_btn.isEnabled()         # 待命 → 管理按钮禁用（导入入口不可用）
+    # _on_import 守卫：待命时直接拦截，不弹文件选择对话框
+    _ged_called = []
+    _orig_ged3 = QFileDialog.getExistingDirectory
+    QFileDialog.getExistingDirectory = lambda *a, **k: (_ged_called.append(1), "")[1]
+    _warn_called = []
+    _orig_warn = QMessageBox.warning
+    QMessageBox.warning = lambda *a, **k: (_warn_called.append(1), QMessageBox.Ok)[1]
+    try:
+        win2._on_import()
+    finally:
+        QFileDialog.getExistingDirectory = _orig_ged3
+        QMessageBox.warning = _orig_warn
+    assert _ged_called == []                         # 守卫先拦截，未进文件选择
+    assert _warn_called == [1]                       # 弹了「执行模式中」警告
+    # 运行中也禁用（runner RUNNING）
+    win2._armed = False
+    win2._runners["别的页"] = _types.SimpleNamespace(state=StepRunnerState.RUNNING)
+    win2._refresh_exec_status()
+    assert not win2._manage_btn.isEnabled()          # 运行中 → 禁用
+    win2._runners.clear()
+    win2._refresh_exec_status()
+    assert win2._manage_btn.isEnabled()              # 停止后 → 恢复
+
+    # ---- 功能2：导入进度条 + 成功后自动刷新（replace 语义）----
+    IMP = GOOD.replace('name = "示例"', 'name = "导入甲"').replace("测试模板", "导入甲")
+    imp_dir = tempfile.mkdtemp(prefix="kscript_imp_")
+    try:
+        with open(os.path.join(imp_dir, "导入甲.py"), "w", encoding="utf-8") as fh:
+            fh.write(IMP)
+        _orig_ged = QFileDialog.getExistingDirectory
+        _orig_q = QMessageBox.question
+        QFileDialog.getExistingDirectory = lambda *a, **k: imp_dir
+        QMessageBox.question = lambda *a, **k: QMessageBox.Yes   # 自动确认 replace
+        pre_import_sl = win2._managers[0]
+        try:
+            win2._on_import()
+        finally:
+            QFileDialog.getExistingDirectory = _orig_ged
+            QMessageBox.question = _orig_q
+        # 自动刷新：_managers[0] 又换新；replace 后仅新模板、旧模板已清
+        assert win2._managers[0] is not pre_import_sl
+        _new_mgr = win2._managers[0]._mgr
+        assert "导入甲" in _new_mgr.template_paths()
+        assert "示例" not in _new_mgr.template_paths()    # replace：旧模板已清空
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(imp_dir, ignore_errors=True)
 
     print("MainWindow smoke OK")

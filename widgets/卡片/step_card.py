@@ -448,6 +448,16 @@ if __name__ == "__main__":
     assert not _cm._io_scroll.viewport().autoFillBackground()
     assert "transparent" in _cm._io_scroll.viewport().styleSheet()
     assert "border-radius: 10px" in _cm._io_scroll.styleSheet()
+    # io 选择按钮（objectName=ioPicker）：cards.qss 的 #ioPicker 规则经卡片样式表
+    # 级联到 QScrollArea 内子控件——背景为白（与 io 板色 #eef2f8 拉开对比），
+    # 非默认按钮灰（默认 QPushButton 背景近同色 → 按钮不可见，故加规则）
+    from PyQt5.QtWidgets import QPushButton as _QPB
+    _picks = [b for b in _cm.findChildren(_QPB) if b.objectName() == "ioPicker"]
+    assert _picks, "多参数步骤应含 io 选择按钮"
+    _default_bg = _QPB().palette().color(_QPB().backgroundRole()).name()
+    for _b in _picks:
+        _bg = _b.palette().color(_b.backgroundRole()).name()
+        assert _bg != _default_bg, (_bg, _default_bg)   # 级联生效：非默认灰
     _cm.close()
 
     # ---- I-2：picker 包装链扁平（_kscript_orig 回溯计数 = 1，重建不累积） ----

@@ -212,9 +212,17 @@ class StepTreeWidget(QTreeWidget):
             self._update_panel(self._current_path())
         return self._info_panel
 
-    def import_templates(self, source_dir: str) -> int:
-        """把外部 actions 文件夹的 .py 步骤文件全部导入（递归；覆盖同名；坏文件逐文件回滚）；刷新树并返回成功数。"""
-        n = self._mgr.copy_source_templates(source_dir)
+    def import_templates(self, source_dir: str, progress_cb=None,
+                         replace: bool = False) -> int:
+        """把外部 actions 文件夹的 .py 步骤文件全部导入（递归；覆盖同名；坏文件逐文件回滚）；刷新树并返回成功数。
+
+        ``progress_cb`` 透传给 :meth:`StepManager.copy_source_templates`
+        （功能2 进度条）；``None`` = 无进度，行为同前。
+
+        ``replace=True``：先清空工程旧模板再导入（导入后 = 所选文件夹内容，
+        非累加）；默认 ``False``（累加）。
+        """
+        n = self._mgr.copy_source_templates(source_dir, progress_cb, replace)
         self.refresh()
         return n
 
@@ -758,6 +766,20 @@ class TimeDelayStep(Step):
         assert tree._find_item("actions/子文件夹") is not None
         assert not pkg.is_file("actions/坏.py")        # 坏文件回滚删除
         assert pkg.is_file("actions/导入一.py")
+
+        # ---- import_templates 透传 progress_cb（功能2）----
+        seen = []
+
+        def cb(done, tot, label):
+            seen.append((done, tot, label))
+            return True
+
+        n2 = tree.import_templates(tmp, progress_cb=cb)
+        assert n2 == 3                                 # 与无 cb 一致（坏.py 回滚不计）
+        assert [s[0] for s in seen] == [1, 2, 3, 4]   # 4 候选（含坏.py），done 1 基递增
+        assert all(s[1] == 4 for s in seen)           # total 稳定
+        assert {s[2] for s in seen} == \
+            {"导入一.py", "导入二.py", "坏.py", "子文件夹/导入三.py"}
     finally:
         for root, dirs, files in os.walk(tmp, topdown=False):
             for f in files:

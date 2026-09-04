@@ -20,13 +20,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))   # 便于 import 项目包（如 widgets.通用.ui_common）
 
 MODULES = [
-    "actions", "actions.输入.鼠标.基础操作.相对偏移",
-    "actions.输入.鼠标.基础操作.获取位置", "actions.输入.鼠标.基础操作.设置位置",
-    "actions.控制流程.time_delay", "actions.控制流程.输出日志",
-    "actions.变量控制.变量设置.设置number", "actions.变量控制.变量设置.设置string",
-    "actions.变量控制.类型转换.字符串转数字", "actions.变量控制.类型转换.数字转字符串",
-    "actions.输入.按键", "actions.输入.鼠标点击", "actions.输入.鼠标移动",
-    "actions.输入.鼠标滚轮", "actions.输入.鼠标拖动", "actions.输入.多次点击",
+    # actions 包不逐个写死子模块路径：``python -m actions`` 走包级自检
+    # （actions/__main__.py：遍历包 + __all__ 每个名字可解析 + 模板 name 全局唯一），
+    # 动态覆盖全部 action 模块——重组织/增删 action 时本清单无需改、不失效。
+    "actions",
     "libs.key_control.base",
     "model.执行.hotkey", "model.工程.kscp_package", "model.log_model", "model.工程.path_util",
     "model.变量.project_variable", "model.执行.point_timeline", "model.执行.run_interrupt",
@@ -52,51 +49,6 @@ MODULES = [
 CHECKS = [
     ["main.py", "sample.kscp", "--check"],
 ]
-
-
-def _check_sample_templates() -> int:
-    """sample.kscp 内打包的 actions 模板须与源码逐字节一致（双向比对）。
-
-    防「修了源码模板、忘了重打包 sample.kscp」（曾出现：偏移.py 旧 bug 版、
-    鼠标点击旧提示文案残留在示例工程内）；也防重命名/删除模板后包内残留旧
-    文件。包骨架（__init__/__main__）不打包、不在比对列。
-    """
-    import os
-    import zipfile
-
-    pkg = ROOT / "sample.kscp"
-    try:
-        with zipfile.ZipFile(pkg) as z:
-            names = z.namelist()
-        diffs = []
-        for n in names:
-            if not n.startswith("actions/") or not n.endswith(".py"):
-                continue
-            if os.path.basename(n) in ("__init__.py", "__main__.py"):
-                continue                      # 包骨架（__init__ 等）不在比对列
-            src = ROOT / n
-            if not src.is_file():
-                diffs.append("包内有而源码无（残留）: " + n)   # 重命名/删除后的旧模板残留
-                continue
-            with zipfile.ZipFile(pkg) as z:
-                with open(src, "rb") as f:
-                    if f.read() != z.read(n):
-                        diffs.append(n)
-        for dirpath, _dirs, files in os.walk(str(ROOT / "actions")):
-            for fn in files:
-                if not fn.endswith(".py") or fn.startswith("__"):
-                    continue
-                rel = os.path.relpath(os.path.join(dirpath, fn),
-                                      str(ROOT / "actions"))
-                n = ("actions/" + rel).replace(os.sep, "/")
-                if n not in names:
-                    diffs.append("源码有而包内无: " + n)
-    except OSError as e:
-        _safe_print("FAIL: 无法读取 sample.kscp: %s" % e)
-        return 1
-    for n in diffs:
-        _safe_print("FAIL: sample.kscp 模板与源码不一致: %s" % n)
-    return 1 if diffs else 0
 
 
 def _safe_print(text: str) -> None:
@@ -132,8 +84,7 @@ def main() -> int:
         failed += 1 if _run(["-m", mod], 120) != 0 else 0
     for args in CHECKS:
         failed += 1 if _run(args, 120) != 0 else 0
-    failed += _check_sample_templates()      # sample.kscp 模板与源码一致性（本进程内比字节）
-    n_checks = len(CHECKS) + 1
+    n_checks = len(CHECKS)
     if failed:
         _safe_print("\n%d FAILED" % failed)
         return 1

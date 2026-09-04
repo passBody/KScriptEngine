@@ -3,13 +3,14 @@
 鼠标点击步骤（输入模拟）
 ========================
 
-:class:`MouseClick`：在坐标 (x, y) 模拟鼠标左键点击（基于内嵌
+:class:`MouseClick`：在坐标 (x, y) 模拟鼠标指定按键点击（基于内嵌
 :mod:`libs.key_control` 的 :class:`InputControl`）。
 
 输入槽
 ------
 * ``x`` / ``y``（number）：点击坐标（可引用变量，接 image_marker 标注坐标流）。
 * ``按住时长``（number，秒）：按下后多久松开。
+* ``指定按键``（number，枚举）：1-LEFT 2-MIDDLE 3-RIGHT。
 * ``素材图片``（image，**可选**）：**编辑期辅助**，仅用于自定义视图的点位标注
   与预览；可空（可选槽不校验、解析为 None），``run()`` 不读取它。
 
@@ -21,16 +22,12 @@ from typing import List, Optional, Tuple
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import QVBoxLayout, QWidget
 
-from libs.key_control import InputControl
+from model.执行.point_timeline import PointTimeline
+from tools.mouse_controller import mouse_ctrl
 from model.步骤.step import Step, optional
 from widgets.卡片.mark_preview_view import MarkPreviewView
 
 __all__ = ["MouseClick"]
-
-
-def _new_control() -> InputControl:
-    """创建输入设备控制器（冒烟测试替换为桩，避免真实鼠标移动）。"""
-    return InputControl()
 
 
 @dataclass
@@ -38,6 +35,7 @@ class MouseClickInput:
     """输入：坐标 x/y、按住时长（number）、素材图片（image，仅编辑辅助）。"""
     x: "number" = 0        # type: ignore
     y: "number" = 0        # type: ignore
+    指定按键: "number" = 0  # type: ignore
     按住时长: "number" = 0.05 # type: ignore
     素材图片: "image" = optional("")  # type: ignore  # 非必须：编辑期辅助，可空
 
@@ -49,20 +47,21 @@ class MouseClickOutput:
 
 
 class MouseClick(Step):
-    """鼠标点击步骤：在坐标处模拟鼠标左键点击。"""
+    """鼠标点击步骤：在坐标处模拟鼠标指定按键点击。"""
 
     name = "鼠标点击"
-    description = "在坐标处模拟鼠标左键点击"
+    description = "在坐标处模拟鼠标指定按键点击\n(1:left,2:middle,3:right)"
     input_class = MouseClickInput
     output_class = MouseClickOutput
 
     def run(self) -> int:
+        mode = [None, 'left', 'middle', 'right'][int(self.inputs.指定按键)]
         duration = self.inputs.按住时长 if self.inputs.按住时长 > 0 else None
-        _new_control().mouse_click(self.inputs.x, self.inputs.y, duration)
+        mouse_ctrl.click(self.inputs.x, self.inputs.y, mode, duration)
         return 1
 
     # 素材图片输入槽下标（自定义视图/点位标注用）
-    IMAGE_SLOT = 3
+    IMAGE_SLOT = 4
 
     def info_widget(self, parent: Optional[QWidget] = None) -> QWidget:
         """自定义视图：提示 + 标注预览 + 设置点位按钮（见 _MouseInfoView）。"""
@@ -81,6 +80,7 @@ class _MouseInfoView(QWidget):
         self._step = step
         self._mark_view = MarkPreviewView(
             io=step.io, image_slot=MouseClick.IMAGE_SLOT, mode="dot",
+            hint_text=MouseClick.description,
             read_points=self._read_xy,
             write_points=self._write_xy,
             parent=self)
@@ -97,8 +97,9 @@ class _MouseInfoView(QWidget):
         except (ValueError, TypeError):
             return None
 
-    def _write_xy(self, points: List[Tuple[int, int]]) -> None:
+    def _write_xy(self, pos_info: Optional[PointTimeline]) -> None:
         """设置点位完成 → 坐标写回 x/y 输入槽（io 监听触发预览重合成）。"""
+        points = [(int(round(x)), int(round(y))) for x, y in pos_info.points]
         x, y = points[0]
         self._step.io.change_value("input", 0, str(int(x)))
         self._step.io.change_value("input", 1, str(int(y)))

@@ -32,7 +32,7 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QKeySequence, QPainter
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QDialog, QDialogButtonBox, QGraphicsItem,
+    QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QGraphicsItem,
     QGraphicsProxyWidget, QGraphicsScene, QGraphicsSimpleTextItem,
     QGraphicsView, QLineEdit, QMenu, QMessageBox, QShortcut, QStyle, QToolTip,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -581,6 +581,37 @@ class StepListView(QGraphicsView):
 
     # ---- 滚轮（横向）----
     def wheelEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        # 光标在卡片 io 滚动区上且可纵向滚 → 转给 io 纵向滚（QGraphicsView
+        # 默认吃滚轮横向滚视图，内嵌 QScrollArea 拿不到 → 用户无法滚 io）
+        card = self._card_at(event.pos())
+        if card is not None:
+            io = card._io_scroll
+            vsb = io.verticalScrollBar()
+            if vsb.maximum() > vsb.minimum():
+                proxy = self._proxies[self._cards.index(card)]
+                card_pos = proxy.mapFromScene(
+                    self.mapToScene(event.pos())).toPoint()
+                w = card.childAt(card_pos)
+                while w is not None and w is not card:
+                    if w is io:
+                        # 步长对齐 QScrollArea 原生（singleStep × wheelScrollLines，
+                        # ≈60px/槽）；并按 io 实际范围封顶到 range//3——io 内容通常
+                        # 矮（5 输入 range≈58），原生 60 一槽见底，封顶后≈3 槽走完，
+                        # 不再「一槽跳过好多内容」。原 vsb.setValue(-angleDelta) 一槽
+                        # 120px 更是原生 2 倍。注：不能 sendEvent 转发给 io 视口——
+                        # proxy 内重入会段错误，故手动复刻原生公式。
+                        _pd = event.pixelDelta().y()
+                        if _pd != 0:
+                            vsb.setValue(vsb.value() - _pd)    # 触控板：像素精确
+                        else:
+                            _lines = QApplication.wheelScrollLines() or 3
+                            _rng = vsb.maximum() - vsb.minimum()
+                            _step = min(vsb.singleStep() * _lines, max(_rng // 3, 1))
+                            _notches = event.angleDelta().y() // 120
+                            vsb.setValue(vsb.value() - _notches * _step)
+                        event.accept()
+                        return
+                    w = w.parentWidget()
         delta = event.angleDelta().y()
         sb = self.horizontalScrollBar()
         sb.setValue(sb.value() - delta)
@@ -1074,6 +1105,63 @@ class DemoStep(Step):
     assert hsb.value() != old
     # 事件过滤器：卡片滚轮转发（同一处理路径）
     assert view.eventFilter(view._cards[0], ev) is True
+
+    # io 滚动区滚轮转发（#2）：io 内容溢出时，滚轮在 io 区上 → io 纵向滚
+    # 用独立工程包（只装大IO），不污染主冒烟的模板树断言
+    # （修前 QGraphicsView 吃滚轮横向滚，内嵌 QScrollArea 拿不到 → io 条不能滚）
+    _big_in = "\n".join("    in%d: \"number\" = 0" % i for i in range(20))
+    _big_out = "\n".join("    out%d: \"number\" = 0" % i for i in range(20))
+    _big_src = '''# -*- coding: utf-8 -*-
+from dataclasses import dataclass
+from model.步骤.step import Step
+
+@dataclass
+class _BigInput:
+%s
+
+@dataclass
+class _BigOutput:
+%s
+
+class BigStep(Step):
+    name = "大IO"
+    description = "io 滚动测试"
+    input_class = _BigInput
+    output_class = _BigOutput
+
+    def run(self) -> int:
+        return 1
+''' % (_big_in, _big_out)
+    pkg_big = KscpPackage.create_empty()
+    pkg_big.write_file("actions/大IO.py", _big_src.encode("utf-8"))
+    mgr_big = StepManager(pkg_big, VariableTree.create_empty())
+    mgr_big.load()
+    big_step = mgr_big.create_step("大IO")
+    sl_big = StepList.create_empty()
+    sl_big.add(big_step)
+    io_view = StepListView(mgr_big, clipboard)
+    io_view.resize(400, 220)
+    io_view.set_list(sl_big, mgr_big)
+    app.processEvents()                       # 触发布局，卡片几何/滚动范围就绪
+    assert len(io_view._cards) == 1
+    _card = io_view._cards[0]
+    _io = _card._io_scroll
+    _vsb = _io.verticalScrollBar()
+    assert _vsb.maximum() > _vsb.minimum(), "大IO 卡片 io 应溢出可纵向滚"
+    # 光标定在 io 区内（卡片下半部）→ 转发给 io 纵向滚；视图横向条不动
+    _io_pt = QPoint(_card.width() // 2, int(_card.height() * 0.75))
+    _scene_pt = io_view._proxies[0].mapToScene(_io_pt)
+    _vp_pt = io_view.mapFromScene(_scene_pt)
+    _hsb0 = io_view.horizontalScrollBar().value()
+    _vsb0 = _vsb.value()
+    _ev_io = QWheelEvent(QPointF(_vp_pt), QPointF(_vp_pt), QPoint(0, 0),
+                         QPoint(0, -240), 0, Qt.Horizontal,
+                         Qt.NoButton, Qt.NoModifier)
+    io_view.wheelEvent(_ev_io)
+    assert _vsb.value() != _vsb0, "io 滚动条应随滚轮移动"
+    assert io_view.horizontalScrollBar().value() == _hsb0, "io 区滚轮不应触发视图横向滚"
+    # 步长已收敛：2 槽位移 < 旧直接 -angleDelta(=240px)；小 io 不再一槽见底
+    assert 0 < _vsb.value() - _vsb0 < 240, (_vsb.value() - _vsb0)
 
     # 悬停缩放：Enter → 目标放大；Leave → 还原（不启动事件循环，验证动画参数）
     enter = QEvent(QEvent.Enter)

@@ -121,7 +121,14 @@ class CompositeCard(Step):
     def to_format_string(self) -> str:
         io_fmt = self.io.to_format_string()
         # 参数less（空签名 io 空槽）→ to_format_string 仍非空串；但空签名不该带 :io
-        if self.signature.is_empty() and not self.io.input_types and not self.io.output_types:
+        is_paramless = (self.signature.is_empty()
+                        and not self.io.input_types
+                        and not self.io.output_types)
+        if not self.enabled:
+            # 停用态须落盘（否则重载回 True）：ref:io:0 三段式（参数less 也带空 io
+            # 串——io_fmt 恒为 base64 非「:」字符，第三段 :0 表停用，旧工程无此后缀=启用）
+            return _MARKER_PREFIX + self.ref + ":" + io_fmt + ":0"
+        if is_paramless:
             return _MARKER_PREFIX + self.ref
         return _MARKER_PREFIX + self.ref + ":" + io_fmt
 
@@ -148,13 +155,14 @@ class CompositeCard(Step):
         rest = fmt[len(_MARKER_PREFIX):]
         if not rest:
             raise ValueError("合成卡片引用路径为空: %r" % (fmt,))
-        # 拆 ref 与可选 io_fmt（ref 不含 ":"，路径段无 ":"）
-        if ":" in rest:
-            ref, io_fmt = rest.split(":", 1)
-        else:
-            ref, io_fmt = rest, ""
+        # 拆 ref / io_fmt / enabled：ref 不含「:」、io_fmt 为 base64（无「:」）→ 按「:」分段
+        # 段数判版本：1=旧 bare（参数less,启用）2=旧 ref:io（启用）3=新 ref:io:0（停用）
+        parts = rest.split(":")
+        ref = parts[0]
         if not ref:
             raise ValueError("合成卡片引用路径为空: %r" % (fmt,))
+        io_fmt = parts[1] if len(parts) > 1 else ""
+        enabled = (parts[2] != "0") if len(parts) > 2 else True
         # 取签名（运行期解析器；加载期 from_marker 时 sigs 已预加载）
         sig = CompositeSignature.empty()
         defn = CompositeCard.resolve_ref(ref)
@@ -164,7 +172,7 @@ class CompositeCard(Step):
         package = manager.package
         if sig.is_empty():
             # 参数less（v1 或 v2 空签名）→ 空签名 io
-            return cls(ref, tree, package, signature=sig)
+            return cls(ref, tree, package, signature=sig, enabled=enabled)
         # 带参：按签名建类型化 io（bare marker → 空值可填；带 io_fmt → 回填 marker 的 iv/ov）
         io = StepIOWidget(sig.input_types(), sig.output_types(), tree, package)
         if io_fmt:
@@ -182,7 +190,7 @@ class CompositeCard(Step):
             except ValueError:
                 LogModel.instance().error(
                     "合成卡片标记内 io 串非法，已退化为空值 io（红卡可定位）: %s" % io_fmt)
-        return cls(ref, tree, package, signature=sig, io=io)
+        return cls(ref, tree, package, signature=sig, io=io, enabled=enabled)
 
     def resync_io(self) -> bool:
         """合成卡片签名变更后，按当前签名重同步调用点 io：重建类型化 io + 参数名
@@ -410,7 +418,15 @@ if __name__ == "__main__":
     assert CompositeCard.is_marker("") is False
     back = CompositeCard.from_marker(fmt, mgr)
     assert isinstance(back, CompositeCard) and back.ref == "组/卡片A"
+    assert back.enabled is True                              # 旧 bare 格式 → 启用（向后兼容）
     assert back.to_format_string() == fmt                  # 往返稳定
+    # 停用态落盘：disabled → ref:io:0 三段式；重载仍停用（回归：曾丢 enabled 回 True）
+    c_dis = CompositeCard("组/卡片A", tree, pkg, enabled=False)
+    fmt_dis = c_dis.to_format_string()
+    assert fmt_dis == "@合成卡片:组/卡片A:" + c_dis.io.to_format_string() + ":0", fmt_dis
+    back_dis = CompositeCard.from_marker(fmt_dis, mgr)
+    assert isinstance(back_dis, CompositeCard) and back_dis.enabled is False
+    assert back_dis.to_format_string() == fmt_dis          # 往返稳定（停用态不丢）
     try:                                                    # 非标记 → ValueError
         CompositeCard.from_marker("not a marker", mgr)
         raise AssertionError("非标记应抛 ValueError")
@@ -614,9 +630,21 @@ if __name__ == "__main__":
     # from_marker 往返：取签名建 io，iv/ov 回填
     back = CompositeCard.from_marker(fmt, mgr)
     assert isinstance(back, CompositeCard) and back.ref == "加倍卡"
+    assert back.enabled is True                              # 旧两段 ref:io 格式 → 启用（向后兼容）
     assert back.signature.input_names() == ["x"]
     assert back.io.input_types == ["number"] and back.io.output_types == ["number"]
     assert back.io._input_values == ["5"] and back.io._output_values == ["n1"]
+    # 带参停用态：ref:io:0 → 重载仍停用 + io 值保留（回归：曾丢 enabled 回 True）
+    call_dis = CompositeCard("加倍卡", tree, pkg, signature=sig,
+                             io=StepIOWidget(["number"], ["number"], tree, pkg),
+                             enabled=False)
+    call_dis.io.change_value("input", 0, "5")
+    call_dis.io.change_value("output", 0, "n1")
+    fmt_d = call_dis.to_format_string()
+    assert fmt_d == "@合成卡片:加倍卡:" + call_dis.io.to_format_string() + ":0", fmt_d
+    back_d = CompositeCard.from_marker(fmt_d, mgr)
+    assert isinstance(back_d, CompositeCard) and back_d.enabled is False
+    assert back_d.io._input_values == ["5"] and back_d.io._output_values == ["n1"]
     # 端到端：do() → body 在局部树跑 → y=10 → 写回 n1
     assert back.do() == 1
     assert back.status is StepStatus.FINISHED

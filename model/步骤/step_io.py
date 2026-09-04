@@ -343,13 +343,37 @@ class StepIOWidget:
                 out.append(parser(text))
         return out
 
-    def write_outputs(self, outs: List[Any]) -> None:
-        """按输出槽类型把 ``outs`` 写回变量树（输出变量全是工程变量）。
+    @staticmethod
+    def _coerce_output(value: Any, slot_type: str, bound_type: str) -> Any:
+        """把输出值按**绑定变量类型**转换（仅当槽类型 ≠ 绑定类型时）。
 
-        每个 ``outs[i]`` 经 ``ProjectVariable.create(output_type[i], value, package)``
-        创建变量；创建的变量不合规（如 number 槽写字符串）抛 :class:`ValueError`，
-        变量名不在树中抛 :class:`FileNotFoundError`。合规后 ``tree.set(name, var)``
-        替换同名变量。
+        同类型原样返回；不一致时按绑定类型转：
+
+        * ``number`` 变量：字符串→ ``_parse_number`` 解析（失败抛
+          :class:`ValueError` → 由 :meth:`write_outputs` 包成停步错误）；
+          数字原样。
+        * ``string`` 变量：任意值 → ``str()``（数字→字符串，恒成功）。
+        * 资源类（``image`` 等）：不在此转，交 :meth:`ProjectVariable.create`
+          校验路径合法性（不合规 → ``valid=False`` → 抛错停步）。
+
+        这样**绑定变量的类型不被改写**——以前用槽类型新建变量替换，number
+        变量被 string 槽悄悄改成 string（危险）；现按绑定类型转值、保留类型。
+        """
+        if bound_type == slot_type:
+            return value
+        if bound_type == "string":
+            return str(value)
+        if bound_type == "number":
+            return _parse_number(str(value))   # 解析失败抛 ValueError
+        return value                           # image/其它：交 create 校验
+
+    def write_outputs(self, outs: List[Any]) -> None:
+        """按**绑定变量的类型**把 ``outs`` 写回变量树（输出变量全是工程变量）。
+
+        类型不一致时**尝试转换格式**而非直接改变量类型（曾用槽类型新建变量替换
+        → number 变量被 string 槽悄悄写成 string，类型被改写——危险）。转换失败
+        （如 number 变量收到 ``"abc"``）抛 :class:`ValueError`，由 :meth:`Step.do`
+        捕获置步骤「执行错误」并停止；变量名不在树中抛 :class:`FileNotFoundError`。
         """
         if len(outs) != len(self._output_type):
             raise ValueError("输出值数量与输出槽数不符: %d vs %d" % (
@@ -360,11 +384,20 @@ class StepIOWidget:
                 raise ValueError("输出槽 %d 未指定变量名" % i)
             if name not in self._tree:
                 raise FileNotFoundError("输出变量不在树中: %r" % name)
-            var = ProjectVariable.create(vtype, outs[i], self._package)
-            if not var.valid:
+            bound = self._tree.get(name)          # 绑定变量（保留其类型，不被改写）
+            btype = bound.type
+            try:
+                value = StepIOWidget._coerce_output(outs[i], vtype, btype)
+            except (ValueError, TypeError) as e:
                 raise ValueError(
-                    "输出槽 %d 的值不合规（%s 类型）: %r" % (i, vtype, outs[i]))
-            self._tree.set(name, var)
+                    "输出槽 %d 的值 %r 无法转为绑定变量「%s」的类型 %s: %s"
+                    % (i, outs[i], name, btype, e))
+            new_var = ProjectVariable.create(btype, value, self._package)
+            if not new_var.valid:
+                raise ValueError(
+                    "输出槽 %d 的值 %r 不合规（绑定变量「%s」类型 %s）"
+                    % (i, outs[i], name, btype))
+            self._tree.set(name, new_var)
 
     # ================================================================
     # 格式化字符串
@@ -507,6 +540,7 @@ class StepIOWidget:
                         else "选择变量…")
             btn = QPushButton(self._display_name(self._input_values[i])
                               or fallback)
+            btn.setObjectName("ioPicker")   # 供 cards.qss 的 #ioPicker 规则定位（白底+边框）
             btn.clicked.connect(lambda _=False, wd=widget, i=i: self._pick_input(wd, i))
             row.addWidget(btn, 1)
             widget.input_fields.append(btn)
@@ -523,6 +557,7 @@ class StepIOWidget:
         btn = QPushButton("…")
         btn.setFixedWidth(28)
         btn.setToolTip("选择变量")
+        btn.setObjectName("ioPicker")   # 供 cards.qss 的 #ioPicker 规则定位（白底+边框）
         btn.clicked.connect(lambda _=False, wd=widget, i=i: self._pick_input(wd, i))
         row.addWidget(edit, 1)
         row.addWidget(btn)
@@ -545,6 +580,7 @@ class StepIOWidget:
         btn = QPushButton("…")
         btn.setFixedWidth(28)
         btn.setToolTip("选择变量")
+        btn.setObjectName("ioPicker")   # 供 cards.qss 的 #ioPicker 规则定位（白底+边框）
         btn.clicked.connect(
             lambda _=False, wd=widget, i=i, vt=vtype: self._pick_output(wd, i, vt))
         row.addWidget(edit, 1)
@@ -923,6 +959,14 @@ if __name__ == "__main__":
     # gen_widget：生成 QWidget，change_value 同步刷新字段
     card = w.gen_widget()
     assert isinstance(card, QWidget)
+    # io 区变量选择按钮打 objectName=ioPicker（供 cards.qss 的 #ioPicker 规则定位：
+    # 白底+边框，与 io 板色 #eef2f8 拉开对比——默认 QPushButton 背景近同色→不可见）。
+    # 样式经 StepCard 样式表级联，独立 gen_widget（无卡片）无样式，仅验语义钩子。
+    from PyQt5.QtWidgets import QPushButton as _QPB
+    _btns = card.findChildren(_QPB)
+    assert _btns, "io 控件应含变量选择按钮"
+    for _b in _btns:
+        assert _b.objectName() == "ioPicker", _b.objectName()
     # io 边距：左右 16 / 底部 16（控件不贴卡片边，参数多时滚动区观感）
     _m = card.layout().contentsMargins()
     assert (_m.left(), _m.top(), _m.right(), _m.bottom()) == (16, 6, 16, 16), \
@@ -1180,5 +1224,35 @@ if __name__ == "__main__":
     assert sorted(sub.variables) == ["f1", "n1", "s1"], sub.variables
     sub_num = StepIOWidget._picker_tree(tree, "number")
     assert sorted(sub_num.variables) == ["f1", "n1"]
+
+    # ---- O-1：输出类型不一致时按绑定变量类型转换，不改变量类型（危险修复） ----
+    # 旧实现用槽类型新建变量替换 → string 槽写 number 变量会悄悄把 n1 变 string。
+    # 现：保留绑定类型，值按绑定类型转换；转换失败抛 ValueError（→ Step.do 置 ERROR 停步）。
+    _n1_before = tree.get("n1").type
+    assert _n1_before == "number"
+    w_so = StepIOWidget([], ["string"], tree, pkg)
+    w_so.change_value("output", 0, "n1")          # string 槽 → number 变量
+    assert w_so.is_valid                          # 输出校验只查变量名存在，不查类型
+    w_so.write_outputs(["5"])                     # "5" 解析为 5
+    assert tree.get("n1").type == "number"        # 类型不变（危险修复点）
+    assert tree.get("n1").data == 5                # 值按绑定类型转换
+    # number 变量收到无法解析的字符串 → ValueError（停步，不静默改类型）
+    try:
+        w_so.write_outputs(["abc"])
+        raise AssertionError("number 变量收到非数字应抛 ValueError（停步）")
+    except ValueError:
+        pass
+    assert tree.get("n1").type == "number" and tree.get("n1").data == 5  # 失败不写
+    # number 槽 → string 变量 s1：值 5 转为 "5"，s1 仍是 string
+    w_no = StepIOWidget([], ["number"], tree, pkg)
+    w_no.change_value("output", 0, "s1")
+    w_no.write_outputs([5])
+    assert tree.get("s1").type == "string"
+    assert tree.get("s1").data == "5"
+    # 同类型：number 槽 → number 变量，原样写（无转换）
+    w_oo = StepIOWidget([], ["number"], tree, pkg)
+    w_oo.change_value("output", 0, "n1")
+    w_oo.write_outputs([42])
+    assert tree.get("n1").type == "number" and tree.get("n1").data == 42
 
     print("StepIOWidget smoke OK")

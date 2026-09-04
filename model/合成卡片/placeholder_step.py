@@ -111,7 +111,8 @@ class PlaceholderStep(Step):
         合成卡片引用标记 → ``合成卡片→<ref>``；普通步骤 → base64 内 ``name`` 字段。
         """
         if isinstance(fmt, str) and fmt.startswith(_MARKER_PREFIX):
-            ref = fmt[len(_MARKER_PREFIX):]
+            # ref 为首段（ref 无「:」；后随可选 io_fmt / enabled 后缀，不进显示名）
+            ref = fmt[len(_MARKER_PREFIX):].split(":")[0]
             return ("合成卡片→%s" % ref) if ref else "合成卡片（空引用）"
         if not isinstance(fmt, str) or not fmt:
             return ""
