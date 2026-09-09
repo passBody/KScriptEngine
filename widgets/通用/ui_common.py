@@ -152,6 +152,15 @@ def make_icon(kind: str) -> QIcon:
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#2b5fa0"))
         p.drawPolygon(QPolygon([QPoint(22, 6), QPoint(28, 12), QPoint(16, 12)]))  # 箭头头
+    elif kind == "data":
+        # 表格（数据视图语义）：蓝灰外框 + 表头分隔横线 + 一条竖线分列，
+        # 与 resource 同色系；按 32×32 原样返回（工具栏文字按钮旁小图标，不放大）
+        pen = QPen(QColor("#2b5fa0"), 2)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(5, 6, 22, 20)                       # 外框
+        p.drawLine(5, 13, 27, 13)                      # 表头分隔横线
+        p.drawLine(13, 13, 13, 26)                     # 列分隔竖线
     else:
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#888888"))
@@ -250,7 +259,7 @@ if __name__ == "__main__":
 
     # make_icon：各类别（含未知回退）生成非空图标；exec/settings/refresh/minimize 放大 48px
     for kind in ("resource", "variable", "step", "composite", "template",
-                 "exec", "settings", "refresh", "minimize", "default", "未知"):
+                 "exec", "settings", "refresh", "minimize", "data", "default", "未知"):
         assert not make_icon(kind).isNull(), kind
     assert make_icon("exec").availableSizes()
 

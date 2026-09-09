@@ -100,6 +100,12 @@ class Step:
         self._status_listeners: List[Callable[["Step", StepStatus], None]] = []
         self.inputs = self.input_class()     # 输入类实例（运行时值容器）
         self.outputs = self.output_class()   # 输出类实例（运行时值容器）
+        # 执行期注入（StepRunner 调 do 前置入、收尾清空）：跳转类步骤据此
+        # 在 run() 内查兄弟/目标列表路径。编辑期恒为 None——Step 无父链，
+        # 自定义视图走 io 注入路径而非本字段。plan 元素为 ExecPlanEntry
+        # （step + path），本层不导入执行器以避循环依赖，故用 Any 标注。
+        self._exec_index: Optional[int] = None
+        self._exec_plan: Optional[List[Any]] = None
 
     # ================================================================
     # 状态（property：每次变更通知监听者，供执行器推 UI 刷新）

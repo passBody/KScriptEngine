@@ -42,6 +42,7 @@ MODULES = [
     "widgets.卡片.step_card", "widgets.树.step_list_tree_widget",
     "widgets.卡片.step_list_view", "widgets.树.step_tree_widget",
     "widgets.通用.ui_common", "widgets.树.variable_tree_widget",
+    "widgets.通用.data_view_dialog",
 ]
 # 注：tools.image_marker 的 __main__ 是**交互式全屏标注 demo**（QEventLoop 阻塞
 # 等待人工点击），无断言、无法无人值守运行——不纳入本清单，人工验证。

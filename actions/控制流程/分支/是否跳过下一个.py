@@ -29,9 +29,15 @@ class IsSkipNext(Step):
     """是否跳过下一个步骤：如果是则跳过下一个步骤"""
 
     name = "是否跳过下一个"
-    description = "如果是则跳过下一个步骤\n取反则反之\n`` -> 为False其余为True\n`1 -> 为取反 0 反之`"
+    description = (
+        f" 如果是则跳过下一个步骤\n "
+        f"取反则反之\n "
+        f"`0`|``|`False`->为不跳过 其余为跳过\n "
+        f"`1`->取反 ; `0`->不取反"
+    )
     input_class = IsSkipNextInput
     output_class = IsSkipNextOutput
 
     def run(self) -> int:
-        return 2 if bool(str(self.inputs.判断符))^int(self.inputs.是否取反) else 1
+        pd ='' if str(self.inputs.判断符) in ['0','','False'] else 'ok'
+        return 2 if bool(str(pd))^int(self.inputs.是否取反) else 1

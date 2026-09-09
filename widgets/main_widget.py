@@ -56,6 +56,7 @@ from widgets.树.management_trees import (
 )
 from widgets.卡片.step_list_view import StepClipboard
 from widgets.通用.settings_dialog import SettingsDialog
+from widgets.通用.data_view_dialog import DataViewDialog
 from widgets.通用.ui_common import (
     ERROR_COLOR, LandingCard, TitledPanel, ensure_qt_plugin_path,
     load_app_qss, make_icon, window_size,
@@ -159,6 +160,7 @@ class MainWindow(QMainWindow):
         self._cards_refresh_pending = False
         self._step_hooks: Dict[str, List[Tuple[object, Callable]]] = {}   # 页名 → 步骤状态监听
         self._step_paths: Dict[str, Dict[object, str]] = {}   # 页名 → step→列表路径（树高亮）
+        self._dirty = False                  # 工程相对磁盘有未保存修改（弹窗询问用）
 
         self._central = QStackedWidget()
         self.setCentralWidget(self._central)
@@ -202,6 +204,7 @@ class MainWindow(QMainWindow):
         a_save_as.setShortcut("Ctrl+Shift+S")
         a_save_as.triggered.connect(self._on_save_as)
         file_btn.setMenu(file_menu)
+        self._widen_menu(file_menu)
         tb.addWidget(file_btn)
 
         # 管理菜单：导入步骤模板（未开包不可用）
@@ -215,6 +218,7 @@ class MainWindow(QMainWindow):
         a_import.triggered.connect(self._on_import)
         self._manage_btn.setMenu(manage_menu)
         self._manage_btn.setEnabled(False)
+        self._widen_menu(manage_menu)
         tb.addWidget(self._manage_btn)
 
         # 窗口菜单：显示日志开关
@@ -229,7 +233,54 @@ class MainWindow(QMainWindow):
         self._a_show_log.setChecked(True)
         self._a_show_log.toggled.connect(self._on_toggle_log)
         win_btn.setMenu(win_menu)
+        self._widen_menu(win_menu)
         tb.addWidget(win_btn)
+
+        # 数据按钮：弹出数据视图表格（只读展示所有 number/string 变量当前值）
+        self._data_btn = QToolButton(self)
+        self._data_btn.setText("数据")
+        self._data_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._data_btn.setIcon(make_icon("data"))
+        self._data_btn.setIconSize(QSize(18, 18))
+        self._data_btn.setMinimumWidth(self.fontMetrics().horizontalAdvance("数据") + 40)
+        self._data_btn.setToolTip("数据视图：表格展示所有数值/字符串变量的当前值")
+        self._data_btn.clicked.connect(self._on_data_clicked)
+        self._data_btn.setEnabled(False)          # 未开包不可用，随 _open_package 解锁
+        tb.addWidget(self._data_btn)
+
+    def _widen_menu(self, menu: QMenu) -> None:
+        """下拉菜单放宽：最小宽度按最长项+快捷键估算，加内边距防局促。
+
+        让「新建 Ctrl+N」「另存为… Ctrl+Shift+S」等完整显示、不挤。菜单仍可因
+        内容更宽而自动变宽（MinimumWidth 不封顶）。
+        """
+        fm = self.fontMetrics()
+        widest = 0
+        for a in menu.actions():
+            txt = a.text()
+            sc = a.shortcut().toString() if a.shortcut() else ""
+            w = fm.horizontalAdvance(txt) + (fm.horizontalAdvance(sc) + 24 if sc else 0)
+            widest = max(widest, w)
+        menu.setMinimumWidth(widest + 48)         # 文本+快捷键+左右内边距
+        menu.setStyleSheet(
+            "QMenu { padding:6px 8px; }"
+            "QMenu::item { padding:6px 18px 6px 14px; margin:2px 0; }"
+            "QMenu::item:selected { background:#cfe0f5; border-radius:4px; }")
+
+    def _on_data_clicked(self) -> None:
+        """打开数据视图弹窗：只读表格展示所有 number/string 变量当前值。
+
+        取变量管理树（_managers[2]）的共享 VariableTree，滤出 number/string
+        （image 是资源路径字节，表格展示无意义且已有资源预览），弹模态对话框。
+        只读快照——打开瞬间取值，执行中亦可查看（不破坏运行）。
+        """
+        if self._package is None:
+            return
+        var_mgr = self._managers[2]
+        assert isinstance(var_mgr, VariableManagementTree)
+        tree = var_mgr.tree_widget()._tree
+        items = tree.filter_by_types("number", "string").items()
+        DataViewDialog(items, self).exec_()
 
     def _on_toggle_log(self, checked: bool) -> None:
         if self._log_widget is not None:
@@ -372,17 +423,16 @@ class MainWindow(QMainWindow):
         self._tray.show()
 
     def _cleanup_on_close(self) -> None:
-        """退出前善后：flush 防抖编辑、保存有路径的工程、停止执行中的
-        runner 并短暂等待（防模拟按键卡在目标窗口）。"""
+        """退出前善后：停执行中的 runner 并短暂等待（防模拟按键卡在目标窗口）。
+
+        **不写盘**——是否落盘由 :meth:`_confirm_discard_on_exit` 决定（保存→已写盘
+        并清脏；丢弃→不写盘，删改可重开恢复）。此处仅在内存做防抖落位（进程即将
+        退出，无害），再停监听器/runner。
+        """
         try:
             self._flush_managers()
         except Exception:
             pass
-        if self._package is not None and self._kscp_path:
-            try:
-                self._package.save(self._kscp_path)
-            except OSError as e:
-                LogModel.instance().error("退出时保存失败：%s" % e)
         for runner in self._runners.values():
             if runner.state is not StepRunnerState.READY:
                 runner.request_stop()
@@ -398,13 +448,59 @@ class MainWindow(QMainWindow):
         self._stop_page_listeners()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        if not self._confirm_discard_on_exit():
+            event.ignore()
+            return
         self._cleanup_on_close()
         event.accept()
 
+    def _confirm_discard_on_exit(self) -> bool:
+        """关闭/退出前：有未保存修改 → 弹「保存？丢弃？取消？」。
+
+        - 保存：写盘（成功后正常关闭；失败弹错且不关闭）；取消：返回 False（阻止关闭）；
+        - 丢弃：不写盘，正常关闭（删除/编辑可重开恢复——修「没点保存却已落盘」）。
+        无未保存修改或无工程路径 → 直接返回 True（正常关闭）。
+        """
+        if not self._dirty or not self._kscp_path or self._package is None:
+            return True
+        if not self._managers:
+            return True
+        ret = QMessageBox.question(
+            self, "未保存的修改",
+            "工程有未保存的修改，是否保存？",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save)
+        if ret == QMessageBox.Cancel:
+            return False
+        if ret == QMessageBox.Save:
+            assert self._package is not None
+            self._flush_managers()
+            try:
+                self._package.save(self._kscp_path)
+            except OSError as e:
+                QMessageBox.warning(self, "保存", "工程文件保存失败：%s" % e)
+                LogModel.instance().error("保存到 %s 失败：%s" % (self._kscp_path, e))
+                return False
+            self._dirty = False
+        # Discard → 不写盘，正常关闭
+        return True
+
     def _quit_from_tray(self) -> None:
         """托盘「退出」：善后清理后退出（直接 quit 会卡键/丢未保存编辑）。"""
+        if not self._confirm_discard_on_exit():
+            return
         self._cleanup_on_close()
         QApplication.instance().quit()
+
+    def _mark_dirty(self) -> None:
+        """工程内容变更 → 置脏（保存/退出弹窗询问的依据）。
+
+        各管理树的变更信号（页增删改、列表增删改、io 编辑、卡片增删改、签名变更、
+        变量树变更、资源树变更）统一经此置脏。仅置真，不重复触发工作。
+        """
+        if not self._dirty:
+            self._dirty = True
+
 
     def _hide_to_tray(self) -> None:
         """隐藏主窗口到托盘（托盘图标常驻；不弹通知气泡——用户反馈打扰）。"""
@@ -593,7 +689,21 @@ class MainWindow(QMainWindow):
         else:                           # READY：只摘该页 hooks
             self._detach_step_hooks(page)
             self._recompute_lock()
+            # 执行结束：截图类步骤可能原地覆盖了图片资源，刷新变量/资源预览
+            # （鸭子类型：仅变量/资源管理树实现 refresh_preview；其它静默跳过）。
+            self._refresh_all_previews()
         self._refresh_exec_status()
+
+    def _refresh_all_previews(self) -> None:
+        """执行后刷新所有支持 refresh_preview 的管理树预览（变量/资源）。
+
+        截图类步骤覆盖图片资源后，预览面板仍显示旧 pixmap；执行结束时重读
+        当前项字节重建缩略图，用户回头看时已是新图，无需重开工程。
+        """
+        for m in self._managers:
+            fn = getattr(m, "refresh_preview", None)
+            if callable(fn):
+                fn()
 
     def _any_runner_active(self) -> bool:
         """是否有执行器处于 RUNNING/STOPPING（刷新/导入须避开，避免重载打断运行线程）。"""
@@ -995,6 +1105,7 @@ class MainWindow(QMainWindow):
                 except OSError as e:
                     QMessageBox.warning(self, "设置", "工程文件保存失败：%s" % e)
                     LogModel.instance().error("设置保存到 .kscp 失败：%s" % e)
+                self._dirty = False       # 设置已写盘 → 清脏（等同一次保存）
         # 按新映射重建全部常驻监听（旧监听器销毁）
         self._start_page_listeners()
         # 各页待命执行器按新停止方式重建
@@ -1038,6 +1149,9 @@ class MainWindow(QMainWindow):
                 enabled and self._package is not None and not self._armed)
         if self._settings_btn is not None:
             self._settings_btn.setEnabled(enabled)
+        # 数据按钮：只读快照，不随执行锁定禁用（与最小化同档，始终可用）
+        if self._data_btn is not None and self._package is not None:
+            self._data_btn.setEnabled(True)
         for a in (getattr(self, "_a_new", None), getattr(self, "_a_open", None)):
             if a is not None:
                 a.setEnabled(enabled)
@@ -1155,6 +1269,7 @@ class MainWindow(QMainWindow):
             LogModel.instance().error("保存到 %s 失败：%s" % (path, e))
             return
         self._kscp_path = path
+        self._dirty = False            # 写盘成功 → 内存包与磁盘一致，清脏
         self.setWindowTitle("KScript — %s" % path)
         sb = self.statusBar()
         assert sb is not None
@@ -1256,6 +1371,11 @@ class MainWindow(QMainWindow):
         self._preview_stack.setCurrentIndex(row)
         if row < len(self._managers):
             self._tree_panel.set_title("%s树栏" % self._managers[row].name)
+            # 切到变量/资源视图时刷新预览：覆盖「执行时人在别的视图、结束后才切过来」
+            # 看到 stale 缩略图的情况（鸭子类型：仅变量/资源树实现 refresh_preview）。
+            fn = getattr(self._managers[row], "refresh_preview", None)
+            if callable(fn):
+                fn()
 
     # ---- 打开工程 ----
     def _open_package(self, package: KscpPackage, path: Optional[str]) -> None:
@@ -1310,6 +1430,12 @@ class MainWindow(QMainWindow):
         assert isinstance(vtw, VariableTreeWidget)
         vtw.tree_changed.connect(sl_mgr.refresh_cards)
         vtw.tree_changed.connect(comp_mgr.refresh_cards)
+        # 变量树变更 → 工程置脏（变量增删改/值确认都改了内存包）
+        vtw.tree_changed.connect(self._mark_dirty)
+        # 资源树变更 → 工程置脏（资源增删改/重命名都改了内存包）
+        res_mgr = self._managers[4]
+        assert isinstance(res_mgr, ResourceManagementTree)
+        res_mgr.tree_widget().changed.connect(self._mark_dirty)
         # 进入工程第一画面：store 非空 → 自动选中第一个步骤列表（显示序 DFS 首个列表）
         # 树/宿主均为懒构建 → 先构建再选中；宿主须在联动前构建，否则列表不显示
         sl_mgr.tree_widget()               # 页容器（标题/下拉/添加页/删除该页 + 每页一棵树）
@@ -1332,11 +1458,19 @@ class MainWindow(QMainWindow):
         sl_mgr.page_added.connect(self._on_page_added)
         sl_mgr.page_renamed.connect(self._on_page_renamed)
         sl_mgr.page_removed.connect(self._on_page_removed)
+        # 工程内容变更 → 置脏（页增删改 + 列表增删改 + io 编辑统一出口）
+        sl_mgr.page_added.connect(lambda _p: self._mark_dirty())
+        sl_mgr.page_renamed.connect(lambda _o, _n: self._mark_dirty())
+        sl_mgr.page_removed.connect(lambda _p: self._mark_dirty())
+        sl_mgr.edited.connect(self._mark_dirty)
+        comp_mgr.edited.connect(self._mark_dirty)
         self._start_page_listeners()
         self._refresh_exec_status()
         self._update_exec_button()
         if self._manage_btn is not None:
             self._manage_btn.setEnabled(not self._armed)   # 执行模式中禁用导入入口
+        if self._data_btn is not None:
+            self._data_btn.setEnabled(True)   # 已开包 → 数据视图可用（只读快照，执行中亦可查看）
         if self._project_widget is None:
             self._project_widget = self._build_project_view()
             self._central.addWidget(self._project_widget)
@@ -1831,6 +1965,55 @@ class KeyStep(Step):
         fm = win_bare.fontMetrics()
         assert win_bare._manage_btn.minimumWidth() >= fm.horizontalAdvance("管理")
         assert win_bare._manage_btn.toolButtonStyle() == Qt.ToolButtonTextOnly
+
+        # ---- 工具栏下拉菜单放宽：菜单宽度 > 最长项文本宽度，且加了内边距 ----
+        for btn, label in ((win_bare._manage_btn, "管理"),):
+            menu = btn.menu()
+            assert menu is not None
+            assert menu.minimumWidth() > fm.horizontalAdvance("导入…") + 24, \
+                (label, menu.minimumWidth())
+            assert "padding" in (menu.styleSheet() or ""), "菜单应加内边距"
+        # 数据按钮：未开包禁用、有图标、tooltip 含「数据视图」
+        assert win_bare._data_btn is not None
+        assert not win_bare._data_btn.isEnabled()      # 未开包
+        assert not win_bare._data_btn.icon().isNull()
+        assert "数据视图" in win_bare._data_btn.toolTip()
+        assert win_bare._data_btn.toolButtonStyle() == Qt.ToolButtonTextBesideIcon
+
+        # ---- 数据视图：点「数据」弹出只读表格，滤掉 image 只列 number/string ----
+        from model.变量.project_variable import ProjectVariable as _PV
+        win_data = MainWindow(tmp)
+        win_data.show()
+        win_data._managers[2]._vtree = win_data._managers[2].tree_widget()   # 懒构建变量树
+        vtree = win_data._managers[2].tree_widget()._tree
+        vtree.add("dN", _PV.create("number", 42, win_data._package))
+        vtree.add("dS", _PV.create("string", "hello", win_data._package))
+        vtree.add("dI", _PV.create("image", "assets/x.png", win_data._package))  # 应被滤掉
+        # 桩替换 DataViewDialog（main_widget 已 from ... import DataViewDialog，
+        # 故替换 main_widget 模块内的引用才生效）
+        _dlg_calls = []
+        _dlg_items = []
+        class _StubDlg:
+            def __init__(self, items, parent=None):
+                _dlg_items.append(items)
+            def exec_(self):
+                _dlg_calls.append(1)
+                return 0
+        _orig_dvd = globals()["DataViewDialog"]
+        globals()["DataViewDialog"] = _StubDlg
+        try:
+            win_data._on_data_clicked()
+        finally:
+            globals()["DataViewDialog"] = _orig_dvd
+        assert _dlg_calls == [1], _dlg_calls
+        names = {p for p, _ in _dlg_items[0]}
+        assert {"dN", "dS"} <= names, names       # 新增的 number/string 进表
+        assert "dI" not in names, "image 应被滤掉"  # image 不进表
+        # 开包后数据按钮启用；执行锁定不关闭它（只读快照）
+        assert win_data._data_btn.isEnabled()
+        win_data._set_exec_locked(True)
+        assert win_data._data_btn.isEnabled(), "只读快照不应随执行锁定禁用"
+        win_data._set_exec_locked(False)
 
         # ---- I2: 每页单 runner + toggle 语义（假 runner 状态可控） ----
         class _FakeRunner:
@@ -2346,5 +2529,53 @@ class KeyStep(Step):
     finally:
         import shutil as _shutil
         _shutil.rmtree(imp_dir, ignore_errors=True)
+
+    # ---- 执行后刷新预览：截图类步骤覆盖资源 → READY 时刷新变量/资源预览 ----
+    # 选一张图片资源、切到资源视图选中它、覆盖字节、模拟执行结束（READY）→ 预览应刷新
+    win_prev = MainWindow(tmp)
+    win_prev.show()
+    # 找到资源管理树（鸭子类型实现 refresh_preview）
+    res_mgr = None
+    var_mgr = None
+    for _m in win_prev._managers:
+        if hasattr(_m, "refresh_preview"):
+            if isinstance(_m, ResourceManagementTree):
+                res_mgr = _m
+            elif isinstance(_m, VariableManagementTree):
+                var_mgr = _m
+    assert res_mgr is not None and var_mgr is not None
+    # 写一张图片资源，懒构建资源树并选中
+    from PyQt5.QtGui import QImage as _QImg, QColor as _QColor
+    from PyQt5.QtCore import QBuffer as _QBuf, QIODevice as _QIO
+    def _mkpng(color):
+        _im = _QImg(40, 30, _QImg.Format_RGB32); _im.fill(_QColor(color))
+        _b = _QBuf(); _b.open(_QIO.ReadWrite); _im.save(_b, "PNG"); return bytes(_b.data())
+    win_prev._package.write_file("assets/prev.png", _mkpng("#3498db"))
+    rt = res_mgr.tree_widget()
+    rt.refresh()
+    rt.setCurrentItem(rt._find_item("assets/prev.png"))
+    app.processEvents()
+    _pv = rt.preview_widget()
+    assert _pv.currentIndex() == 1 and not _pv._raw_pixmap.isNull()
+    _old = _pv._raw_pixmap.toImage().pixelColor(15, 15).rgb()
+    # 模拟截图类步骤覆盖该资源
+    win_prev._package.write_file("assets/prev.png", _mkpng("#e74c3c"))
+    # 直接调用 _refresh_all_previews（与 _on_runner_state READY 分支一致）
+    win_prev._refresh_all_previews()
+    _new = _pv._raw_pixmap.toImage().pixelColor(15, 15).rgb()
+    assert _old != _new, "执行后 _refresh_all_previews 应重读字节刷新预览"
+    # _on_runner_state READY 路径也触发刷新：需先让该页有有效代际（否则陈旧守卫早退）
+    _page = win_prev._current_page
+    win_prev._runner_gens[_page] = 1                 # 登记代际，使 READY 信号不被守卫丢弃
+    # 先复位到 _new（#e74c3c）确保起点一致
+    win_prev._package.write_file("assets/prev.png", _mkpng("#e74c3c"))
+    win_prev._refresh_all_previews()
+    assert _pv._raw_pixmap.toImage().pixelColor(15, 15).rgb() == _new
+    # 覆盖为新色后发 READY 信号 → _on_runner_state 应调 _refresh_all_previews 刷新
+    win_prev._package.write_file("assets/prev.png", _mkpng("#27ae60"))
+    win_prev._exec_bridge.runner_state.emit((_page, 1, StepRunnerState.READY))
+    app.processEvents()
+    _new2 = _pv._raw_pixmap.toImage().pixelColor(15, 15).rgb()
+    assert _new != _new2, "READY 信号应触发预览刷新"
 
     print("MainWindow smoke OK")

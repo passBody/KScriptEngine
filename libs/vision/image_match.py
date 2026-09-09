@@ -13,6 +13,10 @@
         click(xy)  # 已有的鼠标点击函数
 """
 
+import io
+import os
+import threading
+
 import cv2
 import numpy as np
 from PIL import Image, ImageGrab
@@ -30,16 +34,18 @@ def set_default_screenshot_fn(fn):
     _default_screenshot_fn = fn
 
 
-def find_template(template_path, screenshot=None, threshold=0.8):
+def find_template(template, screenshot=None, threshold=0.8):
     """判断模板图是否出现在游戏画面中。
 
     Args:
-        template_path: 预保存的元素图片路径（png/jpg 均可）。
-        screenshot: 已截好的画面（PIL Image）；传 None 时调用默认截图函数。
+        template: 预保存的元素图片——可为文件路径（png/jpg，str/PathLike，
+            按路径缓存）、PNG/JPG 字节（如工程资源读出的 bytes）或 PIL Image。
+        screenshot: 已截好的画面（PIL Image / 字节 / 路径）；传 None 时调用
+            默认截图函数（全屏）。
         threshold: 相似度阈值（0~1），默认 0.8。
 
     Returns:
-        (True, (x, y)): 找到元素，(x, y) 为模板中心的屏幕绝对坐标。
+        (True, (x, y)): 找到元素，(x, y) 为模板中心在截图中的坐标。
         (False, None): 未找到元素。
 
     Raises:
@@ -49,8 +55,11 @@ def find_template(template_path, screenshot=None, threshold=0.8):
     if screenshot is None:
         screenshot = _default_screenshot_fn()
 
-    screen_gray = _to_gray(screenshot)
-    template_gray = _load_template(template_path)
+    screen_gray = _to_gray(_as_image(screenshot))
+    if isinstance(template, (str, os.PathLike)):
+        template_gray = _load_template(template)        # 路径命中缓存
+    else:
+        template_gray = _to_gray(_as_image(template))   # 字节/PIL Image 现转
 
     if (template_gray.shape[0] > screen_gray.shape[0]
             or template_gray.shape[1] > screen_gray.shape[1]):
@@ -71,6 +80,19 @@ def find_template(template_path, screenshot=None, threshold=0.8):
     h, w = template_gray.shape
     center = (int(max_loc[0]) + w // 2, int(max_loc[1]) + h // 2)
     return True, center
+
+
+def _as_image(image):
+    """路径 / 字节 / PIL Image → PIL Image。
+
+    ``find_template`` 入参经此统一：路径用 ``Image.open`` 打开；字节（如工程
+    资源读出的 PNG 字节）包进 ``BytesIO`` 再打开；PIL Image 原样返回。
+    """
+    if isinstance(image, (str, os.PathLike)):
+        return Image.open(image)
+    if isinstance(image, (bytes, bytearray)):
+        return Image.open(io.BytesIO(image))
+    return image
 
 
 def _to_gray(img):

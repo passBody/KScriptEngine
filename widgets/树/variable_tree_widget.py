@@ -457,6 +457,14 @@ class VariableTreeWidget(QTreeWidget):
             self._edit_panel.load(self._current_path())
         return self._edit_panel
 
+    def refresh_edit_panel(self) -> None:
+        """执行后刷新当前编辑卡预览（如截图类步骤覆盖了图片资源后）。
+
+        未构建编辑卡或未选中变量时静默无操作。
+        """
+        if self._edit_panel is not None:
+            self._edit_panel.reload_current()
+
 
 # ----------------------------------------------------------------
 # 编辑卡（中）
@@ -562,6 +570,17 @@ class VariableEditPanel(QStackedWidget):
         self._rebuild_editor(var.data)
         self._validate()
         self._update_undo_btn()
+
+    def reload_current(self) -> None:
+        """以当前路径重载编辑器（同路径：保留撤销栈）。
+
+        供执行后刷新用：截图类步骤原地覆盖了图片变量指向的资源后，
+        重读 ``package.read_file`` 重建缩略图，无需切走再切回或重开工程。
+        未选中变量时静默无操作。
+        """
+        if not self._path:
+            return
+        self.load(self._path)
 
     def _rebuild_editor(self, value: Any) -> None:
         """用 ``value`` 重建当前变量的编辑器（不清 undo 栈）。"""
@@ -1067,6 +1086,33 @@ if __name__ == "__main__":
     ed_img = ep._editor_slot_lay.itemAt(0).widget()
     assert ed_img.height() > 400, ed_img.height()
     ep.hide()
+
+    # ---- 执行后刷新预览：截图类步骤原地覆盖图片资源后，refresh_edit_panel 重读字节 ----
+    tree.setCurrentItem(tree._find_item("组1/p"))           # image 变量，指向 assets/a.png
+    assert ep.currentIndex() == 1
+    old_pix = thumbs[0].pixmap()
+    pkg.write_file("assets/a.png", _png("#27ae60"))         # 同名文件被覆盖为新图（模拟截图写入）
+    tree.refresh_edit_panel()                               # 模拟执行结束触发刷新
+    new_ed = ep._editor_slot_lay.itemAt(0).widget()
+    assert new_ed is not None
+    new_thumb = new_ed.findChildren(_ClickableLabel)[0]
+    assert not new_thumb.pixmap().isNull()                  # 仍是合法图（非占位）
+    # 资源字节变了 → 缩略图内容变化（用像素差判定，避免受缩放尺寸干扰）
+    def _sig(pm):
+        im = pm.toImage()
+        return im.pixelColor(im.width() // 2, im.height() // 2).rgb()
+    assert _sig(old_pix) != _sig(new_thumb.pixmap()), \
+        ("刷新后缩略图应反映新资源", _sig(old_pix), _sig(new_thumb.pixmap()))
+    # 再次覆盖不同色再刷新 → 内容再变（验证可重复刷新，非一次性）
+    pkg.write_file("assets/a.png", _png("#e74c3c"))
+    tree.refresh_edit_panel()
+    new_thumb2 = ep._editor_slot_lay.itemAt(0).widget().findChildren(_ClickableLabel)[0]
+    assert _sig(new_thumb.pixmap()) != _sig(new_thumb2.pixmap()), "二次覆盖应再次刷新"
+    # 复位 a.png 原内容，避免污染后续冒烟
+    pkg.write_file("assets/a.png", _png("#3498db"))
+    # 未构建编辑卡时 refresh_edit_panel 静默不崩
+    bare = VariableTreeWidget(pkg, VariableTree.create_empty())
+    bare.refresh_edit_panel()                               # _edit_panel 为 None
 
     # string：编辑期不入栈；确认后才入栈；撤销回退上一次确认（可多次）
     tree.setCurrentItem(tree._find_item("s"))     # s = "hello"

@@ -120,6 +120,16 @@ class ResourceManagementTree(ManagementTree):
         assert isinstance(r, ResourceTreeWidget)
         return self._ensure("_preview", r.preview_widget)
 
+    def refresh_preview(self) -> None:
+        """执行后刷新当前资源预览（截图类步骤覆盖图片资源后）。
+
+        委托 :meth:`ResourceTreeWidget.refresh_preview` 重读当前项字节重画；
+        预览面板尚未懒构建时静默（无对象可刷）。
+        """
+        r = self._rtree
+        if r is not None:
+            r.refresh_preview()
+
 
 class VariableManagementTree(ManagementTree):
     """变量管理树：``VariableTreeWidget`` + 其编辑卡。"""
@@ -144,6 +154,16 @@ class VariableManagementTree(ManagementTree):
         v = self.tree_widget()
         assert isinstance(v, VariableTreeWidget)
         return self._ensure("_preview", v.preview_widget)
+
+    def refresh_preview(self) -> None:
+        """执行后刷新当前变量编辑卡预览（截图类步骤覆盖图片资源后）。
+
+        委托 :meth:`VariableTreeWidget.refresh_edit_panel` 重读当前项字节重建缩略图；
+        编辑卡尚未懒构建时静默。
+        """
+        v = self._vtree
+        if v is not None:
+            v.refresh_edit_panel()
 
 
 class StepManagementTree(ManagementTree):
@@ -183,6 +203,7 @@ class StepListManagementTree(ManagementTree):
     page_renamed = pyqtSignal(str, str)     # (old, new)
     page_removed = pyqtSignal(str)
     list_selected = pyqtSignal(str)         # 当前页选中列表路径
+    edited = pyqtSignal()                   # 工程内容变更（页增删改/列表增删改/io编辑）→ 主窗口置脏
 
     def __init__(self, package: KscpPackage, tree: VariableTree,
                  mgr: Optional[StepManager] = None,
@@ -325,17 +346,43 @@ class StepListManagementTree(ManagementTree):
         self._page_container = box
 
     def _tree_for_page(self, name: str) -> StepListTreeWidget:
-        """页名 → 缓存的树实例（闭包携带页名转发信号）。"""
+        """页名 → 缓存的树实例。
+
+        信号转发经 ``tree-bound`` 方法（:meth:`_forward_list_selected` /
+        :meth:`_forward_store_changed`）按树身份查回**当前页名**，而非闭包捕获
+        建树时的页名——后者在页重命名后会失效：树信号仍携带旧名，
+        :meth:`_on_list_selected` / :meth:`_on_store_changed` 因页名不匹配
+        直接 return，宿主不重绑 → 视图停在旧页的列表（用户报告的共享视图 bug）。
+        """
         if name not in self._page_trees:
             tree = StepListTreeWidget(
                 self._page_store.get_page(name), self._mgr, self._clipboard,
                 self._save_store, None)
-            tree.list_selected.connect(
-                lambda path, n=name: self._on_list_selected(n, path))
-            tree.store_changed.connect(
-                lambda n=name: self._on_store_changed(n))
+            tree.list_selected.connect(self._forward_list_selected)
+            tree.store_changed.connect(self._forward_store_changed)
             self._page_trees[name] = tree
         return self._page_trees[name]
+
+    # ---- 信号转发（按树身份查当前页名，抗重命名） ----
+    def _page_name_of(self, tree: "StepListTreeWidget") -> Optional[str]:
+        """树实例 → 当前页名（重键后仍正确）。"""
+        for name, t in self._page_trees.items():
+            if t is tree:
+                return name
+        return None
+
+    def _forward_list_selected(self, path: str) -> None:
+        tree = self.sender()
+        page = self._page_name_of(tree) if isinstance(tree, StepListTreeWidget) else None
+        if page is not None:
+            self._on_list_selected(page, path)
+
+    def _forward_store_changed(self) -> None:
+        tree = self.sender()
+        page = self._page_name_of(tree) if isinstance(tree, StepListTreeWidget) else None
+        if page is not None:
+            self.edited.emit()          # 列表增删改/激活切换 → 主窗口置脏
+            self._on_store_changed(page)
 
     def _build_page_menu(self) -> QMenu:
         """下拉切换菜单：全部页标题、当前页勾选。"""
@@ -461,6 +508,7 @@ class StepListManagementTree(ManagementTree):
         t = self.current_tree()
         if t is not None:
             t.refresh_active_marks()
+        self.edited.emit()          # 工程内容变更 → 主窗口置脏
         if self._save_timer is None:
             self._save_timer = QTimer()
             self._save_timer.setSingleShot(True)
@@ -494,16 +542,49 @@ class StepListManagementTree(ManagementTree):
 
     # ---- 宿主联动 ----
     def _show_current(self) -> None:
-        """按当前页当前选中列表重绑宿主；未选/被删 → 占位页。"""
+        """按当前页当前选中列表重绑宿主；未选/被删 → 占位页。
+
+        绑定前先注入跳转类步骤的下拉数据源（仿 ``_apply_local_picker`` 模式）：
+        把当前页全部步骤的 ``tag`` 列表、全部列表路径写入各步骤 io，
+        供「跳转至签名 / 跳转至指定步骤列表」的自定义视图下拉显示。
+        """
         if self._host is None:
             return
         if self._current is None:
             self._host.set_list(None)
             return
         try:
-            self._host.set_list(self.store.get(self._current), self._mgr)
+            lst = self.store.get(self._current)
         except FileNotFoundError:
             self._host.set_list(None)
+            return
+        self._inject_jump_sources(lst)
+        self._host.set_list(lst, self._mgr)
+
+    def _inject_jump_sources(self, lst: StepList) -> None:
+        """给列表内步骤 io 注入当前页跳转下拉数据源（签名列表 / 列表路径列表）。
+
+        宿主侧注入（非运行期）：``io._jump_tags`` = 当前页全部非空 tag；
+        ``io._jump_paths`` = 当前页全部列表路径。跳转类步骤的自定义视图经
+        ``getattr(io, "_jump_tags", None)`` 防御读取，未注入则空列表。
+        编辑页内容（增删步骤/改签名/增删列表）后由 :meth:`_on_edited`
+        落盘时重绑 → 数据源随当前页结构刷新。
+        """
+        tags: List[str] = []
+        for _path, _is_group in self.store.walk():
+            if _is_group:
+                continue
+            try:
+                sl = self.store.get(_path)
+            except FileNotFoundError:
+                continue
+            for s in sl.steps:
+                if s.tag and s.tag.strip() and s.tag not in tags:
+                    tags.append(s.tag)
+        paths = self.store.paths()
+        for s in lst.steps:
+            s.io._jump_tags = tags
+            s.io._jump_paths = paths
 
     def _on_list_selected(self, page: str, path: str) -> None:
         """某页树选中列表：记录该页选中态；当前页 → 联动宿主 + 统一出口信号。"""
@@ -519,15 +600,31 @@ class StepListManagementTree(ManagementTree):
 
         删除 → 占位页；其余（尤其树勾选框切换激活，list_selected 不触发）
         → 重建卡片画面，激活切换立即刷新视图。后台页变更不联动（宿主只显示当前页）。
+
+        **删除兜底**：``_changed`` 删列表后调 ``refresh(next_or_None)``——若还有列表，
+        树重选触发 ``list_selected`` 把 ``_current``/宿主更新到新列表（正常路径）；
+        若删空（``next is None``），树清空选择、``_current`` 保持旧值、不发
+        ``list_selected``。后者会让宿主停在已脱离 store 的 detached 列表上
+        （用户报告「删空后视图仍有内容、仍可右键添加」）。故补兜底：当前页变更且
+        ``_current`` 指向的列表已不在页内（含删空后旧路径）→ 宿主回占位页。
         """
-        if page != self._current_page or self._host is None or self._current is None:
+        if page != self._current_page or self._host is None:
+            return
+        if self._current is None:
+            self._host.set_list(None)
             return
         try:
             lst = self.store.get(self._current)
         except FileNotFoundError:
             self._host.set_list(None)
-        else:
-            self._host.set_list(lst, self._mgr)
+            return
+        # 兜底：store 里的列表对象与宿主当前绑定的一致才重画；否则回占位（防 detached）。
+        bound = self._host._view._step_list
+        if bound is not lst:
+            self._host.set_list(None)
+            return
+        self._inject_jump_sources(lst)
+        self._host.set_list(lst, self._mgr)
 
     def repoint_composite_refs(self, old_path: str, new_path: str) -> int:
         """合成卡片重命名时，把**全部页**内引用 ``old_path`` 的条目改指
@@ -591,6 +688,7 @@ class StepListManagementTree(ManagementTree):
             return False
         lst.add(step)
         self._save_store()
+        self.edited.emit()          # 列表内容变更 → 主窗口置脏
         if self._host is not None:
             self._host.set_list(lst, self._mgr)
         t = self.current_tree()
@@ -610,6 +708,8 @@ class CompositeManagementTree(ManagementTree):
     换校验树（:func:`build_validation_tree`，纯局部校验：绑 ``{{全局}}`` 即时红卡）；
     签名变更 → 更新 sigs + 改指 body 引用 + 重建选择器/校验树 + 刷新 + 按钮文案。
     """
+
+    edited = pyqtSignal()   # 工程内容变更（卡片增删改/签名变更）→ 主窗口置脏
 
     def __init__(self, package: KscpPackage, tree: VariableTree,
                  mgr: Optional[StepManager],
@@ -713,6 +813,7 @@ class CompositeManagementTree(ManagementTree):
             else:
                 self._apply_local_picker(body)
                 self._host.refresh_validity()   # 背景+标签重同步到换后的 io._tree
+        self.edited.emit()          # 工程内容变更 → 主窗口置脏
         if self._save_timer is None:
             self._save_timer = QTimer()
             self._save_timer.setSingleShot(True)
@@ -869,6 +970,7 @@ class CompositeManagementTree(ManagementTree):
 
     def _on_store_changed(self) -> None:
         """树内容变更（添加/粘贴/删除）→ 宿主同步当前卡片。"""
+        self.edited.emit()          # 卡片增删改 → 主窗口置脏
         if self._host is None or self._current is None:
             return
         try:
@@ -1126,6 +1228,8 @@ if __name__ == "__main__":
     import sys
 
     from PyQt5.QtWidgets import QApplication, QLabel
+    from PyQt5.QtGui import QImage, QColor
+    from PyQt5.QtCore import QBuffer as _QBuf, QIODevice
 
     from model.工程.kscp_package import KscpPackage
     from model.变量.project_variable import ProjectVariable
@@ -1152,6 +1256,34 @@ if __name__ == "__main__":
     v = VariableManagementTree(pkg, tree)
     assert v.name == "变量"
     assert isinstance(v.tree_widget(), VariableTreeWidget)
+
+    # ---- refresh_preview：鸭子类型，截图覆盖资源后刷新预览不崩 ----
+    # 资源树：选中图片资源 → 覆盖字节 → refresh_preview 应重读字节刷新（不崩）
+    def _png(color):
+        img = QImage(40, 30, QImage.Format_RGB32); img.fill(QColor(color))
+        b = _QBuf(); b.open(QIODevice.ReadWrite); img.save(b, "PNG"); return bytes(b.data())
+    pkg.write_file("assets/r.png", _png("#3498db"))
+    r._rtree = r.tree_widget()                       # 懒构建
+    r._rtree.refresh()                               # 写文件在树构建后 → 重建以纳入 r.png
+    r._rtree.setCurrentItem(r._rtree._find_item("assets/r.png"))
+    app.processEvents()
+    pv = r._rtree.preview_widget()
+    assert pv.currentIndex() == 1 and not pv._raw_pixmap.isNull()
+    _old_sig = pv._raw_pixmap.toImage().pixelColor(15, 15).rgb()
+    pkg.write_file("assets/r.png", _png("#e74c3c"))  # 模拟截图覆盖
+    r.refresh_preview()
+    _new_sig = pv._raw_pixmap.toImage().pixelColor(15, 15).rgb()
+    assert _old_sig != _new_sig, "ResourceManagementTree.refresh_preview 应重读字节"
+    # 变量树：选中 image 变量 → 覆盖资源 → refresh_preview 不崩（编辑卡已建则刷新）
+    pkg.write_file("assets/v.png", _png("#27ae60"))
+    tree.add("img1", ProjectVariable.create("image", "assets/v.png", pkg))
+    v._vtree = v.tree_widget()                       # 懒构建
+    v._vtree.setCurrentItem(v._vtree._find_item("img1"))
+    pkg.write_file("assets/v.png", _png("#f1c40f"))  # 模拟截图覆盖
+    v.refresh_preview()                              # 静默不崩
+    # 懒构建前 refresh_preview 静默（_rtree/_vtree 为 None）
+    bare_r = ResourceManagementTree(pkg); bare_r.refresh_preview()
+    bare_v = VariableManagementTree(pkg, tree); bare_v.refresh_preview()
 
     t = StepManagementTree(pkg)
     assert t.name == "步骤模板"

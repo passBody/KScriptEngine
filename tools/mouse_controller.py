@@ -233,8 +233,6 @@ class MouseController:
         """
         if x is not None and y is not None:
             self.set_position(x, y)
-            time.sleep(0.02)
-        
         if button == "left":
             self.left_down()
             time.sleep(delay)

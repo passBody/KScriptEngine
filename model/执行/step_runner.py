@@ -30,10 +30,24 @@ from typing import Callable, List, Optional, Tuple
 
 from model.log_model import LogModel
 from model.执行.run_interrupt import clear_stop_event, set_stop_event
-from model.步骤.step import StepStatus
+from model.步骤.step import Step, StepStatus
 from model.步骤.step_list_store import StepListStore
 
-__all__ = ["StepRunner", "StepRunnerState"]
+__all__ = ["StepRunner", "StepRunnerState", "ExecPlanEntry"]
+
+
+class ExecPlanEntry:
+    """扁平执行序列单项：一个可运行步骤 + 其所属步骤列表路径。
+
+    供跳转类步骤（跳转至签名 / 跳转至指定步骤列表）在 ``run()`` 内查兄弟/目标，
+    无需子类自行反查宿主列表（Step 无父链）。仅执行期注入，编辑期不参与。
+    """
+
+    __slots__ = ("step", "path")
+
+    def __init__(self, step: Step, path: str) -> None:
+        self.step = step          # 可运行步骤实例（enabled）
+        self.path = path          # 该步骤所属步骤列表在当前页内的路径
 
 
 class StepRunnerState(Enum):
@@ -122,27 +136,50 @@ class StepRunner:
             # （单列表模式只复位该列表——其余列表状态不受本次执行影响）
             if self._only_path is not None:
                 try:
-                    prog = [s.do for s in self._store.get(self._only_path).steps
-                            if s.enabled]
+                    sl = self._store.get(self._only_path)
                 except FileNotFoundError:
                     LogModel.instance().error(
                         "单列表执行：列表不存在: %s" % self._only_path)
                     return False
+                plan = [ExecPlanEntry(s, self._only_path)
+                        for s in sl.steps if s.enabled]
                 reset_paths = [self._only_path]
             else:
-                prog = self._store.all_do_methods()
+                plan = self._all_enabled_steps()
                 reset_paths = [p for p, g in self._store.walk() if not g]
             for path in reset_paths:
                 for step in self._store.get(path).steps:
                     step.status = StepStatus.PENDING
             self._stop_event.clear()
             self._progress = (0, 0)
-            if not prog:
+            if not plan:
                 LogModel.instance().info("无可执行的步骤")
                 return False                     # 空程序：状态保持 READY
             self._set_state(StepRunnerState.RUNNING)
-        threading.Thread(target=self._run, args=(prog,), daemon=True).start()
+        threading.Thread(target=self._run, args=(plan,), daemon=True).start()
         return True
+
+    def _all_enabled_steps(self) -> List["ExecPlanEntry"]:
+        """按 ``all_do_methods`` 同序（插入序 DFS、enabled 过滤）收集扁平执行序列。
+
+        与 :meth:`StepListStore.all_do_methods` 顺序一致——跳转类步骤按本序列
+        计算 ``target_index - self_index`` 偏移，须与执行器 ``pc += offset`` 对齐。
+        """
+        out: List["ExecPlanEntry"] = []
+        self._collect_steps(self._store.root, "", out)
+        return out
+
+    @staticmethod
+    def _collect_steps(node: dict, prefix: str,
+                       out: List["ExecPlanEntry"]) -> None:
+        for key, value in node.items():
+            path = key if not prefix else prefix + "/" + key
+            if hasattr(value, "steps"):           # StepList 叶子
+                for s in value.steps:
+                    if s.enabled:
+                        out.append(ExecPlanEntry(s, path))
+            else:                                # 组字典
+                StepRunner._collect_steps(value, path, out)
 
     def request_stop(self) -> None:
         """协作式停止：当前步骤完成后退出；非运行态静默忽略。"""
@@ -152,7 +189,7 @@ class StepRunner:
                 self._set_state(StepRunnerState.STOPPING)
 
     # ---- 执行循环（工作线程） ----
-    def _run(self, prog: List[Callable[[], int]]) -> None:
+    def _run(self, plan: List["ExecPlanEntry"]) -> None:
         # 登记须在本工作线程内（run_interrupt 为线程本地：登记者=睡觉者，
         # 并发执行器互不覆盖/误停）；先于第一步 do，可观察行为与原先一致
         if self._stop_mode == "immediate":
@@ -160,22 +197,31 @@ class StepRunner:
         try:
             pc = 0
             steps_done = 0
-            while pc < len(prog) and not self._stop_event.is_set():
+            while pc < len(plan) and not self._stop_event.is_set():
                 steps_done += 1
                 if steps_done > self.max_steps:
                     LogModel.instance().error(
                         "执行步数超过上限 %d，已停止（偏移量 0/负值疑似死循环）"
                         % self.max_steps)
                     break
-                self._notify_progress(pc + 1, len(prog))   # 每步执行前报进度
+                self._notify_progress(pc + 1, len(plan))   # 每步执行前报进度
+                entry = plan[pc]
+                # 注入执行上下文：跳转类步骤在 run() 内据此查兄弟/目标列表路径。
+                # 不持有强引用生命周期外对象——plan 本身即本次执行的扁平序列。
+                entry.step._exec_index = pc
+                entry.step._exec_plan = plan
                 try:
-                    offset = prog[pc]()     # do(): input -> run -> output
+                    offset = entry.step.do()   # do(): input -> run -> output
                 except Exception:
                     break                   # 遇错停止（错误日志由 do() 记录）
                 pc += offset
                 if pc < 0:
                     pc = 0                  # 负偏移回跳，最前钳到 0
         finally:
+            # 清理注入的执行上下文（步骤实例可能跨多次执行复用，勿残留旧 plan）
+            for e in plan:
+                e.step._exec_index = None
+                e.step._exec_plan = None
             self._stop_event.clear()
             if self._stop_mode == "immediate":
                 clear_stop_event(self._stop_event)   # 注销停止事件登记
@@ -500,5 +546,47 @@ if __name__ == "__main__":
     runner.start()
     assert runner.state is StepRunnerState.READY
     assert any("列表不存在" in e.message for e in LogModel.instance().entries)
+
+    # ---- 执行上下文注入：跳转类步骤在 run() 内读 _exec_index/_exec_plan ----
+    # _exec_plan 元素为 ExecPlanEntry(step, path)，含所属列表路径
+    seen = []
+
+    class _CtxProbeStep(Step):
+        name = "上下文探针"
+        description = "记录注入的执行上下文"
+        input_class = _Out          # 无输入
+        output_class = _Out
+        idxs = []
+        paths = []
+
+        def run(self) -> int:
+            seen.append((self._exec_index, [(e.path, e.step.tag)
+                                             for e in self._exec_plan]))
+            return 1
+
+    _CtxProbeStep.calls = []
+    store = StepListStore.create_empty()
+    store.add_group("组甲")
+    sl_a = StepList.create_empty()
+    sa = _CtxProbeStep.create_default(None, None)  # type: ignore
+    sa.tag = "A"
+    sl_a.add(sa)
+    store.add_list("组甲/列表1", sl_a)
+    sl_b = StepList.create_empty()
+    sb = _CtxProbeStep.create_default(None, None)  # type: ignore
+    sb.tag = "B"
+    sl_b.add(sb)
+    store.add_list("列表2", sl_b)
+    runner = StepRunner(store)
+    runner.start()
+    _wait_ready(runner)
+    # 两个步骤都执行过；各自看到完整 plan 与正确的自身索引
+    assert len(seen) == 2, seen
+    plan_paths = [("组甲/列表1", "A"), ("列表2", "B")]
+    assert seen[0][0] == 0 and seen[0][1] == plan_paths, seen[0]
+    assert seen[1][0] == 1 and seen[1][1] == plan_paths, seen[1]
+    # 收尾后注入字段清空（不残留旧 plan，步骤实例可跨执行复用）
+    assert sa._exec_index is None and sa._exec_plan is None
+    assert sb._exec_index is None and sb._exec_plan is None
 
     print("StepRunner smoke OK")

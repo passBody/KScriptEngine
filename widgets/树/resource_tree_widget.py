@@ -128,6 +128,7 @@ class ResourceTreeWidget(QTreeWidget):
     """管理 ``KscpPackage`` 的 ``assets/`` 子树的 QTreeWidget。"""
 
     path_selected = pyqtSignal(str)
+    changed = pyqtSignal()         # 资源增删改（落盘内存包后）→ 主窗口置脏
 
     def __init__(self, package: KscpPackage,
                  select_mode: bool = False,
@@ -330,6 +331,7 @@ class ResourceTreeWidget(QTreeWidget):
                 self._package.move(src, dst)
         if mode == "cut":
             self._clipboard = None
+        self.changed.emit()
         self.refresh()
 
     def _act_rename(self) -> None:
@@ -352,6 +354,7 @@ class ResourceTreeWidget(QTreeWidget):
             QMessageBox.warning(self, "重命名", "名称已存在：%s" % new_name)
             return
         self._package.move(old, new_path)
+        self.changed.emit()
         self.refresh(new_path)   # 选中重命名后的资源，预览随之更新不消失
 
     def _act_delete(self) -> None:
@@ -364,13 +367,17 @@ class ResourceTreeWidget(QTreeWidget):
             return
         for p in paths:
             self._package.remove(p)
+        self.changed.emit()
         self.refresh()
 
     def _act_add_file(self, context_dir: str) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "添加文件", "", "所有文件 (*)")
+        if not paths:
+            return
         for lp in paths:
             name = self._dedup_name(context_dir, os.path.basename(lp))
             self._package.add_file_from_local(context_dir + "/" + name, lp)
+        self.changed.emit()
         self.refresh()
 
     def _act_add_group(self, context_dir: str) -> None:
@@ -383,6 +390,7 @@ class ResourceTreeWidget(QTreeWidget):
             return
         name = self._dedup_name(context_dir, name)
         self._package.make_dir(context_dir + "/" + name)
+        self.changed.emit()
         self.refresh()
 
     # ---- 复制 / 去重 ----
@@ -460,6 +468,15 @@ class ResourceTreeWidget(QTreeWidget):
             self._preview = _PreviewPanel()
             self._update_preview(self._current_path())
         return self._preview
+
+    def refresh_preview(self) -> None:
+        """执行后刷新当前预览（如截图类步骤覆盖了图片资源后）。
+
+        重读当前选中项的资源字节并重画缩略图/文本；不重建整棵树
+        （截图只覆盖同名文件、结构不变）。未构建预览面板时静默无操作。
+        """
+        if self._preview is not None:
+            self._update_preview(self._current_path())
 
     def _on_current_changed(self, cur, prev) -> None:
         path = cur.data(0, _PATH_ROLE) if cur is not None else ""
@@ -649,5 +666,30 @@ if __name__ == "__main__":
     assert _hidden("assets/音乐副本") is True         # 目录无 png → 隐藏
     assert _hidden("assets/新组") is True             # 空目录 → 隐藏
     assert _hidden("assets/音乐/子") is True          # 空子目录 → 隐藏
+
+    # ---- 执行后刷新预览：截图类步骤原地覆盖图片资源后，refresh_preview 重读字节 ----
+    tree.setCurrentItem(tree._find_item("assets/real2.png"))   # 合法图片，预览已加载
+    assert pv.currentIndex() == 1 and not pv._raw_pixmap.isNull()
+    old_pix = pv._raw_pixmap
+    pkg.write_file("assets/real2.png", _make_png("#e74c3c"))   # 同名文件被覆盖为新图（模拟截图写入）
+    tree.refresh_preview()                                     # 模拟执行结束触发刷新
+    assert pv.currentIndex() == 1 and not pv._raw_pixmap.isNull()
+    new_pix = pv._raw_pixmap
+    # 资源字节变了 → 预览像素变化（取中心像素色判定，避免受缩放尺寸干扰）
+    def _sig(pm):
+        im = pm.toImage()
+        return im.pixelColor(im.width() // 2, im.height() // 2).rgb()
+    assert _sig(old_pix) != _sig(new_pix), \
+        ("刷新后预览应反映新资源", _sig(old_pix), _sig(new_pix))
+    # 再次覆盖再刷新 → 再次变化（验证可重复刷新）
+    pkg.write_file("assets/real2.png", _make_png("#27ae60"))
+    tree.refresh_preview()
+    new_pix2 = pv._raw_pixmap
+    assert _sig(new_pix) != _sig(new_pix2), "二次覆盖应再次刷新"
+    # 无预览面板时 refresh_preview 静默不崩
+    bare = ResourceTreeWidget(pkg)
+    # 选中目录而非图片 → 预览为占位态；refresh_preview 仍走 _update_preview 不崩
+    bare.setCurrentItem(bare._find_item("assets/音乐"))
+    bare.refresh_preview()
 
     print("ResourceTreeWidget smoke OK")

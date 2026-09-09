@@ -26,7 +26,8 @@ def read_text(image):
     """识别图片中的文字。
 
     Args:
-        image: 图片文件路径（str/os.PathLike）或 PIL Image 对象。
+        image: 图片文件路径（str/os.PathLike）、可读文件对象（如 BytesIO）
+            或 PIL Image 对象。
 
     Returns:
         识别出的文字，多块按识别顺序用换行拼接；
@@ -52,10 +53,17 @@ def read_text(image):
 
 
 def _open_image(image):
-    """str/os.PathLike 打开为 PIL Image；PIL Image 原样返回。"""
+    """str/os.PathLike/文件对象 打开为 PIL Image；PIL Image 原样返回。
+
+    ``Image.open`` 原生支持文件对象（BytesIO 等），故 file-like（有 ``read``）
+    一并走 ``Image.open``——避免调用方传 BytesIO 时落到 ``_to_bgr`` 调
+    ``img.convert`` 而 BytesIO 无该属性报错。
+    """
     if isinstance(image, (str, os.PathLike)):
         return Image.open(image)
-    return image
+    if hasattr(image, "read"):        # file-like（BytesIO 等）
+        return Image.open(image)
+    return image                      # PIL Image 原样
 
 
 def _to_bgr(img):
