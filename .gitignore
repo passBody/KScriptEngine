@@ -3,3 +3,5 @@ __pycache__/
 .superpowers/sdd/
 .venv/
 wheels/
+# 双击 .kscp 启动失败时由 tools/kscp_launch.pyw 落盘的堆栈
+kscp_launch_error.log

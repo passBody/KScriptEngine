@@ -43,6 +43,9 @@ MODULES = [
     "widgets.卡片.step_list_view", "widgets.树.step_tree_widget",
     "widgets.通用.ui_common", "widgets.树.variable_tree_widget",
     "widgets.通用.data_view_dialog",
+    # 无参运行 = 纯函数自检，**不接触注册表**（注册表往返演练在
+    # ``python tools/kscp_assoc.py selfcheck`` 的沙箱键里，不放进全量回归）
+    "tools.kscp_assoc",
 ]
 # 注：tools.image_marker 的 __main__ 是**交互式全屏标注 demo**（QEventLoop 阻塞
 # 等待人工点击），无断言、无法无人值守运行——不纳入本清单，人工验证。

@@ -57,6 +57,42 @@ ZIP 归档，内含：
 └─actions/            步骤模板（随工程分发，打开工程用包内版本）
 ```
 
+## 文件关联（双击 / 右键打开 .kscp）
+
+双击 `.kscp` 或右键「用 KScript 打开」即启动本程序——**关联里写死的是当前这份
+代码的绝对路径**，所以换目录后旧关联会指向已经不存在的文件，必须重挂：
+
+| 想做什么 | 双击 |
+|---|---|
+| 关联到**当前目录** | `安装-kscp文件关联.bat` |
+| 从当前目录摘掉关联 | `卸载-kscp文件关联.bat` |
+
+**换目录**：先在旧目录双击卸载，再到新目录双击安装。
+
+两个 bat 都调 `tools/kscp_assoc.py`（可单独用命令行跑，支持 `--dry-run` 先看
+再写）：
+
+```bash
+python tools/kscp_assoc.py install --dry-run   # 只打印将要写入的 11 条，不动注册表
+python tools/kscp_assoc.py install             # 真装
+python tools/kscp_assoc.py status              # 当前装没装、指向哪个目录
+python tools/kscp_assoc.py uninstall           # 卸载
+python tools/kscp_assoc.py selfcheck           # 纯函数自检 + 沙箱键往返演练
+```
+
+写入位置与行为：
+
+- **只动 `HKCU`（当前用户）**，不需要管理员权限，卸载干净不留残渣。
+- 注册 ProgID `KScript.Project` + `.kscp` 扩展名 + 图标 `icon/kscp.ico`。
+- 右键菜单两项：**用 KScript 打开**（`shell\open`）与**以管理员身份运行**
+  （`shell\runas`，带 UAC 盾牌图标）——模拟输入到游戏窗口需要后者。
+- 卸载**不会**盲删 `.kscp`：若该扩展名已被别的程序占用，只摘掉本程序登记的
+  值，保留对方的关联（归属校验，见 `tools/kscp_assoc.py: plan_uninstall`）。
+- 启动走 `tools/kscp_launch.pyw`（pythonw，无黑窗）。启动失败会弹 MessageBox
+  并写堆栈到项目根目录 `kscp_launch_error.log`（已在 `.gitignore`）。
+- 图标由 `icon/make_icon.py` 生成（同时产出 `kscript.*` 程序图标与
+  `kscp.*` 文件图标），改图标后重跑该脚本即可。
+
 ## 多执行列表与热键
 
 步骤列表树按「执行列表页」组织：树顶标题（右击重命名）+ 右侧下拉切换 +
@@ -83,7 +119,7 @@ ZIP 归档，内含：
 全量回归一条命令：
 
 ```bash
-python tests/smoke_all.py   # 41 模块冒烟 + 1 个自检（工程加载 + sample.kscp 模板一致性），失败非零退出
+python tests/smoke_all.py   # 42 模块冒烟 + 1 个自检（工程加载 + sample.kscp 模板一致性），失败非零退出
 ```
 
 ## 文档

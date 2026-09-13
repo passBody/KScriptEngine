@@ -1,0 +1,5 @@
+# cmd.exe 对 LF 行尾的 .bat 有解析边界问题；autocrlf 只在本机为 true 时才
+# 转成 CRLF，clone 到别的机器就未必。这里把批处理钉死为 CRLF，与 .gitignore
+# 里的 kscp_launch_error.log 一样属于关联安装功能的配套。
+*.bat text eol=crlf
+*.cmd text eol=crlf

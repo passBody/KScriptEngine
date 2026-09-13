@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="paper" x1="40" y1="24" x2="216" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef2f8"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="72" y1="0" x2="176" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4f8ce8"/>
+      <stop offset="1" stop-color="#6a5acd"/>
+    </linearGradient>
+  </defs>
+  <path d="M68 24 H160 L216 80 V204 A28 28 0 0 1 188 232 H68 A28 28 0 0 1 40 204 V52 A28 28 0 0 1 68 24 Z" fill="url(#paper)"/>
+  <path d="M160 24 V80 H216 Z" fill="#d7e0ef"/>
+  <path d="M68 24 H160 L216 80 V204 A28 28 0 0 1 188 232 H68 A28 28 0 0 1 40 204 V52 A28 28 0 0 1 68 24 Z" fill="none" stroke="#b9c6da" stroke-width="6" stroke-linejoin="round"/>
+  <rect x="72" y="100" width="104" height="22" rx="11" fill="url(#bar)"/>
+  <rect x="72" y="134" width="104" height="22" rx="11" fill="url(#bar)"/>
+  <rect x="72" y="168" width="52" height="22" rx="11" fill="url(#bar)"/>
+  <path d="M146 158 L146 188 L176 173 Z" fill="#3fb27a"/>
+</svg>
