@@ -10,7 +10,15 @@
 """
 import sys
 
-from widgets.main_widget import main
+from libs.win_dll import preload_msvc_runtime
+
+# **必须早于任何 PyQt5 导入**：PyQt5 一加载 Qt5Core.dll，就会把 Qt5/bin 里捆的
+# 那份旧 MSVC 运行时带进进程，之后再想顶掉它就晚了——OCR（onnxruntime）会以
+# "动态链接库(DLL)初始化例程失败" 挂掉。所以放在这里，而不是等真用 OCR 的时候。
+# 原因与验证见 libs/win_dll.py。
+preload_msvc_runtime()
+
+from widgets.main_widget import main  # noqa: E402  必须晚于上面那次预载
 
 
 def _parse(argv):
