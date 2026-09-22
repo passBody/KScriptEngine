@@ -24,7 +24,12 @@ MODULES = [
     # （actions/__main__.py：遍历包 + __all__ 每个名字可解析 + 模板 name 全局唯一），
     # 动态覆盖全部 action 模块——重组织/增删 action 时本清单无需改、不失效。
     "actions",
+    # 注：`actions` 的包自检**额外**跑一遍真实 .kscp 导入路径（StepManager 以合成
+    # 点分名从临时目录加载），专门盯「模板里写了相对导入」这类直跑发现不了的问题。
     "libs.key_control.base",
+    # libs.vision 的冒烟盯的是跨模块失败模式（导入牵连、DLL 加载顺序），
+    # 得在**同一个进程**里先导 PyQt5 再导视觉模块才复现得出，故单列一条。
+    "libs.win_dll", "libs.win_desktop", "libs.vision",
     "model.执行.hotkey", "model.工程.kscp_package", "model.log_model", "model.工程.path_util",
     "model.变量.project_variable", "model.执行.point_timeline", "model.执行.run_interrupt",
     "model.步骤.step", "model.步骤.step_io",
@@ -35,7 +40,7 @@ MODULES = [
     "model.合成卡片.composite_signature", "model.合成卡片.placeholder_step",
     "widgets.通用.activity_bar", "widgets.通用.image_overlay", "widgets.通用.log_widget",
     "widgets.main_widget", "widgets.树.management_trees",
-    "widgets.卡片.mark_preview_view",
+    "widgets.卡片.mark_preview_view", "widgets.卡片.serial_port_view",
     "widgets.合成卡片.composite_local_picker", "widgets.合成卡片.composite_signature_widget",
     "widgets.树.composite_tree_widget",
     "widgets.树.resource_tree_widget", "widgets.通用.settings_dialog",
@@ -45,7 +50,7 @@ MODULES = [
     "widgets.通用.data_view_dialog",
     # 无参运行 = 纯函数自检，**不接触注册表**（注册表往返演练在
     # ``python tools/kscp_assoc.py selfcheck`` 的沙箱键里，不放进全量回归）
-    "tools.kscp_assoc",
+    "tools.kscp_assoc", "tools.serial_controller", "tools.serial_step",
 ]
 # 注：tools.image_marker 的 __main__ 是**交互式全屏标注 demo**（QEventLoop 阻塞
 # 等待人工点击），无断言、无法无人值守运行——不纳入本清单，人工验证。

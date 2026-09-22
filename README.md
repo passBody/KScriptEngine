@@ -119,7 +119,7 @@ python tools/kscp_assoc.py selfcheck           # 纯函数自检 + 沙箱键往�
 全量回归一条命令：
 
 ```bash
-python tests/smoke_all.py   # 42 模块冒烟 + 1 个自检（工程加载 + sample.kscp 模板一致性），失败非零退出
+python tests/smoke_all.py   # 48 模块冒烟 + 1 个自检（工程加载 + sample.kscp 渲染），失败非零退出
 ```
 
 ## 文档
