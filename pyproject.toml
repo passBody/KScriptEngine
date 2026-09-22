@@ -17,4 +17,5 @@ dependencies = [
     "pillow>=11",
     "opencv-python>=4.10",
     "rapidocr-onnxruntime>=1.2.3",
+    "pyserial>=3.5",
 ]

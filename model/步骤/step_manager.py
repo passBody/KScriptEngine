@@ -113,10 +113,19 @@ class StepManager:
                 pass
 
     def _collect(self, module: object, folder: str, rel: str) -> int:
-        """从模块收集 Step 子类并注册（类级预检：注解非法/路径冲突 → 日志跳过）；返回注册数。"""
+        """从模块收集 **本文件定义** 的 Step 子类并注册（类级预检：注解非法/路径冲突 → 日志跳过）；返回注册数。
+
+        只认 ``__module__`` 等于本模块的类：模板若要 ``from tools.xxx import 基类``，
+        那个基类也会出现在模块命名空间里、也是 ``Step`` 子类，但**不是**本文件的模板。
+        不挡的话它会以空 ``name`` 注册成路径 ``<folder>/``（尾斜杠），且第一个导入它的
+        文件"注册成功"、其余文件全报**假**「路径冲突」（2026-09-21 串口步骤踩到）。
+        """
         count = 0
+        own = getattr(module, "__name__", None)
         for obj in vars(module).values():
             if not isinstance(obj, type) or not issubclass(obj, Step) or obj is Step:
+                continue
+            if getattr(obj, "__module__", None) != own:
                 continue
             path = ("%s/%s" % (folder, obj.name)) if folder else obj.name
             if path in self._registry:
