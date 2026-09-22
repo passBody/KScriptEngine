@@ -921,6 +921,10 @@ class CompositeManagementTree(ManagementTree):
         只改其 ``_kscript_orig`` 属性（换底层 picker）；否则直设（卡片未构造，
         StepCard 构造时会包）。**不可** ``s.io.picker = picker`` 顶掉包装器——否则
         之后 ``…`` 按钮选值不再触发刷新，残留错误标签（手输不受影响）。
+
+        顺带经 :meth:`_inject_jump_sources` 注入卡体内跳转下拉数据源——picker/树/
+        跳转源同属「body 步骤的编辑期上下文」，绑在同一处就不会有哪条重绑路径
+        漏掉一个（页面侧 ``_inject_jump_sources`` 也是随 ``set_list`` 一起注入）。
         """
         sig = (self._cstore.get_signature(self._current)
                if self._current else CompositeSignature.empty())
@@ -934,6 +938,29 @@ class CompositeManagementTree(ManagementTree):
             else:
                 s.io.picker = picker                 # 无包装器（卡片未构造）→ 直设
             s.io._tree = vtree
+        self._inject_jump_sources(body)
+
+    def _inject_jump_sources(self, body: StepList) -> None:
+        """给 body 步骤 io 注入**卡体内**跳转下拉数据源（签名列表 / 列表路径列表）。
+
+        与 :meth:`StepListManagementTree._inject_jump_sources` 同机制、**不同作用域**：
+        页面级注入的是当前页全部 tag/列表路径，而卡片体步骤的运行期 plan 只有
+        body 自己（见 :meth:`CompositeCard._run_body`）——注入页面数据源 = 让用户
+        从下拉里挑一个运行期必然「未找到」的值。故此处：
+
+        * ``io._jump_tags`` = body 内全部非空 tag（去重保序）；
+        * ``io._jump_paths`` = 卡片自身 ref——体内唯一能匹配的路径（= 跳回卡片开头）。
+
+        跳转类步骤的自定义视图经 ``getattr(io, …)`` 防御读取，未注入则空列表。
+        """
+        tags: List[str] = []
+        for s in body.steps:
+            if s.tag and s.tag.strip() and s.tag not in tags:
+                tags.append(s.tag)
+        paths = [self._current] if self._current else []
+        for s in body.steps:
+            s.io._jump_tags = tags
+            s.io._jump_paths = paths
 
     def _on_new_local(self, name: str, vtype: str, default: object) -> None:
         """picker「新建局部变量」→ 加进当前签名局部段 + 落盘 + 刷新。
@@ -1473,6 +1500,17 @@ class DemoStep(Step):
     assert cmgr._host.currentIndex() == 1
     assert cmgr._host._view._step_list is body
     assert cmgr._host._view._empty_hint == "右键添加步骤到该合成卡片"
+    # 卡体内跳转下拉数据源：作用域是**卡片体**（页面级数据源在这里是错的——body
+    # 步骤的运行期 plan 只有 body 自己，页面 tag/路径在体内必然「未找到」）
+    tagged = mgr_c.create_step("示例")
+    tagged.tag = "体内落点"
+    blank = mgr_c.create_step("示例")              # tag 为空 → 不该进下拉
+    body.add(tagged)
+    body.add(blank)
+    cmgr._on_edited()                              # 模拟编辑 → 重装配 body 编辑期上下文
+    assert tagged.io._jump_tags == ["体内落点"], tagged.io._jump_tags
+    assert blank.io._jump_tags == ["体内落点"], blank.io._jump_tags
+    assert tagged.io._jump_paths == ["登录"], tagged.io._jump_paths
     # 落盘防抖：编辑 → 500ms 单发定时器 → 写 composites.json
     cmgr._on_edited()
     assert cmgr._save_timer is not None and cmgr._save_timer.isActive()

@@ -15,6 +15,7 @@
 * :meth:`to_format_string` 返回引用标记（非 base64 blob）。
 * :meth:`run` 解析引用 → 取定义体内 :class:`StepList` → 自包含地跑一个 pc+偏移循环
   （照搬 :class:`model.执行.step_runner.StepRunner._run` 的语义，作用域限在内部），
+  并同样注入跳转类步骤所需的执行上下文（``_exec_index``/``_exec_plan``，**限体内**），
   返回 1 给外层执行器；外层视合成卡片为「一个不透明步」，偏移语义不被破坏。
 * 递归深度上限防 A→B→A 死循环；悬空引用（定义被删）→ 记日志、置 ERROR、软跳过。
 
@@ -277,8 +278,20 @@ class CompositeCard(Step):
         停止条件除类级冒烟事件外，另查线程本地登记的执行器停止事件——
         「立即停止」时随外层执行器一起中断，不再排空剩余子步骤
         （类级事件无人 set，仅本模块 __main__ 冒烟使用）。
+
+        另**注入执行上下文**（同 :meth:`StepRunner._run`）：不注入则「跳转至签名 /
+        跳转至指定步骤列表」读不到 plan，在卡片体内必抛「无执行上下文」。作用域
+        刻意限在**体内**——卡片对外是不透明的一步，体内步骤跳出去没有返回语义；
+        故 plan 只含 body 自己的 enabled 步骤，路径统一记卡片 ``ref``（body 这个
+        StepList 的对外身份）。体内步骤实例为定义所共有，并发跑同一卡片的两个页
+        会互踩 ``_exec_*``（同既有的 ``io._tree`` 换树），非本次引入。
         """
         from model.执行.run_interrupt import is_stop_requested
+        # 延迟导入：执行层 step_runner 反向依赖本模块（经 step_list_store）
+        from model.执行.step_runner import ExecPlanEntry
+
+        plan = [ExecPlanEntry(s, self.ref) for s in body.steps if s.enabled]
+        assert len(plan) == len(prog)     # 与 do_methods 同一 enabled 过滤，索引对齐
 
         pc = 0
         steps_done = 0
@@ -292,7 +305,14 @@ class CompositeCard(Step):
                     % (_MAX_SUB_STEPS, self.ref))
                 self.status = StepStatus.ERROR
                 return 1
-            offset = prog[pc]()
+            step = plan[pc].step
+            step._exec_index = pc
+            step._exec_plan = plan
+            try:
+                offset = prog[pc]()
+            finally:
+                step._exec_index = None
+                step._exec_plan = None
             pc += offset
             if pc < 0:
                 pc = 0
@@ -499,6 +519,44 @@ if __name__ == "__main__":
     outer2 = CompositeCard("组/卡片A", tree, pkg)
     outer2.do()
     assert _ProbeStep.calls == ["A1", "A3"], _ProbeStep.calls  # A1 跳过 A2
+
+    # ---- 体内注入执行上下文：跳转类步骤的命脉 ----
+    # 回归（2026-09-23）：_run_body 自带 pc 循环却从不注入 _exec_index/_exec_plan，
+    # 卡片体内任何「跳转至签名 / 跳转至指定步骤列表」必抛「无执行上下文」。此处的
+    # 探针只读执行上下文（不依赖 actions 包，模型层冒烟不反向导入模板）。
+    ctx_seen = []
+
+    class _CtxProbe(_ProbeStep):
+        name = "上下文探针"
+
+        def run(self) -> int:
+            plan = self._exec_plan
+            assert plan is not None and self._exec_index is not None, \
+                "卡片体内未注入执行上下文"
+            ctx_seen.append((self.tag, self._exec_index,
+                             [e.step.tag for e in plan], plan[0].path))
+            return 1
+
+    bodyCtx = StepList.create_empty()
+    for t in ("C0", "C1"):
+        s = _CtxProbe.create_default(tree, pkg)
+        s.io._input_values = ["0"]
+        s.tag = t
+        bodyCtx.add(s)
+    CompositeCard.set_resolver(
+        lambda ref: CompositeDefinition(bodyCtx, CompositeSignature.empty()))
+    assert CompositeCard("组/卡片A", tree, pkg).do() == 1
+    assert [c[0] for c in ctx_seen] == ["C0", "C1"], ctx_seen
+    assert [c[1] for c in ctx_seen] == [0, 1], ctx_seen        # 索引 = 体内 pc
+    assert all(c[2] == ["C0", "C1"] for c in ctx_seen), ctx_seen   # plan 只含体内步骤
+    assert all(c[3] == "组/卡片A" for c in ctx_seen), ctx_seen     # 路径 = 卡片 ref
+    # 跑完必须清干净：体内步骤实例跨次复用，残留旧 plan 会指向已结束的执行
+    assert all(s._exec_plan is None and s._exec_index is None
+               for s in bodyCtx.steps)
+    CompositeCard.set_resolver(                          # 还原给下面的 bodyA 用例
+        lambda ref: CompositeDefinition(bodyA, CompositeSignature.empty())
+        if ref == "组/卡片A" else None)
+
     # 偏移 0 死循环：单步重复 → 受 _MAX_SUB_STEPS 上限保护（ERROR + 日志，不崩）
     _ProbeStep.calls = []
     _ProbeStep.offsets = [0]

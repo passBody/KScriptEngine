@@ -273,6 +273,42 @@ if __name__ == "__main__":
     assert jmp2.status is StepStatus.ERROR
     assert any("跳转至签名" in e.message for e in LogModel.instance().entries)
 
+    # ---- 卡片体内跳转：合成卡片自跑 pc 循环，须自行注入执行上下文 ----
+    # 回归（2026-09-23 实测报错「跳转至签名：无执行上下文」）：卡片体内步骤
+    # 不归 StepRunner 管，_run_body 不注入就整类跳转失效。此处走真实执行路径：
+    # 体内第 0 步跳「落点」→ 中间那步必须被跳过。
+    from model.合成卡片.composite_card import CompositeCard
+    from model.合成卡片.composite_definition import CompositeDefinition
+    from model.合成卡片.composite_signature import CompositeSignature
+
+    ran = []
+
+    class _RecStep(_ProbeStep):
+        name = "记录探针"
+
+        def run(self) -> int:
+            ran.append(self.tag)
+            return 1
+
+    body = StepList.create_empty()
+    j_in = JumpToTag.create_default(tree, pkg)
+    j_in.io.change_value("input", 0, "落点")
+    j_in.tag = "跳"
+    body.add(j_in)
+    skipped = _RecStep.create_default(tree, pkg)
+    skipped.tag = "被跳过"
+    body.add(skipped)
+    landed = _RecStep.create_default(tree, pkg)
+    landed.tag = "落点"
+    body.add(landed)
+
+    CompositeCard.set_resolver(
+        lambda ref: CompositeDefinition(body, CompositeSignature.empty()))
+    card = CompositeCard("组/卡片", tree, pkg)
+    assert card.do() == 1
+    assert card.status is StepStatus.FINISHED, card.status
+    assert ran == ["落点"], ran            # 跳转生效：中间的「被跳过」没跑
+
     # ---- info_widget：下拉框列签名 + 选中回填 ----
     jmp.io.change_value("input", 0, "")
     jmp.io._jump_tags = ["目标签名", "后置", "目标签名"]   # 含重复，应去重
