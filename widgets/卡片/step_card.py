@@ -458,6 +458,41 @@ if __name__ == "__main__":
     for _b in _picks:
         _bg = _b.palette().color(_b.backgroundRole()).name()
         assert _bg != _default_bg, (_bg, _default_bg)   # 级联生效：非默认灰
+    # 卡片内 combo（跳转至签名/跳转至指定步骤列表的 info 视图）弹层：cards.qss 的
+    # 「QComboBox QAbstractItemView」白底规则须级联到弹层视图。弹层在代理内被内嵌
+    # 渲染、拿不到窗口背景 → 无此规则时渲染为**透明底**（条目字叠在卡片 io 行上，
+    # 表现为「下拉菜单没弹出来」）。此处同 ioPicker：断言级联生效（背景非默认）。
+    _ComboIn = _dc.make_dataclass("_ComboIn", [])
+    _ComboOut = _dc.make_dataclass("_ComboOut", [])
+
+    class _ComboStep(Step):
+        name = "下拉桩"
+        description = "info 视图含下拉框"
+
+        input_class = _ComboIn
+        output_class = _ComboOut
+
+        def info_widget(self, parent=None):
+            from PyQt5.QtWidgets import QComboBox
+            self._cb = QComboBox()
+            self._cb.addItems(["甲", "乙"])
+            return self._cb
+
+        def run(self) -> int:
+            return 1
+
+    from PyQt5.QtWidgets import QComboBox as _QCB
+    _cstep = _ComboStep.create_default(tree, pkg)
+    _ccard = StepCard(_cstep)
+    _combo = _ccard.findChild(_QCB)
+    assert _combo is not None, "桩步骤应生成 combo"
+    _pop = _combo.view()
+    _tmp_combo = _QCB()                               # 无样式参照（持有 combo：
+    _tmp_pop = _tmp_combo.view()                      # view 随 combo 一起被回收）
+    assert (_pop.palette().color(_pop.backgroundRole()).name()
+            != _tmp_pop.palette().color(_tmp_pop.backgroundRole()).name()), \
+        "卡片 combo 弹层未拿到 cards.qss 的白底规则（会渲染成透明底）"
+    assert _pop.palette().color(_pop.backgroundRole()).name() == "#ffffff"
     _cm.close()
 
     # ---- I-2：picker 包装链扁平（_kscript_orig 回溯计数 = 1，重建不累积） ----

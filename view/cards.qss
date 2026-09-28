@@ -103,3 +103,17 @@ StepCard[selected="true"] {
 #ioPicker:pressed {
     background: rgba(214, 228, 247, 0.98);
 }
+
+/* 卡片内下拉框（combo）的弹出列表（跳转至签名 / 跳转至指定步骤列表的 info 视图）。
+   卡片活在 QGraphicsView 的 QGraphicsProxyWidget 里 → combo 弹层被**内嵌进场景**
+   渲染（实测 QApplication.activePopupWidget() 为 None），拿不到窗口背景 →
+   列表**透明底**：条目文字直接叠在卡片自身的 io 行上，看起来像「下拉菜单没弹出来」
+   （同一页有多张这类卡片时最容易被发现）。QSS 背景由控件自绘、不依赖窗口 →
+   这里补白底 + 边框 + 选中色。作用域限于卡片（其它窗口的 combo 保持原生外观）。 */
+QComboBox QAbstractItemView {
+    background: #ffffff;
+    border: 1px solid rgba(128, 148, 178, 0.9);
+    outline: 0;
+    selection-background-color: rgba(72, 128, 220, 0.85);
+    selection-color: #ffffff;
+}
