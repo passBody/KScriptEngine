@@ -128,9 +128,20 @@ class StepClipboard:
     def __init__(self) -> None:
         self.steps: Optional[List[str]] = None          # 步骤格式串
         self.items: Optional[tuple] = None              # (名, 三元组列表)；列表/组剪贴板
+        self.sigs: dict = {}                            # 合成卡片签名快照（相对路径 → 签名）
         self.cut: bool = False                          # 剪切态（粘贴时移除源、不弹确认）
         self.cut_steps: List = []                      # 被剪切的源 Step（移动用）
         self.cut_source = None                          # 源 StepList（跨列表移动用）
+
+    def set_items(self, name: str, triples: list, sigs: Optional[dict] = None) -> None:
+        """写入列表/组条目 ``(名, 三元组列表)`` + 合成卡片签名快照。
+
+        签名与条目**一起写**：剪贴板是步骤列表树与合成卡片树共用的，分开设会出现
+        「合成卡片树复制（留下 sigs）→ 步骤列表树复制（只换 items）→ 粘进合成卡片树」
+        时拿旧签名张冠李戴。
+        """
+        self.items = (name, triples)
+        self.sigs = sigs or {}
 
 
 class TemplateChooserDialog(QDialog):

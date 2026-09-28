@@ -27,7 +27,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QRect, Qt, pyqtSignal
 from PyQt5.QtGui import (
@@ -42,6 +42,7 @@ from PyQt5.QtWidgets import (
 from model.步骤.step_list import StepList
 from model.合成卡片.composite_card_store import CompositeCardStore
 from model.合成卡片.composite_local_tree import build_validation_tree
+from model.合成卡片.composite_signature import CompositeSignature
 from model.步骤.step_manager import StepManager
 from widgets.卡片.step_list_view import StepClipboard
 from widgets.通用.ui_common import ERROR_COLOR
@@ -468,7 +469,23 @@ class CompositeTreeWidget(QTreeWidget):
             return                       # 剪贴板单条目契约 → 复制限单选
         path = tops[0]
         name = path.rsplit("/", 1)[-1]
-        self._clipboard.items = (name, self._triples_of(path))
+        self._clipboard.set_items(name, self._triples_of(path),
+                                  self._subtree_sigs(path))
+
+    def _subtree_sigs(self, path: str) -> Dict[str, CompositeSignature]:
+        """``path`` 子树 → 签名快照 ``{相对路径: 签名}``（顶层自身键为 ``""``）。
+
+        签名旁挂在 :attr:`CompositeCardStore.sigs`，不在格式串里 ——
+        移动/粘贴走的是「序列化 → 重建」，不显式搬运就丢（拖拽移动丢签名）。
+        """
+        return {p[len(path) + 1:] if p != path else "": s
+                for p, s in self._store.sigs.items()
+                if p == path or p.startswith(path + "/")}
+
+    def _apply_sigs(self, target: str, sigs: Dict[str, CompositeSignature]) -> None:
+        """把 :meth:`_subtree_sigs` 的快照落到新路径 ``target`` 下。"""
+        for rel, sig in sigs.items():
+            self._store.set_signature((target + "/" + rel) if rel else target, sig)
 
     def _triples_of(self, path: str) -> List[Tuple[str, bool, Optional[List[str]]]]:
         """路径 → 先序三元组 ``(相对路径, 是否组, 格式串|None)``。"""
@@ -508,6 +525,7 @@ class CompositeTreeWidget(QTreeWidget):
         if self._clipboard.items is None:
             return
         name, triples = self._clipboard.items
+        sigs = self._clipboard.sigs
         target = self._dedup_name(context_group, name)
         top_name = target.rsplit("/", 1)[-1]
         node = self._store.root
@@ -543,6 +561,7 @@ class CompositeTreeWidget(QTreeWidget):
             except (ValueError, FileExistsError) as e:
                 QMessageBox.warning(self, "粘贴", "粘贴 %s 失败：%s" % (full, e))
                 continue
+        self._apply_sigs(target, sigs or {})
         self._changed(target)
 
     def _dedup_name(self, parent: str, name: str) -> str:
@@ -648,8 +667,9 @@ class CompositeTreeWidget(QTreeWidget):
             parent = ""
         else:
             parent = target_path.rsplit("/", 1)[0] if "/" in target_path else ""
-        snap = [(p.rsplit("/", 1)[-1], self._triples_of(p)) for p in paths]
-        for _n, triples in snap:
+        snap = [(p.rsplit("/", 1)[-1], self._triples_of(p), self._subtree_sigs(p))
+                for p in paths]
+        for _n, triples, _sigs in snap:
             for _rel, is_group, fmts in triples:
                 if is_group or fmts is None:
                     continue
@@ -674,7 +694,7 @@ class CompositeTreeWidget(QTreeWidget):
             if position != QAbstractItemView.AboveItem:
                 index += 1                     # BelowItem / OnItem → 目标之后
         first_new: Optional[str] = None
-        for i, (name, triples) in enumerate(snap):
+        for i, (name, triples, sigs) in enumerate(snap):
             top_name = self._dedup_name(parent, name).rsplit("/", 1)[-1]
             at = None if index is None else max(0, index + i)
             if triples[0][1]:
@@ -696,6 +716,7 @@ class CompositeTreeWidget(QTreeWidget):
                         continue
                     self._store.add_list(
                         full, StepList.from_format_strings(fmts, self._manager))
+            self._apply_sigs(target, sigs)
         self._changed(first_new)
         return True
 
@@ -1012,6 +1033,32 @@ class DemoStep(Step):
     tw_e.refresh_error_marks()
     assert sp.io.is_valid
     assert not it_p.font(0).bold()
+
+    # ---- 拖拽移动 / 剪切粘贴保留签名（回归：签名旁挂 store.sigs，不随格式串走） ----
+    # 移动 = 「序列化 → 删除源 → 按目标位重建」，格式串里没有签名这一项，
+    # 不显式搬运就丢 —— 表现为「拖拽移动合成卡片时签名会丢失」。
+    sig_mv = CompositeSignature(inputs=[Param("x", "number")])
+    store_mv = CompositeCardStore.create_empty()
+    store_mv.add_list("甲", StepList.create_empty())
+    store_mv.add_list("乙", StepList.create_empty(), signature=sig_mv)
+    store_mv.add_group("组")
+    store_mv.add_list("组/内", StepList.create_empty(), signature=sig_mv)
+    tw_mv = CompositeTreeWidget(store_mv, mgr, StepClipboard(), lambda: None)
+    assert tw_mv._move_paths(["乙"], "甲", QAbstractItemView.AboveItem)
+    assert [p for p, _g in store_mv.walk()] == ["乙", "甲", "组", "组/内"]
+    assert store_mv.get_signature("乙").inputs[0].name == "x"     # 签名跟着卡片
+    assert store_mv.get_signature("甲").is_empty()                # 不串到隔壁
+    # 整组移动：组内卡片的签名键是相对路径，须一并搬到新前缀
+    assert tw_mv._move_paths(["组"], "乙", QAbstractItemView.AboveItem)
+    assert [p for p, _g in store_mv.walk()] == ["组", "组/内", "乙", "甲"]
+    assert store_mv.get_signature("组/内").inputs[0].name == "x"
+    # 剪切 + 粘贴（同一条「序列化 → 重建」路径，同样要带签名）
+    tw_mv.setCurrentItem(tw_mv.find_item("乙"))
+    tw_mv._act_cut()
+    assert store_mv.get_signature("乙").is_empty()                # 剪切后源已删
+    tw_mv._act_paste("")
+    assert "乙" in store_mv.paths()
+    assert store_mv.get_signature("乙").inputs[0].name == "x"     # 粘贴后签名还在
 
     # ---- 只读切换：不抛 ----
     tw.set_read_only(True)

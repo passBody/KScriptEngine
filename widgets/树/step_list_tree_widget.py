@@ -579,7 +579,7 @@ class StepListTreeWidget(QTreeWidget):
             return                       # 剪贴板单条目契约 → 复制限单选
         path = tops[0]
         name = path.rsplit("/", 1)[-1]
-        self._clipboard.items = (name, self._triples_of(path))
+        self._clipboard.set_items(name, self._triples_of(path))   # 无签名 → 清掉旧的
 
     def _triples_of(self, path: str) -> List[Tuple[str, bool, Optional[List[str]]]]:
         """路径 → 先序三元组 ``(相对路径, 是否组, 格式串|None)``（顶层项相对路径 = 空串）。"""
