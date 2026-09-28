@@ -45,6 +45,7 @@ from model.合成卡片.composite_card import CompositeCard
 from model.合成卡片.composite_card_store import CompositeCardStore
 from model.合成卡片.placeholder_step import PlaceholderStep
 from widgets.通用.log_widget import LogWidget
+from widgets.树.resource_tree_widget import ResourceTreeWidget
 from widgets.树.step_list_tree_widget import StepListTreeWidget
 from widgets.树.step_tree_widget import StepInfoPanel, StepTreeWidget
 from widgets.树.variable_tree_widget import VariableTreeWidget
@@ -58,8 +59,8 @@ from widgets.卡片.step_list_view import StepClipboard
 from widgets.通用.settings_dialog import SettingsDialog
 from widgets.通用.data_view_dialog import DataViewDialog
 from widgets.通用.ui_common import (
-    ERROR_COLOR, LandingCard, TitledPanel, ensure_qt_plugin_path,
-    load_app_qss, make_icon, window_size,
+    ERROR_COLOR, LandingCard, TitledPanel,
+    ensure_qt_plugin_path, load_app_qss, make_icon, run_dialog, window_size,
 )
 
 __all__ = ["MainWindow", "main"]
@@ -994,7 +995,8 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(
             sl_mgr.page_store.page_names(), self._page_hotkeys(),
             self._current_stop_mode(), self._minimize_hotkey(), self)
-        if dlg.exec_() == QDialog.Accepted:
+        # 点窗口以外 = 同 ESC（取消并关闭，丢弃未保存的改动）→ 走 else 恢复监听
+        if run_dialog(dlg):
             self._apply_settings(
                 dlg.hotkeys(), dlg.stop_mode(), dlg.minimize_hotkey())
         else:
@@ -1436,6 +1438,10 @@ class MainWindow(QMainWindow):
         res_mgr = self._managers[4]
         assert isinstance(res_mgr, ResourceManagementTree)
         res_mgr.tree_widget().changed.connect(self._mark_dirty)
+        # 资源树右键图片 → 「快速创建图片变量…」：窗口交给变量树（它有树 + 落盘 + 信号）
+        res_tree = res_mgr.tree_widget()
+        assert isinstance(res_tree, ResourceTreeWidget)
+        res_tree.set_quick_image_var(vtw.quick_create_image_var)
         # 进入工程第一画面：store 非空 → 自动选中第一个步骤列表（显示序 DFS 首个列表）
         # 树/宿主均为懒构建 → 先构建再选中；宿主须在联动前构建，否则列表不显示
         sl_mgr.tree_widget()               # 页容器（标题/下拉/添加页/删除该页 + 每页一棵树）
@@ -1632,6 +1638,9 @@ class KeyStep(Step):
     comp_mgr = win._managers[1]
     assert isinstance(comp_mgr, CompositeManagementTree)
     assert comp_mgr.name == "合成卡片"
+    # 资源树右键「快速创建图片变量…」已接到变量树（同一入口，非另起一套创建逻辑）
+    assert win._managers[4].tree_widget()._quick_image_var \
+        == win._managers[2].tree_widget().quick_create_image_var
     assert win._package is not None and win._package.exists("composites.json")
     # 默认管理树 = 步骤列表管理树（切换栏第 1 位高亮）
     assert win._switcher is not None

@@ -79,7 +79,9 @@ def _new_local_dialog(vtype: str, on_new) -> Optional[str]:
     btns.accepted.connect(dlg.accept)
     btns.rejected.connect(dlg.reject)
     lay.addRow(btns)
-    if dlg.exec_() != QDialog.Accepted:
+    # 非模态 + 点窗口以外关闭（同 ESC）：模态度下外部点击到不了事件过滤器
+    from widgets.通用.ui_common import run_dialog
+    if not run_dialog(dlg):
         return None
     name = name_edit.text().strip()
     if not name:
@@ -135,24 +137,25 @@ if __name__ == "__main__":
     created = []
     picker = make_composite_local_picker(sig, lambda n, t, d: created.append((n, t, d)))
     import PyQt5.QtWidgets as _W
+    import widgets.通用.ui_common as _uic
 
     class _StubAct:
         def __init__(self, text): self._t = text
         def text(self): return self._t
     orig_exec = _W.QMenu.exec_
-    orig_dlg = QDialog.exec_
+    orig_run = _uic.run_dialog
     try:
         _W.QMenu.exec_ = lambda self, *a, **k: _StubAct("入参·x")
         name = picker(None, "number", None)
         assert name == "x", name
-        # 选「新建局部变量…」→ _new_local_dialog；打桩 QDialog.exec_ 返回 Rejected（取消）→ None
+        # 选「新建局部变量…」→ _new_local_dialog；打桩 run_dialog 返回 False（取消）→ None
         _W.QMenu.exec_ = lambda self, *a, **k: _StubAct("新建局部变量…")
-        QDialog.exec_ = lambda self: QDialog.Rejected
+        _uic.run_dialog = lambda dlg: False
         name2 = picker(None, "number", None)
         assert name2 is None              # 取消 → None，on_new 不被调
     finally:
         _W.QMenu.exec_ = orig_exec
-        QDialog.exec_ = orig_dlg
+        _uic.run_dialog = orig_run
     assert created == [], created          # 取消路径未触发 on_new
 
     print("CompositeLocalPicker smoke OK")

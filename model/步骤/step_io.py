@@ -823,7 +823,9 @@ class StepIOWidget:
         btns.accepted.connect(on_ok)
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
-        dlg.exec_()
+        # 非模态 + 点窗口以外关闭（等价 ESC）：模态度下外部点击到不了事件过滤器
+        from widgets.通用.ui_common import run_dialog
+        run_dialog(dlg)
         return chosen["path"]
 
     def _fill_resources(self, parent_item: QTreeWidgetItem,
@@ -1090,8 +1092,9 @@ if __name__ == "__main__":
     # 卡片在 QGraphicsView 场景中时，QDialog(parent=卡片内控件) 会被 proxy 内嵌
     # 渲染、被相邻卡片遮挡 → 默认选择器必须用顶层窗口（无 parent），弹到外面
     _captured = []
-    _orig_exec = QDialog.exec_
-    QDialog.exec_ = lambda self: (_captured.append(self), QDialog.Accepted)[1]
+    import widgets.通用.ui_common as _uic
+    _orig_run = _uic.run_dialog
+    _uic.run_dialog = lambda dlg: (_captured.append(dlg), False)[1]
     try:
         w9 = StepIOWidget(["number"], [], tree, pkg)
         c9 = w9.gen_widget()
@@ -1105,12 +1108,12 @@ if __name__ == "__main__":
         assert _tw.topLevelItemCount() >= 1
         assert _tw.topLevelItem(0).text(1) == "number"
     finally:
-        QDialog.exec_ = _orig_exec
+        _uic.run_dialog = _orig_run
 
     # ---- I-3b：整合选择器——image 槽弹窗含 变量/资源 双页；资源叶子=包内路径 ----
     from PyQt5.QtWidgets import QTabWidget as _QTB
     _cap2 = []
-    QDialog.exec_ = lambda self: (_cap2.append(self), QDialog.Accepted)[1]
+    _uic.run_dialog = lambda dlg: (_cap2.append(dlg), False)[1]
     try:
         w_img = StepIOWidget(["image"], [], tree, pkg)
         w_img._default_picker(tree, "image", None)
@@ -1121,7 +1124,7 @@ if __name__ == "__main__":
         assert _res_tw is not None and _res_tw.topLevelItemCount() >= 1
         assert _res_tw.topLevelItem(0).data(0, _USER_ROLE) == "assets/1.png"
     finally:
-        QDialog.exec_ = _orig_exec
+        _uic.run_dialog = _orig_run
     # _pick_input：资源类槽选中包内路径 → 常量直写；变量引用 → 加 {{}}
     w_img.picker = lambda t, vt, p: "assets/1.png"
     c_img = w_img.gen_widget()

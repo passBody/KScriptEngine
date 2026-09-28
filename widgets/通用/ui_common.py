@@ -13,15 +13,18 @@ from __future__ import annotations
 import os
 from typing import Optional, Tuple
 
-from PyQt5.QtCore import QPoint, QRect, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QEventLoop, QObject, QPoint, QRect, Qt, pyqtSignal
 from PyQt5.QtGui import (
     QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygon,
 )
-from PyQt5.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import (
+    QApplication, QDialog, QFrame, QLabel, QVBoxLayout, QWidget,
+)
 
 __all__ = ["ClickableLabel", "CRITICAL_COLOR", "ERROR_COLOR", "LandingCard",
-           "TitledPanel", "ensure_qt_plugin_path", "load_app_qss", "make_icon",
-           "placeholder", "window_size"]
+           "TitledPanel", "ensure_qt_plugin_path",
+           "load_app_qss", "make_icon", "placeholder", "run_dialog",
+           "window_size"]
 
 # ---- 语义色（全工程唯一来源：错误红/严重暗红勿再散落硬编码） ----
 ERROR_COLOR = "#e15554"      # 错误红：io 非法 / 运行错误 / 日志 ERROR
@@ -82,6 +85,61 @@ def window_size() -> Tuple[int, int]:
         return (1280, 720)          # 兜底（无屏幕环境）
     g = screen.availableGeometry()
     return g.width() * 2 // 3, g.height() * 2 // 3
+
+
+# ---- 弹窗：非模态运行 + 点窗口以外关闭（设置窗口/卡片选择变量窗口共用） ----
+class _ClickOutsideCloser(QObject):
+    """点弹窗以外 → 等价 ESC（``reject``），并吞掉那次按下。
+
+    不设父对象：生存期由 :func:`run_dialog` 的局部引用把住、随其返回而销毁 ——
+    挂成弹窗子对象看似省事，但过滤器一旦活过 ``run_dialog``（例如冒烟里打桩了
+    ``run_dialog`` 而 ``finished`` 永不触发）就会在解释器收尾时随 QApplication
+    一起拆，实测会**崩在退出码上、且无回溯**（GC 次序不定 → 时好时坏）。
+    """
+
+    def __init__(self, dlg: QDialog) -> None:
+        super().__init__()
+        self._dlg = dlg
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt 命名)
+        if event.type() != QEvent.MouseButtonPress:
+            return False
+        top = obj.window() if isinstance(obj, QWidget) else None
+        # 弹窗自身、其弹出子窗（QComboBox 下拉等 windowType 为 Popup/ToolTip）→ 放行。
+        # 不能写 ``windowFlags() & Qt.Popup``：Popup 自带 Window 位，任意窗口都非零。
+        if top is self._dlg or (top is not None
+                               and top.windowType() in (Qt.Popup, Qt.ToolTip)):
+            return False
+        self._dlg.reject()
+        return True                    # 吞：不让下层控件收到这次点击（防误触）
+
+
+def run_dialog(dlg: QDialog) -> bool:
+    """非模态跑 ``dlg`` 并阻塞，返回是否「确定」（等价 ``exec_() == Accepted``）；
+    期间点窗口以外 = 同 ESC（取消并关闭，丢弃未提交的编辑）。
+
+    为何不用 ``exec_()``：它强制应用模态，而模态期间其它窗口的鼠标按下**到不了**
+    应用级事件过滤器（模态在 ``QApplication::notify`` 里就被丢弃，实测一个事件都
+    收不到）→「点窗口以外关闭」无从实现。非模态下事件照常派发，过滤器既看得到、
+    也吞得掉（外部那次点击不会误触下层控件）。
+
+    非模态的另一效果：弹窗开着时主窗口仍「可交互」，但任何点击都会先关掉弹窗
+    并被他吞——等价于模态的观感。窗口级快捷键（``Qt.WindowShortcut``）仍只随
+    各自窗口激活而触发，弹窗为活动窗口期间主窗口快捷键不会误触发。
+    """
+    app = QApplication.instance()
+    closer = _ClickOutsideCloser(dlg)
+    loop = QEventLoop()
+    dlg.finished.connect(loop.quit)
+    app.installEventFilter(closer)
+    try:
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()   # 非模态不保证抢焦点（热键编辑框等需立即可输入）
+        loop.exec_()
+    finally:
+        app.removeEventFilter(closer)
+    return dlg.result() == QDialog.Accepted
 
 
 def make_icon(kind: str) -> QIcon:
@@ -294,5 +352,66 @@ if __name__ == "__main__":
     # 应用级 QSS：view/app.qss 存在且含滚动条样式
     qss = load_app_qss()
     assert "QScrollBar" in qss, qss
+
+    # ---- 弹窗：非模态运行 + 点窗口以外关闭（吞掉该次点击，不误触下层） ----
+    from PyQt5.QtCore import QEvent, QPoint, QTimer
+    from PyQt5.QtTest import QTest
+    from PyQt5.QtWidgets import QDialog, QLineEdit, QPushButton
+
+    host = QWidget()
+    host.resize(240, 160)
+    hit = []
+    btn = QPushButton("下层按钮", host)
+    btn.move(10, 10)
+    btn.clicked.connect(lambda: hit.append(1))
+    host.show()
+    app.processEvents()
+
+    def _fallback(dlg, ms=3000):
+        """兜底：万一事件没按预期到达，别把冒烟挂死。"""
+        QTimer.singleShot(ms, dlg.reject)
+
+    # 1) 点弹窗以外 → 关闭（reject=取消）+ 该次点击被吞（下层按钮不响应）
+    dlg1 = QDialog(None)
+    dlg1.setWindowTitle("t1")
+    dlg1.resize(180, 120)
+    dlg1.move(400, 120)
+    _fallback(dlg1)
+    QTimer.singleShot(60, lambda: QTest.mouseClick(
+        btn, Qt.LeftButton, pos=QPoint(5, 5)))
+    assert run_dialog(dlg1) is False          # 未「确定」→ 取消语义（同 ESC）
+    assert hit == [], hit                     # 外部点击被吞，未误触下层按钮
+    assert not dlg1.isVisible()
+    # 过滤器随 run_dialog 返回即摘（否则会活到解释器收尾，崩在退出码上、无回溯）
+    QTest.mouseClick(btn, Qt.LeftButton, pos=QPoint(5, 5))
+    assert hit == [1], hit
+
+    # 2) 弹窗内部点击 → 不关闭（子控件照常收到）
+    dlg2 = QDialog(None)
+    dlg2.setWindowTitle("t2")
+    dlg2.resize(180, 120)
+    dlg2.move(400, 120)
+    edit = QLineEdit(dlg2)
+    edit.move(10, 10)
+    _fallback(dlg2)
+    still_open = []
+
+    def _click_inside():
+        QTest.mouseClick(edit, Qt.LeftButton, pos=QPoint(5, 5))
+        still_open.append(dlg2.isVisible())    # 内部点击后应仍开着
+
+    QTimer.singleShot(60, _click_inside)
+    QTimer.singleShot(200, dlg2.accept)
+    assert run_dialog(dlg2) is True            # 没被外部关闭 → 走到 accept
+    assert still_open == [True], still_open
+
+    # 3) run_dialog 透传 accept/reject 结果
+    dlg3 = QDialog(None)
+    QTimer.singleShot(20, dlg3.accept)
+    assert run_dialog(dlg3) is True
+    dlg4 = QDialog(None)
+    QTimer.singleShot(20, dlg4.reject)
+    assert run_dialog(dlg4) is False
+    host.close()
 
     print("ui_common smoke OK")

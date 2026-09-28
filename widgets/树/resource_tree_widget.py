@@ -42,16 +42,28 @@ from PyQt5.QtWidgets import (
 )
 
 from model.工程.kscp_package import KscpPackage
+from model.变量.project_variable import ProjectVariable
 from widgets.通用.image_overlay import ImageOverlay
 from widgets.通用.ui_common import ClickableLabel
 
 if TYPE_CHECKING:
+    from typing import Callable
     ...
 
 __all__ = ["ResourceTreeWidget"]
 
 _PATH_ROLE = 0x0100  # Qt.UserRole（PyQt5 运行期可用，取整数值规避存根误报）
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
+
+
+def _image_var_suffixes() -> Tuple[str, ...]:
+    """``image`` 变量类型接受的后缀。
+
+    比 :data:`_IMAGE_EXTS`（资源树预览用）**窄**：预览认 .bmp/.gif 等，变量只认
+    .png/.jpg —— 「快速创建图片变量」按变量类型把关，否则建出的变量值不合规。
+    """
+    h = ProjectVariable.type_of("image")
+    return tuple(h.suffixes) if h is not None else ()
 
 
 def _basename(path: str) -> str:
@@ -138,6 +150,8 @@ class ResourceTreeWidget(QTreeWidget):
         self._select_mode = select_mode
         self._clipboard: Optional[Tuple[List[str], str]] = None  # (paths, "copy"|"cut")
         self._preview: Optional[_PreviewPanel] = None
+        # 图片资源 → 快速创建 image 变量（宿主注入；None = 无此入口，独立使用场景）
+        self._quick_image_var: Optional["Callable[[str], None]"] = None
 
         self.setHeaderHidden(True)
         self.setSelectionMode(
@@ -258,6 +272,20 @@ class ResourceTreeWidget(QTreeWidget):
             return _parent(path) or "assets"
         return path  # 分组本身
 
+    def set_quick_image_var(self, fn: Optional["Callable[[str], None]"]) -> None:
+        """注入「快速创建图片变量」回调（收图片资源路径）；None → 菜单不显示该入口。"""
+        self._quick_image_var = fn
+
+    def _quick_image_target(self, paths: List[str]) -> Optional[str]:
+        """单选、且是 image 变量类型认得的图片文件 → 该资源路径；否则 None。"""
+        if self._quick_image_var is None or len(paths) != 1:
+            return None
+        p = paths[0]
+        sfx = _image_var_suffixes()
+        if sfx and self._package.is_file(p) and p.lower().endswith(sfx):
+            return p
+        return None
+
     def _on_context_menu(self, pos) -> None:
         if self._select_mode:
             return
@@ -279,6 +307,11 @@ class ResourceTreeWidget(QTreeWidget):
         add_menu = menu.addMenu("添加")
         a_add_file = add_menu.addAction("添加文件…")
         a_add_group = add_menu.addAction("添加组…")
+        quick_target = self._quick_image_target(paths)
+        a_quick_var = None
+        if quick_target is not None:
+            menu.addSeparator()
+            a_quick_var = menu.addAction("快速创建图片变量…")
 
         has_sel = bool(paths)
         a_copy.setEnabled(has_sel)
@@ -302,6 +335,9 @@ class ResourceTreeWidget(QTreeWidget):
             self._act_add_file(context_dir)
         elif action is a_add_group:
             self._act_add_group(context_dir)
+        elif a_quick_var is not None and action is a_quick_var:
+            assert quick_target is not None
+            self._quick_image_var(quick_target)     # 槽内部会刷新变量树并置脏
 
     # ================================================================
     # 操作
@@ -691,5 +727,21 @@ if __name__ == "__main__":
     # 选中目录而非图片 → 预览为占位态；refresh_preview 仍走 _update_preview 不崩
     bare.setCurrentItem(bare._find_item("assets/音乐"))
     bare.refresh_preview()
+
+    # ---- 快速创建图片变量：入口仅在「注入回调 + 单选 + image 类型认得的图片」时给 ----
+    got_paths = []
+    qtree = ResourceTreeWidget(pkg)
+    qtree.set_quick_image_var(got_paths.append)
+    assert qtree._quick_image_target(["assets/real2.png"]) == "assets/real2.png"
+    # 变量类型只认 .png/.jpg（比 _IMAGE_EXTS 窄）→ .gif/.bmp 不给入口（建出来必不合规）
+    pkg.write_file("assets/动图.gif", b"GIF89a")
+    pkg.write_file("assets/位图.bmp", b"BM")
+    assert qtree._quick_image_target(["assets/动图.gif"]) is None
+    assert qtree._quick_image_target(["assets/位图.bmp"]) is None
+    # 多选 / 目录 / 非图片文本 → 不给入口；未注入回调 → 一律不给
+    assert qtree._quick_image_target(["assets/real2.png", "assets/位图.bmp"]) is None
+    assert qtree._quick_image_target(["assets/音乐"]) is None
+    assert qtree._quick_image_target(["assets/说明.txt"]) is None
+    assert ResourceTreeWidget(pkg)._quick_image_target(["assets/real2.png"]) is None
 
     print("ResourceTreeWidget smoke OK")

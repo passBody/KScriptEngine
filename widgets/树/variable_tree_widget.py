@@ -39,7 +39,8 @@ from widgets.通用.image_overlay import ImageOverlay
 from widgets.树.resource_tree_widget import ResourceTreeWidget
 from widgets.通用.ui_common import ClickableLabel, ERROR_COLOR
 
-__all__ = ["VariableTreeWidget", "VariableEditPanel", "CreateVariableDialog"]
+__all__ = ["VariableTreeWidget", "VariableEditPanel", "CreateVariableDialog",
+           "QuickImageVarDialog"]
 
 _PATH_ROLE = 0x0100
 
@@ -299,6 +300,29 @@ class VariableTreeWidget(QTreeWidget):
         self._save()
         self.refresh(path)
         LogModel.instance().info("添加变量 %s（%s）" % (path, var.type))
+
+    def quick_create_image_var(self, resource_path: str) -> None:
+        """图片资源 → 快速创建 ``image`` 变量（资源树右键「快速创建图片变量…」入口）。
+
+        目录在弹窗的变量树里选（可新建），名称默认取文件名主干；值 = 该资源路径
+        （资源类变量存**路径**不存字节）。落盘后 ``tree_changed`` 带出「工程置脏 +
+        步骤列表/合成卡片重检颜色」，故宿主只需注入本方法，无需另接信号。
+        """
+        assert self._tree is not None
+        dlg = QuickImageVarDialog(self._package, self._tree, resource_path, self)
+        path, var = dlg.make()
+        if path is None or var is None:
+            LogModel.instance().debug("快速创建图片变量取消")
+            return
+        try:
+            self._tree.add(path, var)
+        except (FileExistsError, ValueError) as e:
+            QMessageBox.warning(self, "快速创建图片变量", "无法创建：%s" % e)
+            return
+        self._save()
+        self.refresh(path)
+        LogModel.instance().info(
+            "快速创建图片变量 %s（%s）" % (path, resource_path))
 
     def _act_add_group(self, context_group: str = "") -> None:
         assert self._tree is not None
@@ -979,6 +1003,191 @@ class CreateVariableDialog(QDialog):
         return path, var
 
 
+class QuickImageVarDialog(QDialog):
+    """图片资源 → 快速创建 ``image`` 变量：选变量树目录（可新建）+ 填名称。
+
+    与 :class:`CreateVariableDialog` 之差：类型固定 ``image``、值固定为被右击的
+    资源路径 → 只剩「目录 + 名称」两项，用起来像保存文件那样选目录再命名。
+    目录树末项 ``[新建目录…]`` 建在当前选中目录下（双击它，或选中后点「创建」）；
+    已存在的变量灰显 ``(已存在)`` 且不可选（不是目录），重名一眼可见。
+    """
+
+    def __init__(self, package: KscpPackage, tree: VariableTree,
+                 resource_path: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("快速创建图片变量")
+        self.resize(460, 460)
+        self._package = package
+        self._tree = tree
+        self._resource = resource_path
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(6)
+        res_lbl = QLabel("资源：%s" % resource_path)
+        res_lbl.setStyleSheet("color:#666;")
+        lay.addWidget(res_lbl)
+
+        self._tw = QTreeWidget()
+        self._tw.setHeaderHidden(True)
+        self._tw.setUniformRowHeights(True)
+        self._tw.currentItemChanged.connect(lambda *_: self._validate())
+        self._tw.itemDoubleClicked.connect(self._on_double)
+        lay.addWidget(QLabel("目录（变量树）："))
+        lay.addWidget(self._tw, 1)
+
+        self._name_edit = QLineEdit(_stem(resource_path))
+        self._name_edit.textChanged.connect(self._validate)
+        lay.addWidget(QLabel("名称："))
+        lay.addWidget(self._name_edit)
+
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        lay.addWidget(self._status)
+
+        self._btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self._btns.button(QDialogButtonBox.Ok).setText("创建")
+        self._btns.accepted.connect(self._on_ok)
+        self._btns.rejected.connect(self.reject)
+        lay.addWidget(self._btns)
+
+        self._new_item: Optional[QTreeWidgetItem] = None
+        self._rebuild("")
+        self._validate()
+
+    # ---- 目录树 ----
+    def _rebuild(self, select: str) -> None:
+        self._tw.clear()
+        root = self._tw.invisibleRootItem()
+        if root is None:
+            return
+        for name in self._tree.list_dir("/"):
+            if self._tree.is_group(name):
+                self._fill_group(root, name, name)
+        self._new_item = QTreeWidgetItem(root)          # 末项：新建目录入口
+        self._new_item.setText(0, "[新建目录…]")
+        self._new_item.setForeground(0, QColor("#2f6fd0"))
+        target = self._find(select) if select else None
+        if target is None:
+            target = self._tw.topLevelItem(0)
+        if target is not None:
+            self._tw.setCurrentItem(target)
+
+    def _fill_group(self, parent_item: QTreeWidgetItem, name: str,
+                    path: str) -> None:
+        item = QTreeWidgetItem(parent_item)
+        item.setText(0, name)
+        item.setData(0, _PATH_ROLE, path)
+        item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+        for child in self._tree.list_dir(path):
+            cpath = path + "/" + child
+            if self._tree.is_group(cpath):
+                self._fill_group(item, child, cpath)
+            else:                                       # 变量：灰显提示重名
+                vit = QTreeWidgetItem(item)
+                vit.setText(0, "%s(已存在)" % child)
+                vit.setForeground(0, QColor("#999999"))
+                vit.setFlags(Qt.ItemIsEnabled)          # 不可选：不是目录
+
+    def _find(self, path: str) -> Optional[QTreeWidgetItem]:
+        for it in self._all_items():
+            if it.data(0, _PATH_ROLE) == path:
+                return it
+        return None
+
+    def _all_items(self) -> List[QTreeWidgetItem]:
+        out: List[QTreeWidgetItem] = []
+
+        def rec(item: QTreeWidgetItem) -> None:
+            for i in range(item.childCount()):
+                ch = item.child(i)
+                if ch is not None:
+                    out.append(ch)
+                    rec(ch)
+        root = self._tw.invisibleRootItem()
+        if root is not None:
+            rec(root)
+        return out
+
+    def _selected_dir(self) -> str:
+        """选中项对应的目录路径；未选/选中「新建目录」→ 根 ``""``。"""
+        it = self._tw.currentItem()
+        if it is None or it is self._new_item:
+            return ""
+        return it.data(0, _PATH_ROLE) or ""
+
+    # ---- 交互 ----
+    def _on_double(self, item: Optional[QTreeWidgetItem], _col: int) -> None:
+        if item is self._new_item:
+            self._new_dir()
+
+    def _on_ok(self) -> None:
+        if self._tw.currentItem() is self._new_item:
+            self._new_dir()                             # 选中「新建目录」→ 先建目录
+            return
+        self.accept()
+
+    def _new_dir(self) -> None:
+        base = self._selected_dir()
+        name, ok = QInputDialog.getText(self, "新建目录", "目录名：")
+        if not ok:
+            return
+        name = name.strip()
+        if not name or "/" in name or name in (".", ".."):
+            QMessageBox.warning(self, "新建目录", "名称非法")
+            return
+        path = (base + "/" + name) if base else name
+        try:
+            self._tree.add_group(path)
+        except (FileExistsError, ValueError) as e:
+            QMessageBox.warning(self, "新建目录", "无法创建：%s" % e)
+            return
+        self._rebuild(path)                             # 新建目录即刻选中
+
+    def _validate(self) -> None:
+        ok_btn = self._btns.button(QDialogButtonBox.Ok)
+        if self._tw.currentItem() is self._new_item:
+            ok_btn.setEnabled(True)
+            self._status.setText("将新建目录")
+            self._status.setStyleSheet("color:#2f6fd0;")
+            return
+        name = self._name_edit.text().strip()
+        d = self._selected_dir()
+        path = (d + "/" + name) if d else name
+        ok, reason = True, "可创建"
+        if not name or "/" in name or name in (".", ".."):
+            ok, reason = False, "名称非法"
+        elif self._tree.exists(path):
+            ok, reason = False, "名称已存在：%s" % path
+        ok_btn.setEnabled(ok)
+        self._status.setText(reason)
+        self._status.setStyleSheet(
+            "color:%s;" % ("#27ae60" if ok else ERROR_COLOR))
+
+    def make(self) -> Tuple[Optional[str], Optional[ProjectVariable]]:
+        """跑完对话框返回 ``(path, var)``；取消/名称非法返回 ``(None, None)``。"""
+        # 非模态 + 点窗口以外关闭（同 ESC）：模态度下外部点击到不了事件过滤器
+        from widgets.通用.ui_common import run_dialog
+        if not run_dialog(self):
+            return None, None
+        name = self._name_edit.text().strip()
+        d = self._selected_dir()
+        path = (d + "/" + name) if d else name
+        try:
+            var = ProjectVariable.create("image", self._resource, self._package)
+        except (ValueError, TypeError):
+            return None, None
+        if not var.valid:
+            return None, None
+        return path, var
+
+
+def _stem(path: str) -> str:
+    """资源路径 → 去目录去后缀的主干名（作变量名默认值）。"""
+    base = path.rsplit("/", 1)[-1]
+    return base.rsplit(".", 1)[0] if "." in base else base
+
+
 if __name__ == "__main__":
     import sys
     from PyQt5.QtWidgets import QApplication, QHBoxLayout
@@ -1215,5 +1424,60 @@ if __name__ == "__main__":
     assert fired == [1]
     # 缺省构造走 _load（文件在）→ 与共享树互不影响
     assert tree._tree is not None and tree._tree.get("s").data == "world"
+
+    # ---- 资源树右键图片 → 快速创建 image 变量（目录树选择 + 名称 + 重名灰显） ----
+    import widgets.通用.ui_common as _uic
+    _orig_run = _uic.run_dialog
+    for _res in ("assets/a.png",):                 # 冒烟前半段已写入的 png
+        pkg.write_file(_res, _png("#3498db"))
+    vtw2 = VariableTreeWidget(pkg, VariableTree.create_empty())
+    vtw2._tree.add_group("软件图标")
+    vtw2._tree.add("软件图标/已有图",
+                   ProjectVariable.create("image", "assets/a.png", pkg))
+    qd = QuickImageVarDialog(pkg, vtw2._tree, "assets/a.png", None)
+    assert qd._name_edit.text() == "a"                  # 名称默认取文件名主干
+    # 目录树：组 + 已存在变量（灰显不可选）+ 末项「新建目录…」
+    texts = [it.text(0) for it in qd._all_items()]
+    assert "软件图标" in texts and "已有图(已存在)" in texts
+    assert qd._tw.topLevelItem(qd._tw.topLevelItemCount() - 1).text(0) == "[新建目录…]"
+    grp = qd._find("软件图标")
+    assert grp is not None
+    qd._tw.setCurrentItem(grp)
+    assert qd._selected_dir() == "软件图标"
+    # 组内重名 → 禁用创建并说明原因
+    qd._name_edit.setText("已有图")
+    assert not qd._btns.button(QDialogButtonBox.Ok).isEnabled()
+    assert "已存在" in qd._status.text()
+    # 换名 → 可创建，make() 返回 (路径, image 变量)；值 = 资源路径（非字节）
+    qd._name_edit.setText("新图")
+    assert qd._btns.button(QDialogButtonBox.Ok).isEnabled()
+    _uic.run_dialog = lambda dlg: True                  # 打桩「确定」（不真弹窗）
+    try:
+        qpath, qvar = qd.make()
+    finally:
+        _uic.run_dialog = _orig_run
+    assert qpath == "软件图标/新图", qpath
+    assert qvar is not None and qvar.type == "image" and qvar.valid
+    assert qvar.data == "assets/a.png"
+    # 取消 → (None, None)
+    qd._tw.setCurrentItem(grp)
+    _uic.run_dialog = lambda dlg: False
+    try:
+        assert qd.make() == (None, None)
+    finally:
+        _uic.run_dialog = _orig_run
+    # 入口方法：创建 + 落盘 + tree_changed（宿主据此置脏/重检卡片）。
+    # 内部自建对话框 → 默认选中首个目录项（软件图标）、名称取主干 a → 落在该目录下。
+    fired_q = []
+    vtw2.tree_changed.connect(lambda: fired_q.append(1))
+    _uic.run_dialog = lambda dlg: True
+    try:
+        vtw2.quick_create_image_var("assets/a.png")     # 真实入口（内部新建对话框）
+    finally:
+        _uic.run_dialog = _orig_run
+    assert vtw2._tree.exists("软件图标/a")
+    assert vtw2._tree.get("软件图标/a").data == "assets/a.png"
+    assert fired_q == [1]                               # 落盘 → tree_changed
+    assert pkg.exists("variables.json")
 
     print("VariableTreeWidget smoke OK")
