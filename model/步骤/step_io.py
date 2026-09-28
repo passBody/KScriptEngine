@@ -52,6 +52,14 @@ from model.变量.project_variable import ProjectVariable
 # Qt.UserRole 在 PyQt5 运行期可用（Pyright 存根误报为未知，这里取其整数值规避）
 _USER_ROLE = 0x0100  # Qt.UserRole
 
+# 行内文本省略宽度 / 行控件最小宽度（同一套预算：40+4+40+4+28 = 116 + 32 边距 = 148，
+# 小于卡片宽度下限 180 的可用内容宽 158 → 行尾 `…` 永远留在卡内）
+_ROW_ELIDE_PX = 80
+_ROW_MIN_PX = 40
+# 资源按钮的省略预算更宽松（纯显示用：布局最小宽已由 _ROW_MIN_PX 钉死）——
+# 不截断「选择变量…」(90px)/「（可选）选择变量…」(162px) 这类空槽提示语
+_ROW_BTN_ELIDE_PX = 170
+
 if TYPE_CHECKING:
     from PyQt5.QtWidgets import (
         QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -554,7 +562,7 @@ class StepIOWidget:
         row = QHBoxLayout()
         row.setSpacing(4)
         lbl = QLabel()
-        lbl.setMinimumWidth(40)
+        lbl.setMinimumWidth(_ROW_MIN_PX)
         self._apply_row_label(lbl, "input", i)
         row.addWidget(lbl)
         widget.input_labels.append(lbl)
@@ -562,8 +570,10 @@ class StepIOWidget:
             # 资源类：仅一个按钮（只能选择变量）
             fallback = ("（可选）选择变量…" if self._input_optional[i]
                         else "选择变量…")
-            btn = QPushButton(self._display_name(self._input_values[i])
-                              or fallback)
+            btn = QPushButton()
+            btn.setMinimumWidth(_ROW_MIN_PX)   # 长名字不许把行尾撑宽（见 _set_row_button_text）
+            self._set_row_button_text(
+                btn, self._display_name(self._input_values[i]) or fallback)
             btn.setObjectName("ioPicker")   # 供 cards.qss 的 #ioPicker 规则定位（白底+边框）
             btn.clicked.connect(lambda _=False, wd=widget, i=i: self._pick_input(wd, i))
             row.addWidget(btn, 1)
@@ -571,6 +581,7 @@ class StepIOWidget:
             return row
         # 可编辑类型：QLineEdit + 选择按钮
         edit = QLineEdit()
+        edit.setMinimumWidth(_ROW_MIN_PX)
         edit.setPlaceholderText(
             ("（可选）" if self._input_optional[i] else "") + "常量 或 {{变量名}}")
         edit.blockSignals(True)
@@ -594,11 +605,12 @@ class StepIOWidget:
         row = QHBoxLayout()
         row.setSpacing(4)
         lbl = QLabel()
-        lbl.setMinimumWidth(40)
+        lbl.setMinimumWidth(_ROW_MIN_PX)
         self._apply_row_label(lbl, "output", i)
         row.addWidget(lbl)
         widget.output_labels.append(lbl)
         edit = QLineEdit(self._output_values[i])
+        edit.setMinimumWidth(_ROW_MIN_PX)
         edit.setReadOnly(True)
         edit.setPlaceholderText("未指定")
         btn = QPushButton("…")
@@ -651,8 +663,24 @@ class StepIOWidget:
 
         shown, tooltip = self._row_label(kind, i)
         fm = QFontMetrics(lbl.font())
-        lbl.setText(fm.elidedText(shown, Qt.ElideRight, 80))
+        lbl.setText(fm.elidedText(shown, Qt.ElideRight, _ROW_ELIDE_PX))
         lbl.setToolTip(tooltip)
+
+    @staticmethod
+    def _set_row_button_text(btn: QPushButton, text: str) -> None:
+        """资源类输入按钮的文本：超宽省略（同行标签），完整文本进 tooltip。
+
+        **不能直接 setText 全名**：QPushButton 没有 minimumSizeHint 覆写，其最小宽
+        = 文本宽 → 一个长变量名/资源路径能把 io 控件最小宽撑到上千 px；卡片里的
+        滚动区（widgetResizable + 横向滚动条关）缩不回卡内 → 整个 io 区溢出卡片
+        右缘 → 行尾的 `…`（右对齐）落到卡外，点不到。
+        """
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtGui import QFontMetrics
+
+        fm = QFontMetrics(btn.font())
+        btn.setText(fm.elidedText(text, Qt.ElideRight, _ROW_BTN_ELIDE_PX))
+        btn.setToolTip(text)
 
     def _refresh_input_field(self, widget: QWidget, i: int) -> None:
         from PyQt5.QtWidgets import QLineEdit, QPushButton
@@ -666,7 +694,7 @@ class StepIOWidget:
         elif isinstance(field, QPushButton):
             fallback = ("（可选）选择变量…" if self._input_optional[i]
                         else "选择变量…")
-            field.setText(self._display_name(value) or fallback)
+            self._set_row_button_text(field, self._display_name(value) or fallback)
         if len(widget.input_labels) > i:      # 标签随值变化同步（变量名/常量值）
             self._apply_row_label(widget.input_labels[i], "input", i)
 
@@ -1307,5 +1335,27 @@ if __name__ == "__main__":
     w_oo.change_value("output", 0, "n1")
     w_oo.write_outputs([42])
     assert tree.get("n1").type == "number" and tree.get("n1").data == 42
+
+    # ---- 行尾 `…` 必须留在卡内：io 控件最小宽不随变量名长度增长 ----
+    # 真因：QPushButton 无 minimumSizeHint 覆写（最小宽 = 文本宽），资源类输入按钮
+    # 直接显示完整变量名 → 最小宽被撑到 ~990px；卡片里的滚动区（widgetResizable +
+    # 横向滚动条关）缩不回卡内 → 整个 io 区溢出卡片右缘 → 行尾右对齐的 `…` 落到
+    # 卡外点不到（「输出变量过长时 `…` 超出卡片」）。现：按钮文本同行标签省略 80px。
+    _long = "很长的图片变量名" * 8
+    tree.add(_long, ProjectVariable.create("image", "assets/1.png", pkg))
+    _w_short = StepIOWidget(["image"], ["number"], tree, pkg)
+    _cw_short = _w_short.gen_widget()
+    _w_short.change_value("input", 0, "{{img/pic}}")
+    _w_long = StepIOWidget(["image"], ["number"], tree, pkg)
+    _cw_long = _w_long.gen_widget()
+    _w_long.change_value("input", 0, "{{%s}}" % _long)      # 刷新路径也要省略
+    _min_long = _cw_long.minimumSizeHint().width()
+    assert _min_long == _cw_short.minimumSizeHint().width(), _min_long   # 与长度无关
+    # StepCard 宽度下限 180（card_size_for_screen 的 max(…,180)）- io_box 左右 20
+    # - 滚动框 2 = 158 可用；最小宽 ≤ 此值 → io 区不溢出卡片
+    assert _min_long <= 158, _min_long
+    _btn = _cw_long.input_fields[0]
+    assert _btn.text() != _long and _btn.text().endswith("…"), _btn.text()
+    assert _btn.toolTip() == _long, _btn.toolTip()          # 完整名字在 tooltip
 
     print("StepIOWidget smoke OK")
