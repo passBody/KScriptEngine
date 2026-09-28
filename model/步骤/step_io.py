@@ -318,8 +318,28 @@ class StepIOWidget:
     def resolve_inputs(self) -> List[Any]:
         """解析所有输入为实际数据（引用→``get_actual_data()``，常量→解析值）。
 
-        不合规抛 :class:`ValueError`。
+        不合规抛 :class:`ValueError`。资源类槽得**文件字节**——供匹配/计算用；
+        要往另一棵树里建变量（合成卡片把入参搬进局部作用域）用
+        :meth:`resolve_input_refs`。
         """
+        return self._resolve_inputs(as_ref=False)
+
+    def resolve_input_refs(self) -> List[Any]:
+        """解析所有输入为**可存储形式**：资源类槽得资源路径，而非文件字节。
+
+        与 :meth:`resolve_inputs` **只差资源类槽这一支**——
+        :meth:`model.变量.project_variable.ProjectVariable.create` 里资源类变量
+        存的是**资源路径**（``assets/…png``），喂它 ``read_file`` 的字节必
+        ``valid=False``；被下游 ``get_actual_data()`` 读到就抛「变量数据不合规，
+        无法获取实际数据」。故「把入参搬进另一棵树」必须走本方法。
+
+        引用 ``{{变量名}}`` 取该变量的 ``data``（资源类同为路径）；字面资源常量
+        即字段串本身。字面值类型（string/number）两支结果完全一致。
+        """
+        return self._resolve_inputs(as_ref=True)
+
+    def _resolve_inputs(self, as_ref: bool) -> List[Any]:
+        """输入解析公共体；``as_ref`` 控资源类槽取路径（True）还是文件字节（False）。"""
         if not self._validate_inputs():
             raise ValueError("输入不合规，无法解析")
         out: List[Any] = []
@@ -332,12 +352,16 @@ class StepIOWidget:
             m = _VAR_REF.match(text)
             if m:
                 var = self._tree.get(m.group(1))
+                if as_ref and self._type_is_resource(vtype):
+                    out.append(var.data)  # 资源类：路径（create 存得下的形式）
+                    continue
                 data = var.get_actual_data()
                 if vtype == "string" and var.type == "number":
                     data = str(data)          # 数字变量 → 字符串（隐式转换）
                 out.append(data)
             elif self._type_is_resource(vtype):
-                out.append(self._package.read_file(text))   # 资源常量 → 文件字节
+                out.append(text if as_ref                 # 资源常量：路径 / 文件字节
+                           else self._package.read_file(text))
             else:
                 parser = self._CONSTANT_PARSERS.get(vtype, lambda t: t)
                 out.append(parser(text))
@@ -1161,6 +1185,32 @@ if __name__ == "__main__":
     assert w21.error_reasons() == ["变量不存在: 不存在"]
     w21.change_value("input", 1, "")
     assert w21.is_valid
+
+    # ---- resolve_input_refs：资源类槽取**路径**（可存储形式），非文件字节 ----
+    # 供「把入参搬进另一棵树」用（合成卡片局部作用域）：ProjectVariable.create
+    # 对资源类存路径，喂 read_file 的字节必 valid=False → 下游 get_actual_data()
+    # 抛「变量数据不合规，无法获取实际数据」。
+    w6.change_value("input", 0, "{{img/pic}}")
+    assert w6.resolve_inputs()[0] == b"\x89PNG-demo"        # 实际数据：字节
+    assert w6.resolve_input_refs()[0] == "assets/1.png"     # 可存储：路径
+    w6.change_value("input", 0, "assets/1.png")             # 字面资源常量同理
+    assert w6.resolve_inputs()[0] == b"\x89PNG-demo"
+    assert w6.resolve_input_refs()[0] == "assets/1.png"
+    # 字面值类型（string/number）两支完全一致——无「路径 vs 字节」之分
+    w7.change_value("input", 0, "3.14")
+    assert w7.resolve_input_refs() == w7.resolve_inputs() == [3.14]
+    w5.change_value("input", 0, "{{n1}}")                   # string 槽 ← number 变量
+    assert w5.resolve_input_refs() == w5.resolve_inputs() \
+        == [str(tree.get("n1").data)]
+    # 可选槽空值 → None（两支同）；不合规同样抛错
+    w21.change_value("input", 1, "")
+    assert w21.resolve_input_refs() == [5, None]
+    assert not w4.is_valid                                  # number 槽空
+    try:
+        w4.resolve_input_refs()
+        raise AssertionError("不合规应抛错")
+    except ValueError:
+        pass
 
     # ---- 槽值变更监听 + 读取接口 ----
     # add_listener：change_value 与 GUI 编辑两路写入都通知；remove 后不通知

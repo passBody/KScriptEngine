@@ -228,7 +228,11 @@ class CompositeCard(Step):
     def input(self) -> None:
         if self.signature.is_empty():
             return                       # 参数less → no-op（base input() 也 no-op）
-        values = self.io.resolve_inputs()           # 调用点绑定值（常量/{{全局}}）
+        # **可存储形式**而非实际值：资源类入参若拿 read_file 的字节去 create，
+        # 局部变量恒 valid=False（资源类变量存路径不存字节），body 步骤绑
+        # {{该参数}} 一读就抛「变量数据不合规，无法获取实际数据」。字面值类型
+        # 两支同值，故此前只在带图入参的卡上暴露。见 StepIOWidget.resolve_input_refs。
+        values = self.io.resolve_input_refs()       # 调用点绑定值（常量/{{全局}}）
         self._local_tree = build_local_tree(self.signature, self._package)
         for p, val in zip(self.signature.inputs, values):
             self._local_tree.set(
@@ -820,6 +824,55 @@ if __name__ == "__main__":
     callG.do()
     assert callG.status is StepStatus.ERROR
     assert tree.get("n1").data == 777                   # 未被幻影默认 0 覆盖
+
+    # ---- 带资源类（image）入参：局部变量须存**路径**，非文件字节 ----
+    # 回归（2026-09-28 实测报错「变量数据不合规，无法获取实际数据」）：input() 曾用
+    # resolve_inputs()——资源槽那支返回 read_file 的**字节**，而资源类变量存**路径**，
+    # 于是 create 出的局部变量恒 valid=False；body 步骤绑 {{该参数}} 一读就抛。
+    # 字面值类型（string/number）两支恰好同值，故此前只在带图入参的卡上暴露。
+    pkg.write_file("assets/t.png", b"\x89PNG-t")
+    tree.add("gimg", ProjectVariable.create("image", "assets/t.png", pkg))
+
+    @dataclass
+    class _ImgIn:
+        图: "image" = ""  # type: ignore
+
+    @dataclass
+    class _ImgProbeOut:
+        pass
+
+    class _ImgProbe(Step):
+        name = "图探针"
+        description = "记录 image 入参解析出的字节"
+        input_class = _ImgIn
+        output_class = _ImgProbeOut
+        seen: list = []
+
+        def run(self) -> int:
+            type(self).seen.append(self.inputs.图)
+            return 1
+
+    sig_img = CompositeSignature(inputs=[Param("图", "image")])
+    iprobe = _ImgProbe.create_default(tree, pkg)
+    iprobe.io.change_value("input", 0, "{{图}}")     # body 绑卡片局部入参
+    bodyI = StepList.create_empty()
+    bodyI.add(iprobe)
+    cstoreI = CompositeCardStore.create_empty()
+    cstoreI.add_list("图卡", bodyI, signature=sig_img)
+    CompositeCard.set_resolver(lambda ref: cstoreI.get_or_none(ref))
+
+    def _call_img(bound: str) -> "CompositeCard":
+        c = CompositeCard("图卡", tree, pkg, signature=sig_img,
+                          io=StepIOWidget(["image"], [], tree, pkg))
+        c.io.change_value("input", 0, bound)
+        return c
+
+    for bound in ("{{gimg}}", "assets/t.png"):        # 引用全局图 / 字面资源常量
+        _ImgProbe.seen.clear()
+        callI = _call_img(bound)
+        assert callI.do() == 1
+        assert callI.status is StepStatus.FINISHED, (bound, callI.status)
+        assert _ImgProbe.seen == [b"\x89PNG-t"], (bound, _ImgProbe.seen)
 
     # v1 参数less 回归（空签名 → 行为同今天，marker 无 :io）
     v1c = CompositeCard("组/卡片A", tree, pkg)
