@@ -4,17 +4,28 @@
 ========================================
 
 :func:`make_composite_local_picker` 返回一个符合 ``StepIOWidget.picker`` 钩子
-签名 ``(tree, vtype, parent) -> name|None`` 的闭包：弹菜单列出签名中类型**严格**
-匹配 ``vtype`` 的输入/输出/局部参数（标「入参/出参/局部」），末项「新建局部变量…」
-→ 小对话框（名/类型/默认值）→ 调 ``on_new`` 加进签名局部段 → 返回新参数名。
+签名 ``(tree, vtype, parent) -> name|None`` 的闭包：弹**顶层对话框**列出签名中类型
+**严格**匹配 ``vtype`` 的输入/输出/局部参数（标「入参/出参/局部」），对话框内
+「新建局部变量…」按钮 → 小对话框（名/类型/默认值）→ 调 ``on_new`` 加进签名局部段
+→ 返回新参数名。
 
 返回**裸名**（如 ``x``）：输入槽由 ``StepIOWidget._pick_input`` 包成 ``{{x}}``，
 输出槽存裸名（= 局部树路径）。``tree`` 参数忽略（纯局部，不经全局树）。
+
+**为何是对话框而不是 QMenu**：卡片活在 QGraphicsView 场景（QGraphicsProxyWidget）里，
+``parent`` 是场景内控件 → 该 QMenu **不是**真正的应用级 popup（实测
+``QApplication.activePopupWidget()`` 为 None）→ 被内嵌进场景按场景 z 序渲染：透明底、
+默认黑字、易被相邻卡片遮挡/点不中。全工程其余菜单的 parent 都是普通窗口控件
+（``QMenu(self)`` 的 self 是树/视图），只有这里落在 proxy 内。同
+:meth:`StepIOWidget._default_picker` 早已记录的「带 parent 的对话框被 proxy 内嵌渲染、
+被相邻卡片遮挡」，故同样用 **parent=None 的顶层窗口**。
 """
 from typing import Callable, Optional
 
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QMenu, QWidget,
+    QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QPushButton, QVBoxLayout, QWidget,
 )
 
 from model.合成卡片.composite_signature import CompositeSignature
@@ -46,20 +57,56 @@ def make_composite_local_picker(
         on_new: Callable[[str, str, object], None]
 ) -> Callable[..., Optional[str]]:
     """返回 picker 闭包。``on_new(name, type, default)`` 由宿主实现（加局部段 + 落盘）。"""
-    def picker(_tree, vtype: str, parent: QWidget) -> Optional[str]:
-        menu = QMenu(parent)
-        for label, _name in _matching_items(signature, vtype):
-            menu.addAction(label)
-        menu.addSeparator()
-        menu.addAction("新建局部变量…")
-        pos = parent.mapToGlobal(parent.rect().center()) if parent is not None else None
-        act = menu.exec_(pos) if pos is not None else menu.exec_()
-        if act is None:
-            return None
-        if act.text() == "新建局部变量…":
-            return _new_local_dialog(vtype, on_new)
-        return act.text().split("·", 1)[-1]   # 去掉「入参·」等前缀，取裸名
+    def picker(_tree, vtype: str, _parent: QWidget) -> Optional[str]:
+        return _pick_dialog(_matching_items(signature, vtype), vtype, on_new)
     return picker
+
+
+def _pick_dialog(items, vtype: str, on_new) -> Optional[str]:
+    """选择对话框：列出 ``items``（显示文本, 裸名）+「新建局部变量…」；取消 → None。"""
+    dlg = QDialog(None)          # 顶层：见模块 docstring（带 parent 会被 proxy 内嵌）
+    dlg.setWindowTitle("选择变量（%s）" % vtype)
+    dlg.resize(300, 340)
+    lay = QVBoxLayout(dlg)
+    lst = QListWidget()
+    for label, name in items:
+        it = QListWidgetItem(label)
+        it.setData(Qt.UserRole, name)      # 叶子存裸名，显示文本带「入参·」等前缀
+        lst.addItem(it)
+    if items:
+        lst.setCurrentRow(0)
+    else:
+        lay.addWidget(QLabel("签名中没有 %s 类型的参数，可「新建局部变量」。" % vtype))
+    lay.addWidget(lst, 1)
+    new_btn = QPushButton("新建局部变量…")
+    lay.addWidget(new_btn)
+    btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    ok_btn = btns.button(QDialogButtonBox.Ok)
+    if ok_btn is not None:
+        ok_btn.setEnabled(bool(items))     # 无参数可挑 → 只能新建或取消
+    lay.addWidget(btns)
+    chosen = {"name": None}
+
+    def _ok() -> None:
+        it = lst.currentItem()
+        if it is not None:
+            chosen["name"] = it.data(Qt.UserRole)
+            dlg.accept()
+
+    def _new() -> None:
+        name = _new_local_dialog(vtype, on_new)
+        if name:                            # 建好即选中，省一步
+            chosen["name"] = name
+            dlg.accept()
+
+    lst.itemDoubleClicked.connect(lambda _it: _ok())
+    btns.accepted.connect(_ok)
+    btns.rejected.connect(dlg.reject)
+    new_btn.clicked.connect(_new)
+    from widgets.通用.ui_common import run_dialog
+    if not run_dialog(dlg):
+        return None
+    return chosen["name"]
 
 
 def _new_local_dialog(vtype: str, on_new) -> Optional[str]:
@@ -133,29 +180,81 @@ if __name__ == "__main__":
     assert _coerce("number", "abc") == 0           # 无法解析 → 0
     assert _coerce("string", "hi") == "hi"
 
-    # 3) picker 返回裸名：打桩 QMenu.exec_ 返回「入参·x」→ 去前缀得 x
+    # 3) picker：**顶层对话框**（parent=None，场景内带 parent 会被 proxy 内嵌）
+    #    只打桩事件循环（run_dialog），其余全走真控件：列表 → 「确定」→ 裸名
     created = []
     picker = make_composite_local_picker(sig, lambda n, t, d: created.append((n, t, d)))
-    import PyQt5.QtWidgets as _W
     import widgets.通用.ui_common as _uic
+    from PyQt5.QtWidgets import QDialogButtonBox, QListWidget, QLineEdit as _QLE
 
-    class _StubAct:
-        def __init__(self, text): self._t = text
-        def text(self): return self._t
-    orig_exec = _W.QMenu.exec_
     orig_run = _uic.run_dialog
+    dlg_seen = []
+
+    def _drive(mode):
+        """模拟用户操作真对话框；返回 True = 「确定」语义。"""
+        def fake(dlg):
+            dlg_seen.append(dlg)
+            if mode == "cancel":
+                return False
+            lst = dlg.findChild(QListWidget)
+            lst.setCurrentRow(0)                     # 选第 1 项
+            box = dlg.findChild(QDialogButtonBox)
+            box.button(QDialogButtonBox.Ok).click()  # 「确定」
+            return True
+        return fake
+
     try:
-        _W.QMenu.exec_ = lambda self, *a, **k: _StubAct("入参·x")
+        _uic.run_dialog = _drive("pick")
         name = picker(None, "number", None)
-        assert name == "x", name
-        # 选「新建局部变量…」→ _new_local_dialog；打桩 run_dialog 返回 False（取消）→ None
-        _W.QMenu.exec_ = lambda self, *a, **k: _StubAct("新建局部变量…")
-        _uic.run_dialog = lambda dlg: False
-        name2 = picker(None, "number", None)
-        assert name2 is None              # 取消 → None，on_new 不被调
+        assert name == "x", name          # 「入参·x」→ 去前缀得裸名
+        assert dlg_seen[-1].parent() is None, "必须是顶层对话框（否则被 proxy 内嵌）"
+        assert dlg_seen[-1].windowTitle() == "选择变量（number）"
+
+        _uic.run_dialog = _drive("cancel")
+        assert picker(None, "number", None) is None      # 取消 → None
     finally:
-        _W.QMenu.exec_ = orig_exec
         _uic.run_dialog = orig_run
-    assert created == [], created          # 取消路径未触发 on_new
+    assert created == [], created          # 只选不建 → on_new 未被调
+
+    # 4)「新建局部变量…」→ _new_local_dialog → on_new(名, 类型, 默认值) → 返回新名
+    def _drive_new(dlg):
+        """外层选择框：点「新建局部变量…」；内层小框：填名 t2 → 确定。"""
+        dlg_seen.append(dlg)
+        if dlg.windowTitle() == "新建局部变量":
+            edits = dlg.findChildren(_QLE)
+            edits[0].setText("t2")                       # 名称
+            edits[2].setText("7")                        # 默认值（number）
+            box = dlg.findChild(QDialogButtonBox)
+            box.button(QDialogButtonBox.Ok).click()
+            return True
+        for b in dlg.findChildren(QPushButton):
+            if b.text() == "新建局部变量…":
+                b.click()
+                break
+        return True
+
+    try:
+        _uic.run_dialog = _drive_new
+        name3 = picker(None, "number", None)
+    finally:
+        _uic.run_dialog = orig_run
+    assert name3 == "t2", name3
+    assert created == [("t2", "number", 7)], created     # on_new 收到名/类型/默认值
+
+    # 5) 无匹配参数：仍可打开（列表空 + 「确定」禁用），只留「新建」出路
+    empty_picker = make_composite_local_picker(sig, lambda n, t, d: None)
+
+    def _drive_empty(dlg):
+        dlg_seen.append(dlg)
+        lst = dlg.findChild(QListWidget)
+        box = dlg.findChild(QDialogButtonBox)
+        assert lst.count() == 0
+        assert not box.button(QDialogButtonBox.Ok).isEnabled()
+        return False                                       # 取消
+    try:
+        _uic.run_dialog = _drive_empty
+        assert empty_picker(None, "image", None) is None    # 签名里没有 image 参数
+    finally:
+        _uic.run_dialog = orig_run
 
     print("CompositeLocalPicker smoke OK")
