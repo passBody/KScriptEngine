@@ -11,11 +11,11 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from PyQt5.QtCore import QEvent, QEventLoop, QObject, QPoint, QRect, Qt, pyqtSignal
 from PyQt5.QtGui import (
-    QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygon,
+    QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygon, QWindow,
 )
 from PyQt5.QtWidgets import (
     QApplication, QDialog, QFrame, QLabel, QVBoxLayout, QWidget,
@@ -88,6 +88,9 @@ def window_size() -> Tuple[int, int]:
 
 
 # ---- 弹窗：非模态运行 + 点窗口以外关闭（设置窗口/卡片选择变量窗口共用） ----
+_active_closers: List["_ClickOutsideCloser"] = []   # 栈：末尾 = 最内层弹窗
+
+
 class _ClickOutsideCloser(QObject):
     """点弹窗以外 → 等价 ESC（``reject``），并吞掉那次按下。
 
@@ -104,14 +107,36 @@ class _ClickOutsideCloser(QObject):
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt 命名)
         if event.type() != QEvent.MouseButtonPress:
             return False
-        top = obj.window() if isinstance(obj, QWidget) else None
-        # 弹窗自身、其弹出子窗（QComboBox 下拉等 windowType 为 Popup/ToolTip）→ 放行。
-        # 不能写 ``windowFlags() & Qt.Popup``：Popup 自带 Window 位，任意窗口都非零。
-        if top is self._dlg or (top is not None
-                               and top.windowType() in (Qt.Popup, Qt.ToolTip)):
+        # 嵌套 run_dialog（如「选择变量」里再开「新建局部变量」）：只最内层响应。
+        # 否则点内层弹窗的那一下会被外层当成「点外面」→ 外层一起被关掉。
+        if _active_closers and _active_closers[-1] is not self:
+            return False
+        if self._is_inside(obj):
             return False
         self._dlg.reject()
         return True                    # 吞：不让下层控件收到这次点击（防误触）
+
+    def _is_inside(self, obj) -> bool:
+        """这次按下是否落在本弹窗内（含其弹出子窗）。
+
+        **两层都要认**：一次原生点击先以 ``receiver=QWindow``（窗口层）派发一遍，
+        随后才以 ``receiver=控件``（控件层）再派发——只认 QWidget 会把窗口层那次
+        当成「点外面」，于是**弹窗被自己内部的一次点击 reject 掉、且该次点击被吞**
+        （按钮收不到 ``clicked``，表现为「选完值没反应」）。实测 receiver 序列：
+        ``[QWindow, QPushButton]``。
+
+        不能写 ``windowFlags() & Qt.Popup``：Popup 自带 Window 位，任意窗口都非零。
+        """
+        if isinstance(obj, QWidget):
+            top = obj.window()
+            wtype = top.windowType()
+        elif isinstance(obj, QWindow):
+            top = obj                   # 窗口层：receiver 就是窗口本身
+            wtype = top.type()          # QWindow 无 windowType()，取 type()
+        else:
+            return False
+        return (top is self._dlg or top is self._dlg.windowHandle()
+                or wtype in (Qt.Popup, Qt.ToolTip))
 
 
 def run_dialog(dlg: QDialog) -> bool:
@@ -123,8 +148,8 @@ def run_dialog(dlg: QDialog) -> bool:
     收不到）→「点窗口以外关闭」无从实现。非模态下事件照常派发，过滤器既看得到、
     也吞得掉（外部那次点击不会误触下层控件）。
 
-    非模态的另一效果：弹窗开着时主窗口仍「可交互」，但任何点击都会先关掉弹窗
-    并被他吞——等价于模态的观感。窗口级快捷键（``Qt.WindowShortcut``）仍只随
+    非模态的另一效果：弹窗开着时主窗口仍「可交互」，但**弹窗以外**的任何点击都会
+    先关掉弹窗并被吞——等价于模态的观感。窗口级快捷键（``Qt.WindowShortcut``）仍只随
     各自窗口激活而触发，弹窗为活动窗口期间主窗口快捷键不会误触发。
     """
     app = QApplication.instance()
@@ -132,6 +157,7 @@ def run_dialog(dlg: QDialog) -> bool:
     loop = QEventLoop()
     dlg.finished.connect(loop.quit)
     app.installEventFilter(closer)
+    _active_closers.append(closer)          # 入栈：本弹窗期间由它响应（见 eventFilter）
     try:
         dlg.show()
         dlg.raise_()
@@ -139,6 +165,8 @@ def run_dialog(dlg: QDialog) -> bool:
         loop.exec_()
     finally:
         app.removeEventFilter(closer)
+        if _active_closers and _active_closers[-1] is closer:
+            _active_closers.pop()
     return dlg.result() == QDialog.Accepted
 
 
@@ -371,14 +399,24 @@ if __name__ == "__main__":
         """兜底：万一事件没按预期到达，别把冒烟挂死。"""
         QTimer.singleShot(ms, dlg.reject)
 
+    def _native_click(win: QWidget, target: QWidget, pt: QPoint) -> None:
+        """**真·原生点击**：经窗口层派发，与真人鼠标同一条路。
+
+        必须这样点——``QTest.mouseClick(QWidget, …)`` 只发控件层事件，测不出
+        「窗口层那次被误判成点弹窗以外」（实测一次原生点击的 receiver 序列是
+        ``[QWindow, QPushButton]``：窗口层先到，控件层后到）。
+        """
+        QTest.qWaitForWindowExposed(win)
+        QTest.mouseClick(win.windowHandle(), Qt.LeftButton, Qt.NoModifier,
+                         target.mapTo(win, pt))
+
     # 1) 点弹窗以外 → 关闭（reject=取消）+ 该次点击被吞（下层按钮不响应）
     dlg1 = QDialog(None)
     dlg1.setWindowTitle("t1")
     dlg1.resize(180, 120)
     dlg1.move(400, 120)
     _fallback(dlg1)
-    QTimer.singleShot(60, lambda: QTest.mouseClick(
-        btn, Qt.LeftButton, pos=QPoint(5, 5)))
+    QTimer.singleShot(60, lambda: _native_click(host, btn, QPoint(5, 5)))
     assert run_dialog(dlg1) is False          # 未「确定」→ 取消语义（同 ESC）
     assert hit == [], hit                     # 外部点击被吞，未误触下层按钮
     assert not dlg1.isVisible()
@@ -386,23 +424,28 @@ if __name__ == "__main__":
     QTest.mouseClick(btn, Qt.LeftButton, pos=QPoint(5, 5))
     assert hit == [1], hit
 
-    # 2) 弹窗内部点击 → 不关闭（子控件照常收到）
+    # 2) 弹窗**内部**点击 → 不关闭、控件照常收到（回归：曾把窗口层那次当「点外面」，
+    #    于是弹窗被自己内部的一次点击 reject 掉、点击被吞 → 按钮收不到 clicked，
+    #    表现为「在卡片里点 … 选变量，选完没反应/填不进去」）
     dlg2 = QDialog(None)
     dlg2.setWindowTitle("t2")
     dlg2.resize(180, 120)
     dlg2.move(400, 120)
     edit = QLineEdit(dlg2)
     edit.move(10, 10)
+    ok2 = QPushButton("确定", dlg2)
+    ok2.move(10, 50)
+    ok2.clicked.connect(dlg2.accept)
     _fallback(dlg2)
     still_open = []
 
     def _click_inside():
-        QTest.mouseClick(edit, Qt.LeftButton, pos=QPoint(5, 5))
-        still_open.append(dlg2.isVisible())    # 内部点击后应仍开着
+        QTest.mouseClick(edit, Qt.LeftButton, pos=QPoint(5, 5))   # 点输入框即不该关
+        still_open.append(dlg2.isVisible())
+        _native_click(dlg2, ok2, QPoint(5, 5))                   # 点「确定」→ 应生效
 
     QTimer.singleShot(60, _click_inside)
-    QTimer.singleShot(200, dlg2.accept)
-    assert run_dialog(dlg2) is True            # 没被外部关闭 → 走到 accept
+    assert run_dialog(dlg2) is True            # 内部点击生效 → 走到 accept
     assert still_open == [True], still_open
 
     # 3) run_dialog 透传 accept/reject 结果
@@ -412,6 +455,53 @@ if __name__ == "__main__":
     dlg4 = QDialog(None)
     QTimer.singleShot(20, dlg4.reject)
     assert run_dialog(dlg4) is False
+
+    # 4) 嵌套 run_dialog（「选择变量」里再开「新建局部变量」）：内层开着时只有内层
+    #    响应——否则点内层弹窗那一下会被外层当成「点外面」，外层跟着一起被关掉
+    dlg5 = QDialog(None)
+    dlg5.setWindowTitle("外层")
+    dlg5.resize(200, 120)
+    dlg5.move(400, 120)
+    _fallback(dlg5)
+    inner_got = []
+
+    def _open_inner():
+        dlg6 = QDialog(None)
+        dlg6.setWindowTitle("内层")
+        dlg6.resize(200, 120)
+        ok6 = QPushButton("内确定", dlg6)
+        ok6.move(10, 10)
+        ok6.clicked.connect(dlg6.accept)
+        QTimer.singleShot(60, lambda: _native_click(dlg6, ok6, QPoint(5, 5)))
+        _fallback(dlg6)
+        inner_got.append(run_dialog(dlg6))
+        assert dlg5.isVisible(), "内层操作把外层一起关了（_active_closers 栈没生效）"
+        dlg5.accept()
+
+    QTimer.singleShot(60, _open_inner)
+    assert run_dialog(dlg5) is True
+    assert inner_got == [True], inner_got     # 内层自己的点击生效
+    assert not _active_closers, _active_closers   # 栈已清空（不留残余）
+
+    # 5) 弹出子窗（QComboBox 下拉等 Qt.Popup）不算「点外面」——两层都要放行
+    #    （QWindow 用 type()：它是 flags 与 WindowType_Mask 的结果，可直接比 Popup；
+    #     写 windowFlags() & Qt.Popup 则任意窗口都非零——Popup 自带 Window 位）
+    dlg7 = QDialog(None)
+    closer7 = _ClickOutsideCloser(dlg7)
+    pop = QWidget(None, Qt.Popup)
+    other = QWidget(None, Qt.Window)
+    pop.show()
+    other.show()
+    QTest.qWaitForWindowExposed(pop)
+    QTest.qWaitForWindowExposed(other)
+    assert closer7._is_inside(dlg7) is True
+    assert closer7._is_inside(pop.windowHandle()) is True, "窗口层：弹出子窗被当外面"
+    assert closer7._is_inside(pop) is True, "控件层：弹出子窗被当外面"
+    assert closer7._is_inside(other.windowHandle()) is False, "窗口层：别的窗口应算外面"
+    assert closer7._is_inside(other) is False, "控件层：别的窗口应算外面"
+    pop.close()
+    other.close()
+    dlg7.close()
     host.close()
 
     print("ui_common smoke OK")
